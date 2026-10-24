@@ -58,7 +58,7 @@ func New(title string) (*Job, error) {
 		return nil, ErrTitleTooLong
 	}
 
-	now := time.Now().UTC()
+	now := time.Now().UTC().Truncate(time.Microsecond)
 	return &Job{
 		ID:        newID(),
 		Title:     title,
