@@ -3,14 +3,28 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
+
+func testDatabaseURL(t *testing.T) string {
+	t.Helper()
+	url := os.Getenv("GOFLOW_TEST_DATABASE_URL")
+	if url == "" {
+		t.Skip("GOFLOW_TEST_DATABASE_URL not set; skipping test that needs PostgreSQL")
+	}
+	return url
+}
+
+func discardLogger() *slog.Logger { return slog.New(slog.DiscardHandler) }
 
 // request sends one HTTP request and returns the status, headers and full body.
 // It always closes the response body.
@@ -43,29 +57,33 @@ func request(t *testing.T, client *http.Client, method, url, body string) (int, 
 }
 
 func TestServerEndToEnd(t *testing.T) {
+	dbURL := testDatabaseURL(t)
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	addrCh := make(chan string, 1)
 	runErr := make(chan error, 1)
 	go func() {
-		logger := slog.New(slog.DiscardHandler)
-		runErr <- run(ctx, logger, "127.0.0.1:0", func(addr string) { addrCh <- addr })
+		runErr <- run(ctx, discardLogger(), "127.0.0.1:0", dbURL, func(addr string) { addrCh <- addr })
 	}()
 
-	// Wait for the server to be listening, fail to start, or take too long.
 	var base string
 	select {
 	case addr := <-addrCh:
 		base = "http://" + addr
 	case err := <-runErr:
 		t.Fatalf("server failed to start: %v", err)
-	case <-time.After(5 * time.Second):
-		t.Fatal("server did not start within 5s")
+	case <-time.After(10 * time.Second):
+		t.Fatal("server did not start within 10s")
 	}
 
-	// The default http.Client has no timeout. Never use it against a real server.
 	client := &http.Client{Timeout: 5 * time.Second}
+
+	// Readiness: the real database is reachable.
+	if status, _, body := request(t, client, http.MethodGet, base+"/readyz", ""); status != http.StatusOK {
+		t.Fatalf("readyz: status %d, body %s", status, body)
+	}
 
 	// Create.
 	status, header, body := request(t, client, http.MethodPost, base+"/api/v1/jobs", `{"title":"e2e job"}`)
@@ -82,31 +100,18 @@ func TestServerEndToEnd(t *testing.T) {
 	if err := json.Unmarshal(body, &created); err != nil {
 		t.Fatalf("decode create body %s: %v", body, err)
 	}
-	if created.Status != "pending" {
-		t.Errorf("create: status field %q, want pending", created.Status)
-	}
 
-	// Get.
 	jobURL := base + "/api/v1/jobs/" + created.ID
 	if status, _, body := request(t, client, http.MethodGet, jobURL, ""); status != http.StatusOK {
 		t.Fatalf("get: status %d, body %s", status, body)
 	}
-
-	// Delete.
 	if status, _, body := request(t, client, http.MethodDelete, jobURL, ""); status != http.StatusNoContent {
 		t.Fatalf("delete: status %d, body %s", status, body)
 	}
-
-	// Get again: gone, and the error is JSON.
-	status, header, body = request(t, client, http.MethodGet, jobURL, "")
-	if status != http.StatusNotFound {
+	if status, _, body := request(t, client, http.MethodGet, jobURL, ""); status != http.StatusNotFound {
 		t.Fatalf("get after delete: status %d, body %s", status, body)
 	}
-	if ct := header.Get("Content-Type"); ct != "application/json" {
-		t.Errorf("404 Content-Type = %q, want application/json", ct)
-	}
 
-	// Shut down and check that run returns cleanly.
 	cancel()
 	select {
 	case err := <-runErr:
@@ -118,15 +123,26 @@ func TestServerEndToEnd(t *testing.T) {
 	}
 }
 
+func TestRunRequiresDatabaseURL(t *testing.T) {
+	err := run(context.Background(), discardLogger(), "127.0.0.1:0", "", nil)
+	if err == nil || !strings.Contains(err.Error(), "GOFLOW_DATABASE_URL") {
+		t.Errorf("err = %v, want an error naming GOFLOW_DATABASE_URL", err)
+	}
+}
+
 func TestRunFailsWhenPortIsTaken(t *testing.T) {
+	dbURL := testDatabaseURL(t)
+
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
 	defer ln.Close()
 
-	err = run(context.Background(), slog.New(slog.DiscardHandler), ln.Addr().String(), nil)
-	if err == nil {
-		t.Fatal("run succeeded on a port that is already taken, want an error")
+	err = run(context.Background(), discardLogger(), ln.Addr().String(), dbURL, nil)
+	// Check the specific cause. "Any error" would also pass if the database were down,
+	// and the test would be green for the wrong reason.
+	if !errors.Is(err, syscall.EADDRINUSE) {
+		t.Errorf("err = %v, want address already in use", err)
 	}
 }

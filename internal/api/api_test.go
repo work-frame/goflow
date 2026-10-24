@@ -11,8 +11,12 @@ import (
 	"github.com/work-frame/goflow/internal/job"
 )
 
+func newTestStore() *job.MemoryStore { return job.NewMemoryStore() }
+
+func discardLogger() *slog.Logger { return slog.New(slog.DiscardHandler) }
+
 func newRouter() http.Handler {
-	return NewRouter(job.NewMemoryStore(), slog.New(slog.DiscardHandler))
+	return NewRouter(newTestStore(), okPinger, discardLogger())
 }
 
 // do sends a request to h and returns the recorded response.

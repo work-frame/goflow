@@ -1,23 +1,32 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/work-frame/goflow/internal/job"
 )
+
+// Pinger reports whether a dependency is reachable. *sql.DB satisfies it.
+// Defined here, where it is used, so tests can pass a fake without a real database.
+type Pinger interface {
+	PingContext(ctx context.Context) error
+}
 
 // NewRouter returns the HTTP handler for the whole API, wrapped in middleware.
 //
 // Request flow, outermost first:
 // withRequestID → logRequests → recoverPanics → jsonMuxErrors → mux → handler
-func NewRouter(store *job.MemoryStore, logger *slog.Logger) http.Handler {
-	h := &handler{store: store, logger: logger}
+func NewRouter(store *job.MemoryStore, db Pinger, logger *slog.Logger) http.Handler {
+	h := &handler{store: store, db: db, logger: logger}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", handleHealth)
+	mux.HandleFunc("GET /readyz", h.ready)
 	mux.HandleFunc("POST /api/v1/jobs", h.createJob)
 	mux.HandleFunc("GET /api/v1/jobs", h.listJobs)
 	mux.HandleFunc("GET /api/v1/jobs/{id}", h.getJob)
@@ -31,9 +40,10 @@ func NewRouter(store *job.MemoryStore, logger *slog.Logger) http.Handler {
 	return handler
 }
 
-// handler holds what the job endpoints depend on.
+// handler holds what the endpoints depend on.
 type handler struct {
 	store  *job.MemoryStore
+	db     Pinger
 	logger *slog.Logger
 }
 
@@ -43,8 +53,24 @@ func (h *handler) internalError(w http.ResponseWriter, r *http.Request, err erro
 	writeError(w, http.StatusInternalServerError, "internal error")
 }
 
+// handleHealth is the liveness check: the process is up and serving HTTP.
+// It checks no dependencies, so a database outage never makes it fail.
 func handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// ready is the readiness check: can this instance serve real traffic right now?
+func (h *handler) ready(w http.ResponseWriter, r *http.Request) {
+	// Derived from the request context: if the client gives up, the ping is cancelled too.
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+
+	if err := h.db.PingContext(ctx); err != nil {
+		h.logger.Warn("readiness check failed", "request_id", RequestID(r.Context()), "err", err)
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "not ready"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
 }
 
 type createJobRequest struct {
