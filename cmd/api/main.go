@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/work-frame/goflow/internal/api"
+	"github.com/work-frame/goflow/internal/database"
 	"github.com/work-frame/goflow/internal/job"
 )
 
@@ -23,10 +24,11 @@ func main() {
 	if addr == "" {
 		addr = ":8080"
 	}
+	dbURL := os.Getenv("GOFLOW_DATABASE_URL")
 
 	// ctx is cancelled on Ctrl+C (SIGINT) or SIGTERM.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	err := run(ctx, logger, addr, nil)
+	err := run(ctx, logger, addr, dbURL, nil)
 	stop() // called directly, not deferred: os.Exit below would skip a defer
 
 	if err != nil {
@@ -35,20 +37,34 @@ func main() {
 	}
 }
 
-// run serves the API on addr until ctx is cancelled, then shuts down gracefully.
-// If ready is not nil, it is called with the bound address once the server is listening.
-func run(ctx context.Context, logger *slog.Logger, addr string, ready func(addr string)) error {
-	// Bind first, so "listening" is only logged once it's true.
+// run connects to the database, serves the API on addr until ctx is cancelled,
+// then shuts down gracefully. If ready is not nil, it is called with the bound
+// address once the server is listening.
+func run(ctx context.Context, logger *slog.Logger, addr, dbURL string, ready func(addr string)) error {
+	if dbURL == "" {
+		return errors.New("GOFLOW_DATABASE_URL is required")
+	}
+
+	// Connect before opening the port: an instance that can't reach its database
+	// should never start accepting traffic.
+	db, err := database.Open(ctx, dbURL)
+	if err != nil {
+		return err
+	}
+	// Deferred, so it runs after Shutdown below: stop HTTP first, then close the pool.
+	defer db.Close()
+	logger.Info("database connected")
+
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return err
 	}
 
-	// In-memory only for Phase 2: jobs are lost on restart. Postgres arrives in Phase 3.
+	// Jobs are still in memory in Task 10. The jobs table arrives in Task 11.
 	store := job.NewMemoryStore()
 
 	srv := &http.Server{
-		Handler:           api.NewRouter(store, logger),
+		Handler:           api.NewRouter(store, db, logger),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      10 * time.Second,
@@ -56,7 +72,6 @@ func run(ctx context.Context, logger *slog.Logger, addr string, ready func(addr 
 		ErrorLog:          slog.NewLogLogger(logger.Handler(), slog.LevelError),
 	}
 
-	// Buffered so the goroutine can always send and exit, even if nobody is reading.
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- srv.Serve(ln)
@@ -75,15 +90,12 @@ func run(ctx context.Context, logger *slog.Logger, addr string, ready func(addr 
 		logger.Info("shutdown signal received")
 	}
 
-	// Stop accepting new connections and wait up to 10s for in-flight requests.
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		return fmt.Errorf("shutdown: %w", err)
 	}
-
-	// After Shutdown, Serve returns http.ErrServerClosed.
 	if err := <-errCh; !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
