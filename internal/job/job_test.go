@@ -85,3 +85,14 @@ func TestStatusValid(t *testing.T) {
 		}
 	}
 }
+
+func TestNewTruncatesToMicroseconds(t *testing.T) {
+	j, err := New("x")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	// PostgreSQL stores microseconds. Anything finer would be lost on a round trip.
+	if ns := j.CreatedAt.Nanosecond() % 1000; ns != 0 {
+		t.Errorf("CreatedAt has %d leftover nanoseconds, want 0", ns)
+	}
+}
