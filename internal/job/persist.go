@@ -17,6 +17,9 @@ func Load(path string) (*MemoryStore, error) {
 	s := NewMemoryStore()
 
 	data, err := os.ReadFile(path)
+		if errors.Is(err, fs.ErrNotExist) {
+		return s, nil
+	}
 	if err != nil {
 		return nil, fmt.Errorf("job: read %s: %w", path, err)
 	}
