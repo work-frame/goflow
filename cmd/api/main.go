@@ -53,7 +53,15 @@ func run(ctx context.Context, logger *slog.Logger, addr, dbURL string, ready fun
 	}
 	// Deferred, so it runs after Shutdown below: stop HTTP first, then close the pool.
 	defer db.Close()
-	logger.Info("database connected")
+	applied, err := database.Migrate(ctx, db)
+	if err != nil {
+		return err
+	}
+	if len(applied) > 0 {
+		logger.Info("migrations applied", "versions", applied)
+	} else {
+		logger.Info("database schema up to date")
+	}
 
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
