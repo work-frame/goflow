@@ -44,7 +44,7 @@ func run(logger *slog.Logger) error {
 	store := job.NewMemoryStore()
 
 	srv := &http.Server{
-		Handler:           api.NewRouter(store),
+		Handler:           api.NewRouter(store, logger),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      10 * time.Second,

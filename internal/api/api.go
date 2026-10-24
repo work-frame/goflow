@@ -3,14 +3,18 @@ package api
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 
 	"github.com/work-frame/goflow/internal/job"
 )
 
-// NewRouter returns the HTTP handler for the whole API.
-func NewRouter(store *job.MemoryStore) http.Handler {
-	h := &handler{store: store}
+// NewRouter returns the HTTP handler for the whole API, wrapped in middleware.
+//
+// Request flow, outermost first:
+// withRequestID → logRequests → recoverPanics → jsonMuxErrors → mux → handler
+func NewRouter(store *job.MemoryStore, logger *slog.Logger) http.Handler {
+	h := &handler{store: store, logger: logger}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", handleHealth)
@@ -18,12 +22,25 @@ func NewRouter(store *job.MemoryStore) http.Handler {
 	mux.HandleFunc("GET /api/v1/jobs", h.listJobs)
 	mux.HandleFunc("GET /api/v1/jobs/{id}", h.getJob)
 	mux.HandleFunc("DELETE /api/v1/jobs/{id}", h.deleteJob)
-	return mux
+
+	var handler http.Handler = mux
+	handler = jsonMuxErrors(handler)
+	handler = recoverPanics(logger, handler)
+	handler = logRequests(logger, handler)
+	handler = withRequestID(handler)
+	return handler
 }
 
 // handler holds what the job endpoints depend on.
 type handler struct {
-	store *job.MemoryStore
+	store  *job.MemoryStore
+	logger *slog.Logger
+}
+
+// internalError logs the real cause server-side and sends the client a generic 500.
+func (h *handler) internalError(w http.ResponseWriter, r *http.Request, err error) {
+	h.logger.Error("internal error", "request_id", RequestID(r.Context()), "err", err)
+	writeError(w, http.StatusInternalServerError, "internal error")
 }
 
 func handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -51,12 +68,12 @@ func (h *handler) createJob(w http.ResponseWriter, r *http.Request) {
 			fmt.Sprintf("title must be at most %d characters", job.MaxTitleLength))
 		return
 	case err != nil:
-		writeError(w, http.StatusInternalServerError, "internal error")
+		h.internalError(w, r, err)
 		return
 	}
 
 	if err := h.store.Add(j); err != nil {
-		writeError(w, http.StatusInternalServerError, "internal error")
+		h.internalError(w, r, err)
 		return
 	}
 
@@ -92,7 +109,7 @@ func (h *handler) getJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal error")
+		h.internalError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, j)
@@ -105,7 +122,7 @@ func (h *handler) deleteJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal error")
+		h.internalError(w, r, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

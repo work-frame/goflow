@@ -22,7 +22,7 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	// The status is already sent, so an encode error can't change the response.
-	// It usually means the client disconnected. Task 8 adds logging for it.
+	// It almost always means the client disconnected, so it is not logged.
 	_ = json.NewEncoder(w).Encode(v)
 }
 
