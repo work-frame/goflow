@@ -6,9 +6,9 @@ I'm building it to learn production Go: the standard library first, then HTTP, P
 
 ## Status
 
-**Phase 1 (complete):** a command-line tool that creates, lists, gets and deletes jobs, stored in a local JSON file.
-
-Next up is Phase 2, which adds an HTTP API using `net/http`.
+- **Phase 1 (done):** command-line tool backed by a local JSON file
+- **Phase 2 (done):** HTTP API with request IDs, structured logs, panic recovery and graceful shutdown. Jobs are kept in memory and lost on restart.
+- **Phase 3 (next):** PostgreSQL storage
 
 ## Requirements
 
@@ -19,16 +19,71 @@ Next up is Phase 2, which adds an HTTP API using `net/http`.
 ```bash
 git clone git@github.com:work-frame/goflow.git
 cd goflow
-go build -o goflow ./cmd/goflow
+go build -o bin/goflow ./cmd/goflow   # CLI
+go build -o bin/api ./cmd/api         # HTTP API
 ```
 
-To install it on your `PATH` instead:
+## HTTP API
+
+### Run
 
 ```bash
-go install ./cmd/goflow
+./bin/api
 ```
 
-## Usage
+| Variable | Default | Meaning |
+|---|---|---|
+| `GOFLOW_ADDR` | `:8080` | Address to listen on. Use `:0` for any free port. |
+
+The server stops on `Ctrl+C` or `SIGTERM`, finishing in-flight requests first (up to 10 seconds).
+
+### Endpoints
+
+| Method | Path | Success | Errors |
+|---|---|---|---|
+| `GET` | `/healthz` | `200 {"status":"ok"}` | |
+| `POST` | `/api/v1/jobs` | `201` + job, `Location` header | `400`, `413`, `415` |
+| `GET` | `/api/v1/jobs` | `200 {"jobs":[...]}` | `400` invalid `status` filter |
+| `GET` | `/api/v1/jobs/{id}` | `200` + job | `404` |
+| `DELETE` | `/api/v1/jobs/{id}` | `204`, no body | `404` |
+
+`GET /api/v1/jobs` accepts an optional `?status=` filter: `pending`, `queued`, `processing`, `completed` or `failed`.
+
+### Examples
+
+```bash
+curl -s -X POST http://localhost:8080/api/v1/jobs \
+  -H 'Content-Type: application/json' \
+  -d '{"title":"send welcome email"}'
+
+curl -s http://localhost:8080/api/v1/jobs
+curl -s "http://localhost:8080/api/v1/jobs?status=pending"
+curl -s http://localhost:8080/api/v1/jobs/<id>
+curl -s -X DELETE http://localhost:8080/api/v1/jobs/<id>
+```
+
+### Request rules
+
+- `POST` bodies must be sent with `Content-Type: application/json`.
+- The body must be a single JSON object, at most 1 MiB.
+- Unknown fields are rejected, not ignored.
+- `title` is required, at most 200 characters.
+
+### Errors
+
+Every error response is JSON:
+
+```json
+{"error": "job not found"}
+```
+
+Unexpected server errors return `500 {"error":"internal error"}`. The details are logged server-side, never sent to the client.
+
+### Request IDs
+
+Every response carries an `X-Request-ID` header, and the same ID appears in the server log line for that request. Send your own `X-Request-ID` (letters, digits, `-`, `_`, up to 64 characters) to trace a request through the logs. Anything else is replaced with a generated ID.
+
+## CLI
 
 ```bash
 goflow job create send welcome email     # prints the new job's ID
@@ -38,57 +93,35 @@ goflow job get <id>                      # one job as JSON
 goflow job delete <id>                   # remove a job
 ```
 
-`create` prints only the ID, so you can capture it in a script:
+Jobs are saved to `~/.goflow/jobs.json`. Set `GOFLOW_DATA_FILE` to use a different file. Exit codes: `0` success, `1` failure, `2` incorrect usage.
 
-```bash
-id=$(goflow job create generate monthly report)
-goflow job get "$id"
-```
-
-### Exit codes
-
-| Code | Meaning |
-|---|---|
-| 0 | Success |
-| 1 | The command failed (for example, job not found) |
-| 2 | The command was called incorrectly |
-
-### Where jobs are stored
-
-Jobs are saved to `~/.goflow/jobs.json`. To use a different file, set `GOFLOW_DATA_FILE`:
-
-```bash
-GOFLOW_DATA_FILE=/tmp/test-jobs.json goflow job list
-```
-
-Writes go to a temporary file first and are then renamed into place, so a crash never leaves a half-written file.
+The CLI and the API don't share data yet. That arrives with PostgreSQL in Phase 3.
 
 ## Development
 
 Run every check before committing:
 
 ```bash
-test -z "$(gofmt -l .)" && go vet ./... && go test -count=1 ./...
+./scripts/check.sh
 ```
 
-Run the tests with the race detector:
-
-```bash
-go test -race ./...
-```
+It runs `gofmt`, `go vet` and `go test -race`, and stops at the first failure.
 
 ## Project layout
 
 ```text
-cmd/goflow/      entry point; reads the environment and calls internal/cli
-internal/cli/    command parsing and output; testable without a real terminal
-internal/job/    Job type, validation, in-memory store, JSON persistence
+cmd/goflow/      CLI entry point
+cmd/api/         HTTP server: startup, timeouts, graceful shutdown
+internal/api/    routes, handlers, middleware, JSON helpers
+internal/cli/    CLI command parsing and output
+internal/job/    Job type, validation, concurrent-safe store, JSON persistence
+scripts/         development scripts
 ```
 
 ## Roadmap
 
 1. CLI and Go fundamentals (done)
-2. HTTP API
+2. HTTP API (done)
 3. PostgreSQL
 4. Authentication
 5. Redis job queue
