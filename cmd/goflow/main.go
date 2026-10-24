@@ -1,23 +1,31 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
-	"log"
+	"os"
+	"path/filepath"
 
-	"github.com/work-frame/goflow/internal/job"
+	"github.com/work-frame/goflow/internal/cli"
 )
 
 func main() {
-	j, err := job.New("send welcome email")
+	path, err := dataPath()
 	if err != nil {
-		log.Fatal(err)
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
 	}
+	os.Exit(cli.Run(os.Args[1:], path, os.Stdout, os.Stderr))
+}
 
-	out, err := json.MarshalIndent(j, "", "  ")
+// dataPath returns where jobs are stored.
+// GOFLOW_DATA_FILE overrides the default of ~/.goflow/jobs.json.
+func dataPath() (string, error) {
+	if p := os.Getenv("GOFLOW_DATA_FILE"); p != "" {
+		return p, nil
+	}
+	home, err := os.UserHomeDir()
 	if err != nil {
-		log.Fatal(err)
+		return "", fmt.Errorf("find home directory: %w", err)
 	}
-
-	fmt.Println(string(out))
+	return filepath.Join(home, ".goflow", "jobs.json"), nil
 }
