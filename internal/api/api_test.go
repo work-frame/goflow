@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -11,7 +12,7 @@ import (
 )
 
 func newRouter() http.Handler {
-	return NewRouter(job.NewMemoryStore())
+	return NewRouter(job.NewMemoryStore(), slog.New(slog.DiscardHandler))
 }
 
 // do sends a request to h and returns the recorded response.
