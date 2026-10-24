@@ -19,22 +19,26 @@ import (
 func main() {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 
-	if err := run(logger); err != nil {
-		logger.Error("server stopped with error", "err", err)
-		os.Exit(1)
-	}
-}
-
-// run starts the server and blocks until it stops.
-// It returns an error instead of calling os.Exit, so deferred cleanup always runs.
-func run(logger *slog.Logger) error {
 	addr := os.Getenv("GOFLOW_ADDR")
 	if addr == "" {
 		addr = ":8080"
 	}
 
-	// Bind the port first, so "listening" is only logged once it's true.
-	// The error already names the address, so it isn't wrapped again.
+	// ctx is cancelled on Ctrl+C (SIGINT) or SIGTERM.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	err := run(ctx, logger, addr, nil)
+	stop() // called directly, not deferred: os.Exit below would skip a defer
+
+	if err != nil {
+		logger.Error("server stopped with error", "err", err)
+		os.Exit(1)
+	}
+}
+
+// run serves the API on addr until ctx is cancelled, then shuts down gracefully.
+// If ready is not nil, it is called with the bound address once the server is listening.
+func run(ctx context.Context, logger *slog.Logger, addr string, ready func(addr string)) error {
+	// Bind first, so "listening" is only logged once it's true.
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return err
@@ -52,15 +56,17 @@ func run(logger *slog.Logger) error {
 		ErrorLog:          slog.NewLogLogger(logger.Handler(), slog.LevelError),
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-
 	// Buffered so the goroutine can always send and exit, even if nobody is reading.
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- srv.Serve(ln)
 	}()
-	logger.Info("listening", "addr", ln.Addr().String())
+
+	boundAddr := ln.Addr().String()
+	logger.Info("listening", "addr", boundAddr)
+	if ready != nil {
+		ready(boundAddr)
+	}
 
 	select {
 	case err := <-errCh:
