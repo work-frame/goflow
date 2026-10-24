@@ -1,0 +1,13 @@
+# binaries
+/goflow
+/bin/
+*.exe
+
+# local data and secrets
+*.json.local
+.env
+.env.*
+
+# editor
+.vscode/
+.idea/
