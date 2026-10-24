@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/work-frame/goflow/internal/api"
+	"github.com/work-frame/goflow/internal/job"
 )
 
 func main() {
@@ -31,9 +33,18 @@ func run(logger *slog.Logger) error {
 		addr = ":8080"
 	}
 
+	// Bind the port first, so "listening" is only logged once it's true.
+	// The error already names the address, so it isn't wrapped again.
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return err
+	}
+
+	// In-memory only for Phase 2: jobs are lost on restart. Postgres arrives in Phase 3.
+	store := job.NewMemoryStore()
+
 	srv := &http.Server{
-		Addr:              addr,
-		Handler:           api.NewRouter(),
+		Handler:           api.NewRouter(store),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      10 * time.Second,
@@ -41,21 +52,19 @@ func run(logger *slog.Logger) error {
 		ErrorLog:          slog.NewLogLogger(logger.Handler(), slog.LevelError),
 	}
 
-	// ctx is cancelled when the process receives Ctrl+C (SIGINT) or SIGTERM.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	// Buffered so the goroutine can always send and exit, even if nobody is reading.
 	errCh := make(chan error, 1)
 	go func() {
-		logger.Info("listening", "addr", addr)
-		errCh <- srv.ListenAndServe()
+		errCh <- srv.Serve(ln)
 	}()
+	logger.Info("listening", "addr", ln.Addr().String())
 
 	select {
 	case err := <-errCh:
-		// The server failed before any shutdown signal, e.g. port already in use.
-		return fmt.Errorf("listen on %s: %w", addr, err)
+		return fmt.Errorf("serve: %w", err)
 	case <-ctx.Done():
 		logger.Info("shutdown signal received")
 	}
@@ -68,8 +77,7 @@ func run(logger *slog.Logger) error {
 		return fmt.Errorf("shutdown: %w", err)
 	}
 
-	// After Shutdown, ListenAndServe returns http.ErrServerClosed.
-	// Reading it confirms the server goroutine has finished.
+	// After Shutdown, Serve returns http.ErrServerClosed.
 	if err := <-errCh; !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
