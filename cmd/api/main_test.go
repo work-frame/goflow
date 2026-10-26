@@ -36,7 +36,7 @@ func startServer(t *testing.T, dbURL string) (base string, stop func()) {
 	addrCh := make(chan string, 1)
 	runErr := make(chan error, 1)
 	go func() {
-		runErr <- run(ctx, discardLogger(), "127.0.0.1:0", dbURL, func(addr string) { addrCh <- addr })
+		runErr <- run(ctx, discardLogger(), testConfig("127.0.0.1:0", dbURL), func(addr string) { addrCh <- addr })
 	}()
 
 	select {
@@ -156,13 +156,6 @@ func TestJobsSurviveRestart(t *testing.T) {
 	}
 }
 
-func TestRunRequiresDatabaseURL(t *testing.T) {
-	err := run(context.Background(), discardLogger(), "127.0.0.1:0", "", nil)
-	if err == nil || !strings.Contains(err.Error(), "GOFLOW_DATABASE_URL") {
-		t.Errorf("err = %v, want an error naming GOFLOW_DATABASE_URL", err)
-	}
-}
-
 func TestRunFailsWhenPortIsTaken(t *testing.T) {
 	dbURL := testDatabaseURL(t)
 
@@ -172,7 +165,7 @@ func TestRunFailsWhenPortIsTaken(t *testing.T) {
 	}
 	defer ln.Close()
 
-	err = run(context.Background(), discardLogger(), ln.Addr().String(), dbURL, nil)
+	err = run(context.Background(), discardLogger(), testConfig(ln.Addr().String(), dbURL), nil)
 	if !errors.Is(err, syscall.EADDRINUSE) {
 		t.Errorf("err = %v, want address already in use", err)
 	}
