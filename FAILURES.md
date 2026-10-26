@@ -270,3 +270,19 @@ These safeguards have tests, but the failure hasn't been run and recorded yet:
       users_test.go:83: err = auth: email already registered, want a plain error: the email is free, the ID is not
   ```
 - **Why:** the `users` table has two unique constraints, the primary key on `id` and `UNIQUE` on `email`, and both raise SQLSTATE `23505`. Without the name check, a duplicate ID reaches the client as `409 email is already registered` for an email nobody has used. Random 128-bit IDs practically never collide, so this would only appear through a bug, such as code that reuses an ID. The wrong message would then send the debugging in the wrong direction.
+
+## 19. The bcrypt cost has a floor
+
+- **Safeguard:** `loadConfig` refuses a `GOFLOW_BCRYPT_COST` below 10.
+- **Removed:** the `cfg.BcryptCost < minBcryptCost ||` half of the range check, so only "above 14" was refused.
+- **Caught by:** `TestLoadConfigRejectsBadSettings` (3 subtests)
+- **Observed:**
+  ```text
+  --- FAIL: TestLoadConfigRejectsBadSettings/cost_below_10 (0.00s)
+      config_test.go:69: loadConfig succeeded, want an error
+  --- FAIL: TestLoadConfigRejectsBadSettings/bcrypt_minimum (0.00s)
+      config_test.go:69: loadConfig succeeded, want an error
+  --- FAIL: TestLoadConfigRejectsBadSettings/every_problem_reported (0.00s)
+      config_test.go:73: error "GOFLOW_DATABASE_URL is required" does not mention "got 3"
+  ```
+- **Why:** without the floor, a test setting copied into production (`GOFLOW_BCRYPT_COST=4`) starts the server normally, and every password hashed from then on is about 240 times cheaper to crack: 1.8 ms per guess instead of 446 ms on the development laptop. Nothing looks wrong. Logins just get faster. The bad hashes also stay weak after the setting is fixed, until each user's password is hashed again.
