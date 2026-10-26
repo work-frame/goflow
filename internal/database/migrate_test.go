@@ -2,11 +2,7 @@ package database
 
 import (
 	"context"
-	"crypto/rand"
-	"database/sql"
-	"encoding/hex"
 	"errors"
-	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -15,51 +11,6 @@ import (
 
 	"github.com/jackc/pgx/v5/pgconn"
 )
-
-// newTestDB creates an empty database for one test and drops it when the test ends,
-// so tests never touch your development data or each other.
-func newTestDB(t *testing.T) *sql.DB {
-	t.Helper()
-	ctx := context.Background()
-	baseURL := testDatabaseURL(t)
-
-	admin, err := Open(ctx, baseURL)
-	if err != nil {
-		t.Fatalf("open admin connection: %v", err)
-	}
-
-	b := make([]byte, 6)
-	rand.Read(b)
-	name := "goflow_test_" + hex.EncodeToString(b)
-
-	// Database names are identifiers, and identifiers can't be $1 parameters.
-	// Building the SQL with + is safe here only because name is generated above, never user input.
-	if _, err := admin.ExecContext(ctx, "CREATE DATABASE "+name); err != nil {
-		admin.Close()
-		t.Fatalf("create test database: %v", err)
-	}
-	t.Cleanup(func() {
-		// WITH (FORCE) disconnects anything still connected, so the drop can't hang.
-		if _, err := admin.ExecContext(context.Background(), "DROP DATABASE IF EXISTS "+name+" WITH (FORCE)"); err != nil {
-			t.Errorf("drop test database %s: %v", name, err)
-		}
-		admin.Close()
-	})
-
-	u, err := url.Parse(baseURL)
-	if err != nil {
-		t.Fatalf("parse test database URL: %v", err)
-	}
-	u.Path = "/" + name
-
-	db, err := Open(ctx, u.String())
-	if err != nil {
-		t.Fatalf("open test database: %v", err)
-	}
-	t.Cleanup(func() { db.Close() }) // cleanups run last-in-first-out: this runs before the drop
-
-	return db
-}
 
 func embeddedMigrationCount(t *testing.T) int {
 	t.Helper()
