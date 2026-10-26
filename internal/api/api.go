@@ -39,11 +39,12 @@ type Pinger interface {
 // A struct instead of a long parameter list: Task 17 adds a token signer
 // without touching every NewRouter call again. Tests fill in only what they use.
 type Deps struct {
-	Jobs   JobStore
-	Users  UserStore
-	Hasher auth.Hasher
-	DB     Pinger
-	Logger *slog.Logger
+	Jobs     JobStore
+	Users    UserStore
+	Sessions SessionStore
+	Hasher   auth.Hasher
+	DB       Pinger
+	Logger   *slog.Logger
 }
 
 // NewRouter returns the HTTP handler for the whole API, wrapped in middleware.
@@ -51,12 +52,16 @@ type Deps struct {
 // Request flow, outermost first:
 // withRequestID → logRequests → recoverPanics → jsonMuxErrors → mux → handler
 func NewRouter(d Deps) http.Handler {
-	h := &handler{store: d.Jobs, users: d.Users, hasher: d.Hasher, db: d.DB, logger: d.Logger}
+	h := &handler{store: d.Jobs, users: d.Users, sessions: d.Sessions, hasher: d.Hasher, db: d.DB, logger: d.Logger}
+	h.prepareDummyHash()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", handleHealth)
 	mux.HandleFunc("GET /readyz", h.ready)
 	mux.HandleFunc("POST /api/v1/auth/register", h.register)
+	mux.HandleFunc("POST /api/v1/auth/login", h.login)
+	mux.HandleFunc("POST /api/v1/auth/logout", h.requireSession(h.logout))
+	mux.HandleFunc("GET /api/v1/auth/me", h.requireSession(h.me))
 	mux.HandleFunc("POST /api/v1/jobs", h.createJob)
 	mux.HandleFunc("GET /api/v1/jobs", h.listJobs)
 	mux.HandleFunc("GET /api/v1/jobs/{id}", h.getJob)
@@ -72,11 +77,13 @@ func NewRouter(d Deps) http.Handler {
 
 // handler holds what the endpoints depend on.
 type handler struct {
-	store  JobStore
-	users  UserStore
-	hasher auth.Hasher
-	db     Pinger
-	logger *slog.Logger
+	store    JobStore
+	users    UserStore
+	sessions SessionStore
+	dummy    dummyHash
+	hasher   auth.Hasher
+	db       Pinger
+	logger   *slog.Logger
 }
 
 // dbContext derives a storage context from the request: it ends when the client

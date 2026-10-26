@@ -70,11 +70,12 @@ func run(ctx context.Context, logger *slog.Logger, cfg config, ready func(addr s
 	}
 
 	deps := api.Deps{
-		Jobs:   database.NewJobStore(db),
-		Users:  database.NewUserStore(db),
-		Hasher: auth.Hasher{Cost: cfg.BcryptCost},
-		DB:     db,
-		Logger: logger,
+		Jobs:     database.NewJobStore(db),
+		Users:    database.NewUserStore(db),
+		Sessions: database.NewSessionStore(db),
+		Hasher:   auth.Hasher{Cost: cfg.BcryptCost},
+		DB:       db,
+		Logger:   logger,
 	}
 
 	srv := &http.Server{

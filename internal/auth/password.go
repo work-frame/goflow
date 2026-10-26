@@ -70,3 +70,11 @@ func (Hasher) Compare(hash, password string) error {
 	}
 	return nil
 }
+
+// NeedsRehash reports whether hash was made with a lower cost than h uses.
+// Login is the only time the server sees the password again, so that is
+// when an old, cheaper hash can be upgraded.
+func (h Hasher) NeedsRehash(hash string) bool {
+	cost, err := bcrypt.Cost([]byte(hash))
+	return err == nil && cost < h.Cost
+}
