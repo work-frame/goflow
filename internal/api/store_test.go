@@ -23,15 +23,8 @@ func (s memStore) Get(_ context.Context, id string) (*job.Job, error) { return s
 
 func (s memStore) Delete(_ context.Context, id string) error { return s.m.Delete(id) }
 
-func (s memStore) List(_ context.Context, status job.Status) ([]*job.Job, error) {
-	all := s.m.List()
-	out := make([]*job.Job, 0, len(all))
-	for _, j := range all {
-		if status == "" || j.Status == status {
-			out = append(out, j)
-		}
-	}
-	return out, nil
+func (s memStore) List(_ context.Context, p job.ListParams) (job.Page, error) {
+	return job.Paginate(s.m.List(), p)
 }
 
 // errStore fails every call with the same error.
@@ -39,10 +32,10 @@ type errStore struct {
 	err error
 }
 
-func (s errStore) Add(context.Context, *job.Job) error                  { return s.err }
-func (s errStore) Get(context.Context, string) (*job.Job, error)        { return nil, s.err }
-func (s errStore) List(context.Context, job.Status) ([]*job.Job, error) { return nil, s.err }
-func (s errStore) Delete(context.Context, string) error                 { return s.err }
+func (s errStore) Add(context.Context, *job.Job) error                    { return s.err }
+func (s errStore) Get(context.Context, string) (*job.Job, error)          { return nil, s.err }
+func (s errStore) List(context.Context, job.ListParams) (job.Page, error) { return job.Page{}, s.err }
+func (s errStore) Delete(context.Context, string) error                   { return s.err }
 
 // ctxSpyStore records what context the handler gave the store.
 // Embedding JobStore supplies the methods it doesn't override.

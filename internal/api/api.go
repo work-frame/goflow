@@ -25,7 +25,7 @@ const (
 type JobStore interface {
 	Add(ctx context.Context, j *job.Job) error
 	Get(ctx context.Context, id string) (*job.Job, error)
-	List(ctx context.Context, status job.Status) ([]*job.Job, error)
+	List(ctx context.Context, p job.ListParams) (job.Page, error)
 	Delete(ctx context.Context, id string) error
 }
 
@@ -65,7 +65,7 @@ type handler struct {
 }
 
 // dbContext derives a storage context from the request: it ends when the client
-// disconnects, the server shuts down the request, or dbTimeout passes.
+// disconnects, the server cancels the request, or dbTimeout passes.
 func dbContext(r *http.Request) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(r.Context(), dbTimeout)
 }
@@ -80,7 +80,6 @@ func (h *handler) internalError(w http.ResponseWriter, r *http.Request, err erro
 func (h *handler) storeError(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
 	case errors.Is(err, context.Canceled):
-		// The client went away. Nobody will read the body, but the status keeps the log honest.
 		h.logger.Info("request cancelled by client", "request_id", RequestID(r.Context()))
 		w.WriteHeader(statusClientClosedRequest)
 	case errors.Is(err, context.DeadlineExceeded):
@@ -148,25 +147,49 @@ func (h *handler) createJob(w http.ResponseWriter, r *http.Request) {
 
 type listJobsResponse struct {
 	Jobs []*job.Job `json:"jobs"`
+	// NextCursor is omitted on the last page.
+	NextCursor string `json:"next_cursor,omitempty"`
 }
 
 func (h *handler) listJobs(w http.ResponseWriter, r *http.Request) {
-	status := job.Status(r.URL.Query().Get("status"))
+	q := r.URL.Query()
+
+	status := job.Status(q.Get("status"))
 	if status != "" && !status.Valid() {
 		writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid status %q", status))
 		return
 	}
 
+	limit, err := parseLimit(q.Get("limit"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	var after *job.Cursor
+	if raw := q.Get("cursor"); raw != "" {
+		c, err := decodeCursor(raw)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid cursor")
+			return
+		}
+		after = &c
+	}
+
 	ctx, cancel := dbContext(r)
 	defer cancel()
 
-	// Filtering happens in the store, so Postgres can use the (status, created_at) index.
-	jobs, err := h.store.List(ctx, status)
+	page, err := h.store.List(ctx, job.ListParams{Status: status, After: after, Limit: limit})
 	if err != nil {
 		h.storeError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, listJobsResponse{Jobs: jobs})
+
+	resp := listJobsResponse{Jobs: page.Jobs}
+	if page.Next != nil {
+		resp.NextCursor = encodeCursor(*page.Next)
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (h *handler) getJob(w http.ResponseWriter, r *http.Request) {
