@@ -3,132 +3,122 @@
 ## Prerequisites
 
 - Go 1.27 or newer
+- Docker (for PostgreSQL)
 - `goimports`: `go install golang.org/x/tools/cmd/goimports@latest`
-- `jq` for reading JSON in the terminal
-- Make sure `$(go env GOPATH)/bin` is on your `PATH`
+- `jq`, and the GitHub CLI `gh` (`gh auth login` once)
+- `$(go env GOPATH)/bin` on your `PATH`
 
-### VS Code
+### Editor (VS Code or Code - OSS)
 
-Install the official Go extension, then add this to your user settings JSON so every save formats the file and fixes imports:
+Install the Go extension (`golang.go`), **trust the workspace** (Restricted Mode disables extensions), and add to your user settings:
 
 ```json
 "[go]": {
+    "editor.defaultFormatter": "golang.go",
     "editor.formatOnSave": true,
-    "editor.codeActionsOnSave": {
-        "source.organizeImports": "explicit"
-    }
+    "editor.codeActionsOnSave": { "source.organizeImports": "explicit" }
 }
 ```
 
+Edits made with `sed` or heredocs in the terminal bypass the editor. Run `goimports -w <file>` after them.
+
+### PostgreSQL
+
+```bash
+docker run -d --name goflow-postgres \
+  -e POSTGRES_USER=goflow -e POSTGRES_PASSWORD=goflow -e POSTGRES_DB=goflow \
+  -p 127.0.0.1:5432:5432 -v goflow-pgdata:/var/lib/postgresql/data \
+  postgres:17
+until docker exec goflow-postgres pg_isready -U goflow -q; do sleep 1; done
+docker exec goflow-postgres psql -U goflow -c 'CREATE DATABASE goflow_test'
+```
+
+Bind to `127.0.0.1` only: Docker's port rules bypass most host firewalls. The container has no restart policy, so after a reboot run `docker start goflow-postgres`.
+
+### Environment
+
+```bash
+export GOFLOW_DATABASE_URL='postgres://goflow:goflow@127.0.0.1:5432/goflow?sslmode=disable'
+export GOFLOW_TEST_DATABASE_URL='postgres://goflow:goflow@127.0.0.1:5432/goflow_test?sslmode=disable'
+```
+
+| Variable | Used by | Default |
+|---|---|---|
+| `GOFLOW_DATABASE_URL` | API (required) | none |
+| `GOFLOW_ADDR` | API | `:8080` |
+| `GOFLOW_TEST_DATABASE_URL` | tests; database tests skip without it | none |
+| `GOFLOW_API_URL` | CLI | `http://localhost:8080` |
+
+Tests must never point at the development database.
+
 ## Workflow
 
-1. Start from an up-to-date `main`:
-   ```bash
-   git checkout main && git pull
-   git checkout -b feat/short-description
-   ```
-   Branch prefixes: `feat/`, `fix/`, `test/`, `docs/`, `chore/`.
-2. Make the change, with tests.
-3. Run every check, then commit:
-   ```bash
-   ./scripts/check.sh && git add . && git status && git commit -m "feat(scope): what changed"
-   ```
-   Commit messages follow [Conventional Commits](https://www.conventionalcommits.org/): `feat`, `fix`, `test`, `docs`, `chore`, `refactor`.
-4. Push and open a pull request. **If the PR has more than one commit, edit its title** to a conventional commit message; GitHub otherwise uses the branch name.
-5. Merge with **Squash and merge**.
-6. Verify, and only then delete the branch:
-   ```bash
-   git checkout main && git pull && ./scripts/check.sh && git log --oneline -3
-   git branch -D feat/short-description
-   git push origin --delete feat/short-description
-   git fetch --prune
-   ```
+```bash
+git checkout main && git pull
+git checkout -b feat/short-description
+# change code and tests
+./scripts/check.sh && git add . && git status && git commit -m "feat(scope): what changed"
+git push -u origin feat/short-description
+gh pr create --base main --title "feat(scope): what changed" --body "Why, and what to look at."
+gh pr merge --squash --subject "feat(scope): what changed" --delete-branch
+git checkout main && git pull && ./scripts/check.sh && git log --oneline -3 && git fetch --prune
+```
+
+Branch prefixes: `feat/`, `fix/`, `test/`, `docs/`, `chore/`. Commit messages follow [Conventional Commits](https://www.conventionalcommits.org/).
 
 ## Checks
 
-`./scripts/check.sh` runs, in order, and stops at the first failure:
-
-1. `gofmt -l .` (fails if any file is unformatted)
-2. `go vet ./...`
-3. `go test -race -count=1 ./...`
+`./scripts/check.sh` runs `gofmt`, `go vet` and `go test -race -count=1 ./...`, stopping at the first failure and naming it.
 
 ## Tests
 
-| Kind | Where | What it covers |
-|---|---|---|
-| Unit | `internal/job` | validation, store, persistence |
-| Unit | `internal/cli` | commands via `cli.Run` with in-memory output |
-| Handler | `internal/api` | every endpoint and middleware via `httptest` |
-| Concurrency | `*_concurrency_test.go` | 100 goroutines against the store and the API |
-| End-to-end | `cmd/api` | real server on `127.0.0.1:0`, real HTTP, graceful shutdown |
-
-Useful commands:
-
 ```bash
-go test -race -count=5 ./...         # repeat to shake out intermittent races
-go test -run TestCreateJob -v ./internal/api/   # one test, verbose
+go test -count=1 ./...                               # everything
+go test -count=1 -v -run TestJobStore ./internal/database/
+go test -count=5 -race ./...                         # shake out intermittent races
+go test -count=1 -timeout 10s ./internal/cli/        # fail fast if something loops
 ```
+
+See the Testing section of [ARCHITECTURE.md](ARCHITECTURE.md) for what each package's tests cover.
 
 ### Breaking things on purpose
 
-To see what a test protects against, **commit first**, then break the code, run the test, and restore with:
-
-```bash
-git checkout -- path/to/file.go
-```
-
-`git checkout --` only restores files Git already knows about. Untracked files must be fixed by hand.
+Commit first. Then make the change, run the test, read the output, and restore with `git checkout -- <file>`. If the result is new, add it to [FAILURES.md](FAILURES.md).
 
 ## Running locally
 
-### API
-
 ```bash
-go build -o bin/api ./cmd/api && ./bin/api
+go build -o bin/api ./cmd/api && ./bin/api           # terminal 1
+go build -o bin/goflow ./cmd/goflow                  # terminal 2
+id=$(./bin/goflow job create send welcome email)
+./bin/goflow job get "$id"
+curl -s "localhost:8080/api/v1/jobs?limit=2" | jq
 ```
 
-```bash
-curl -s -X POST http://localhost:8080/api/v1/jobs \
-  -H 'Content-Type: application/json' -d '{"title":"send email"}' | jq
-curl -s http://localhost:8080/api/v1/jobs | jq
-```
-
-### Load test with the race detector built in
+Look at the data directly:
 
 ```bash
-go build -race -o bin/api ./cmd/api && ./bin/api
-```
-
-```bash
-seq 500 | xargs -P 50 -I{} curl -s -o /dev/null -w "%{http_code}\n" \
-  -X POST http://localhost:8080/api/v1/jobs \
-  -H 'Content-Type: application/json' -d '{"title":"load job {}"}' | sort | uniq -c
-```
-
-Expect `500 201` and no `WARNING: DATA RACE` in the server output.
-
-### CLI
-
-```bash
-go build -o bin/goflow ./cmd/goflow
-GOFLOW_DATA_FILE=/tmp/goflow-dev.json ./bin/goflow job list
+docker exec goflow-postgres psql -U goflow -c 'SELECT id, title, status FROM jobs'
 ```
 
 ## Debugging
 
-- **Stack traces:** read top to bottom. The top frame is where it failed; each line below is its caller.
-- **Race reports:** look at both sides, the access (`Read at`/`Write at`) and the `Previous` access. Both stacks name a file and line. The `created at` lines show where each goroutine was started.
-- **A user's failed request:** ask for the `X-Request-ID` response header and search the server logs for it.
-- **A command printed nothing:** check its exit code with `echo $?`. Some tools (`test`, `sed`) are silent on failure.
-- **A command seems frozen:** it may be waiting for input on stdin (for example `gofmt -l` without a path). Press `Ctrl+C`.
+- **Stack traces:** read top to bottom. The top frame is where it failed.
+- **Race reports:** read both stacks (`Read at` / `Previous write at`) and the `created at` lines.
+- **A user's failed request:** search the API logs for their `X-Request-ID`.
+- **A quiet command:** check `echo $?`. Add `-w '%{http_code}\n'` to quiet `curl` calls.
+- **A frozen command:** it may be reading stdin (e.g. `gofmt -l` with no path). Press `Ctrl+C`.
+- **Measuring speed:** same command, several runs each, before and after.
 
 ## Common mistakes
 
 | Symptom | Cause |
 |---|---|
-| `imported and not used` | Go rejects unused imports; enable organize-imports on save |
-| `declared and not used` | Go rejects unused local variables |
-| `undefined: x` | `x` is declared in another function's scope or the import is missing |
-| `gofmt -l` lists files after pasting code | Pasted spaces instead of tabs; run `gofmt -w .` |
-| `curl -d` returns 415 | `curl -d` sends form encoding; add `-H 'Content-Type: application/json'` |
+| `imported and not used` / `declared and not used` | Go rejects both. Organize imports on save |
+| `expected declaration, found 'package'` | A file was pasted into another instead of replacing it. Select all before pasting |
+| `undefined: x` | Wrong scope, or a missing import in that file |
+| `network is unreachable` on an IPv6 address | The network has no IPv6 route. Disable IPv6 for that connection |
 | `Permission denied (publickey)` | This machine's SSH key isn't on your GitHub account |
+| `curl -d` returns 415 | Add `-H 'Content-Type: application/json'` |
+| `cannot reach the GoFlow API` | The API isn't running, or `GOFLOW_API_URL` is wrong |
+| Database tests are skipped | `GOFLOW_TEST_DATABASE_URL` isn't set in this shell |

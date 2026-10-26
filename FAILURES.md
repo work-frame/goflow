@@ -227,3 +227,17 @@ These safeguards have tests, but the failure hasn't been run and recorded yet:
 - **Why:** a full first page looked exactly like a last page, so no `next_cursor` was returned. Clients stopped after page 1 and three of five jobs were never shown, with no error anywhere.
 
 - **Since Task 15:** the JSON file store was removed when the CLI became an API client. The lesson stands.
+
+
+## 16. The CLI moves to the next page
+
+- **Safeguard:** `runList` sets `cursor = next` after each page.
+- **Removed:** that line.
+- **Caught by:** `TestListShowsEveryPage`, but only because the test run had a time limit
+- **Observed:**
+  ```text
+  panic: test timed out after 5s
+          running tests:
+                  TestListShowsEveryPage (5s)
+  ```
+- **Why:** the CLI asked for page 1 forever. Nothing failed: every request succeeded. Run with `go test -timeout 5s`, Go stopped it and named the stuck test. With the default 10-minute timeout, the same bug looks like a frozen terminal or a CI job that never finishes.
