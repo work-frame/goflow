@@ -34,6 +34,7 @@ go build -o bin/api ./cmd/api         # HTTP API
 | Variable | Default | Meaning |
 |---|---|---|
 | `GOFLOW_ADDR` | `:8080` | Address to listen on. Use `:0` for any free port. |
+| `GOFLOW_BCRYPT_COST` | `12` | bcrypt cost for password hashes, 10 to 14. Each step doubles the time per hash. The server refuses to start outside this range. |
 
 The server stops on `Ctrl+C` or `SIGTERM`, finishing in-flight requests first (up to 10 seconds).
 

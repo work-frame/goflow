@@ -20,15 +20,15 @@ import (
 func main() {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 
-	addr := os.Getenv("GOFLOW_ADDR")
-	if addr == "" {
-		addr = ":8080"
+	cfg, err := loadConfig(os.Getenv)
+	if err != nil {
+		logger.Error("invalid configuration", "err", err)
+		os.Exit(1)
 	}
-	dbURL := os.Getenv("GOFLOW_DATABASE_URL")
 
 	// ctx is cancelled on Ctrl+C (SIGINT) or SIGTERM.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	err := run(ctx, logger, addr, dbURL, nil)
+	err = run(ctx, logger, cfg, nil)
 	stop() // called directly, not deferred: os.Exit below would skip a defer
 
 	if err != nil {
@@ -37,17 +37,16 @@ func main() {
 	}
 }
 
-// run connects to the database, serves the API on addr until ctx is cancelled,
+// run connects to the database, serves the API on cfg.Addr until ctx is cancelled,
 // then shuts down gracefully. If ready is not nil, it is called with the bound
-// address once the server is listening.
-func run(ctx context.Context, logger *slog.Logger, addr, dbURL string, ready func(addr string)) error {
-	if dbURL == "" {
-		return errors.New("GOFLOW_DATABASE_URL is required")
-	}
+// address once the server is listening. cfg is trusted: loadConfig validates it.
+func run(ctx context.Context, logger *slog.Logger, cfg config, ready func(addr string)) error {
+	// Never log cfg.DatabaseURL: it contains the database password.
+	logger.Info("starting", "addr", cfg.Addr, "bcrypt_cost", cfg.BcryptCost)
 
 	// Connect before opening the port: an instance that can't reach its database
 	// should never start accepting traffic.
-	db, err := database.Open(ctx, dbURL)
+	db, err := database.Open(ctx, cfg.DatabaseURL)
 	if err != nil {
 		return err
 	}
@@ -65,7 +64,7 @@ func run(ctx context.Context, logger *slog.Logger, addr, dbURL string, ready fun
 		logger.Info("database schema up to date")
 	}
 
-	ln, err := net.Listen("tcp", addr)
+	ln, err := net.Listen("tcp", cfg.Addr)
 	if err != nil {
 		return err
 	}
@@ -73,7 +72,7 @@ func run(ctx context.Context, logger *slog.Logger, addr, dbURL string, ready fun
 	deps := api.Deps{
 		Jobs:   database.NewJobStore(db),
 		Users:  database.NewUserStore(db),
-		Hasher: auth.Hasher{Cost: auth.DefaultCost},
+		Hasher: auth.Hasher{Cost: cfg.BcryptCost},
 		DB:     db,
 		Logger: logger,
 	}
