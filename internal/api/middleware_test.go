@@ -93,7 +93,7 @@ func TestRecoverPanicsReturnsJSON500(t *testing.T) {
 func TestLogRequestsWritesOneLinePerRequest(t *testing.T) {
 	var logs bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&logs, nil))
-	router := NewRouter(newTestStore(), okPinger, logger)
+	router := NewRouter(Deps{Jobs: newTestStore(), DB: okPinger, Logger: logger})
 
 	req := httptest.NewRequest(http.MethodGet, "/nope?token=secret", nil)
 	req.Header.Set("X-Request-ID", "test-id")

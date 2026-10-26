@@ -29,7 +29,7 @@ func TestReadyWhenDatabaseIsUp(t *testing.T) {
 
 func TestNotReadyWhenDatabaseIsDown(t *testing.T) {
 	down := fakePinger{err: errors.New("dial tcp 127.0.0.1:5432: connect: connection refused")}
-	router := NewRouter(newTestStore(), down, discardLogger())
+	router := NewRouter(Deps{Jobs: newTestStore(), DB: down, Logger: discardLogger()})
 
 	rec := do(t, router, http.MethodGet, "/readyz", "")
 
@@ -47,7 +47,7 @@ func TestNotReadyWhenDatabaseIsDown(t *testing.T) {
 
 func TestHealthStaysUpWhenDatabaseIsDown(t *testing.T) {
 	down := fakePinger{err: errors.New("database is down")}
-	router := NewRouter(newTestStore(), down, discardLogger())
+	router := NewRouter(Deps{Jobs: newTestStore(), DB: down, Logger: discardLogger()})
 
 	if rec := do(t, router, http.MethodGet, "/healthz", ""); rec.Code != http.StatusOK {
 		t.Errorf("healthz status = %d, want %d: liveness must not depend on the database", rec.Code, http.StatusOK)

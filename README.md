@@ -42,6 +42,7 @@ The server stops on `Ctrl+C` or `SIGTERM`, finishing in-flight requests first (u
 | Method | Path | Success | Errors |
 |---|---|---|---|
 | `GET` | `/healthz` | `200 {"status":"ok"}` | |
+| `POST` | `/api/v1/auth/register` | `201` + user (`id`, `email`, `created_at`) | `400`, `409` email taken, `413`, `415` |
 | `POST` | `/api/v1/jobs` | `201` + job, `Location` header | `400`, `413`, `415` |
 | `GET` | `/api/v1/jobs` | `200 {"jobs":[...]}` | `400` invalid `status` filter |
 | `GET` | `/api/v1/jobs/{id}` | `200` + job | `404` |
@@ -68,6 +69,8 @@ curl -s -X DELETE http://localhost:8080/api/v1/jobs/<id>
 - The body must be a single JSON object, at most 1 MiB.
 - Unknown fields are rejected, not ignored.
 - `title` is required, at most 200 characters.
+- `email` is required and stored lowercased, so `Dan@x.com` and `dan@x.com` are one account.
+- `password` must be at least 12 characters and at most 72 bytes. It is stored only as a bcrypt hash and never returned.
 
 ### Errors
 
