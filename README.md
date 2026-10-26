@@ -134,3 +134,6 @@ scripts/         development scripts
 12. Distributed workers
 13. Integration and load testing
 14. CI/CD
+
+
+See [FAILURES.md](FAILURES.md) for what breaks when each safeguard is removed, with real output.
