@@ -211,3 +211,17 @@ These safeguards have tests, but the failure hasn't been run and recorded yet:
 - **Why:** PostgreSQL won't copy a database that has open connections. It waits up to 5 seconds for them to close before failing. The template's pool kept idle connections open, so every copy waited the full 5 seconds and then failed. The leak first showed up as slowness, not as an error.
 
 - **Template databases as a speed-up:** measured over 5 runs each, the template version averaged 1.76 s against 2.06 s, but the ranges overlapped almost completely. With one migration, `CREATE DATABASE` dominates, and every `CREATE DATABASE` already copies a template. Kept for when migrations grow, not for speed today.
+
+
+## 15. Pages fetch one extra row
+
+- **Safeguard:** `JobStore.List` queries `LIMIT limit + 1`. The extra row only proves that another page exists.
+- **Removed:** `LIMIT limit`.
+- **Caught by:** `TestJobStoreListPaginates`
+- **Observed:**
+  ```text
+  pages = 1, want 3 (2 + 2 + 1)
+  paged IDs = [1075f347... 4ef350e5...],
+         want [1075f347... 4ef350e5... 6af9be0f... 16b09a43... 85274e9d...]
+  ```
+- **Why:** a full first page looked exactly like a last page, so no `next_cursor` was returned. Clients stopped after page 1 and three of five jobs were never shown, with no error anywhere.
