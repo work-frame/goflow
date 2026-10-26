@@ -85,17 +85,21 @@ Every response carries an `X-Request-ID` header, and the same ID appears in the 
 
 ## CLI
 
+The CLI is a client for the HTTP API, so the API must be running.
+
 ```bash
 goflow job create send welcome email     # prints the new job's ID
-goflow job list                          # all jobs, oldest first
+goflow job list                          # every job, oldest first (follows pages)
 goflow job list --status pending         # filter by status
 goflow job get <id>                      # one job as JSON
 goflow job delete <id>                   # remove a job
 ```
 
-Jobs are saved to `~/.goflow/jobs.json`. Set `GOFLOW_DATA_FILE` to use a different file. Exit codes: `0` success, `1` failure, `2` incorrect usage.
+| Variable | Default | Meaning |
+|---|---|---|
+| `GOFLOW_API_URL` | `http://localhost:8080` | Where the API is running |
 
-The CLI and the API don't share data yet. That arrives with PostgreSQL in Phase 3.
+Exit codes: `0` success, `1` failure (including an unreachable API), `2` incorrect usage. Each command gives up after 10 seconds.
 
 ## Development
 

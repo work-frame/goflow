@@ -1,31 +1,23 @@
 package main
 
 import (
-	"fmt"
+	"context"
 	"os"
-	"path/filepath"
+	"os/signal"
 
 	"github.com/work-frame/goflow/internal/cli"
+	"github.com/work-frame/goflow/internal/client"
 )
 
 func main() {
-	path, err := dataPath()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
+	baseURL := os.Getenv("GOFLOW_API_URL")
+	if baseURL == "" {
+		baseURL = "http://localhost:8080"
 	}
-	os.Exit(cli.Run(os.Args[1:], path, os.Stdout, os.Stderr))
-}
 
-// dataPath returns where jobs are stored.
-// GOFLOW_DATA_FILE overrides the default of ~/.goflow/jobs.json.
-func dataPath() (string, error) {
-	if p := os.Getenv("GOFLOW_DATA_FILE"); p != "" {
-		return p, nil
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("find home directory: %w", err)
-	}
-	return filepath.Join(home, ".goflow", "jobs.json"), nil
+	// Ctrl+C cancels the request in flight instead of leaving the terminal waiting.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	code := cli.Run(ctx, os.Args[1:], client.New(baseURL), os.Stdout, os.Stderr)
+	stop() // called directly, not deferred: os.Exit skips defers
+	os.Exit(code)
 }

@@ -225,3 +225,5 @@ These safeguards have tests, but the failure hasn't been run and recorded yet:
          want [1075f347... 4ef350e5... 6af9be0f... 16b09a43... 85274e9d...]
   ```
 - **Why:** a full first page looked exactly like a last page, so no `next_cursor` was returned. Clients stopped after page 1 and three of five jobs were never shown, with no error anywhere.
+
+- **Since Task 15:** the JSON file store was removed when the CLI became an API client. The lesson stands.
