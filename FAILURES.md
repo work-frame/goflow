@@ -151,6 +151,7 @@ Each case was reproduced on a real machine (Arch Linux, Go 1.27, PostgreSQL 17) 
 
 - **`Lock` instead of `RLock` in `Get`:** every test passed. The code is correct but reads queue one at a time. Correctness tests can't measure throughput. That needs a benchmark (planned for Phase 13).
 - **A cheap bcrypt cost:** setting `DefaultCost` to 4 passes every test, because tests use cost 4 on purpose. Production hashes would be about 240 times cheaper to crack. Fixed in Task 17: the cost comes from `GOFLOW_BCRYPT_COST`, the server refuses anything below 10, and `TestLoadConfigDefaults` expects a literal 12 (case 19).
+- **Timing while the bcrypt cost is raised:** with `GOFLOW_BCRYPT_COST` raised from 12 to 13, two unknown emails took 0.91 s and 0.95 s, while a registered user whose hash was still at cost 12 took 0.47 s. Until every user has logged in once at the new cost, response time can still tell old accounts apart from unknown emails. Tests run at a single cost, so they cannot see this.
 
 ## Environment incidents
 
@@ -286,3 +287,15 @@ These safeguards have tests, but the failure hasn't been run and recorded yet:
       config_test.go:73: error "GOFLOW_DATABASE_URL is required" does not mention "got 3"
   ```
 - **Why:** without the floor, a test setting copied into production (`GOFLOW_BCRYPT_COST=4`) starts the server normally, and every password hashed from then on is about 240 times cheaper to crack: 1.8 ms per guess instead of 446 ms on the development laptop. Nothing looks wrong. Logins just get faster. The bad hashes also stay weak after the setting is fixed, until each user's password is hashed again.
+
+## 20. Unknown emails take as long as wrong passwords
+
+- **Safeguard:** when an email isn't registered, login still compares the password against a dummy bcrypt hash made at the server's cost.
+- **Removed:** the `h.hasher.Compare(h.dummy.get(h.hasher), req.Password)` line.
+- **Caught by:** `TestLoginTimingHidesUnknownEmails`
+- **Observed:**
+  ```text
+  --- FAIL: TestLoginTimingHidesUnknownEmails (0.06s)
+      login_test.go:189: unknown email took 45.552µs, wrong password 28.189995ms: the difference reveals which emails exist
+  ```
+- **Why:** the error message stayed identical, but the response time didn't. An unknown email answered in 46 µs, a registered one in 28 ms (cost 8 in the test; about half a second at cost 12). Anyone can time a list of emails with curl, learn who has an account, and then aim password guessing or phishing at exactly those people. Same message is not enough; same work is needed.

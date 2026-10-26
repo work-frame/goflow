@@ -44,6 +44,9 @@ The server stops on `Ctrl+C` or `SIGTERM`, finishing in-flight requests first (u
 |---|---|---|---|
 | `GET` | `/healthz` | `200 {"status":"ok"}` | |
 | `POST` | `/api/v1/auth/register` | `201` + user (`id`, `email`, `created_at`) | `400`, `409` email taken, `413`, `415` |
+| `POST` | `/api/v1/auth/login` | `200 {"token","expires_at"}` | `400`, `401` invalid email or password |
+| `POST` | `/api/v1/auth/logout` | `204` (needs token) | `401` |
+| `GET` | `/api/v1/auth/me` | `200` + user (needs token) | `401` |
 | `POST` | `/api/v1/jobs` | `201` + job, `Location` header | `400`, `413`, `415` |
 | `GET` | `/api/v1/jobs` | `200 {"jobs":[...]}` | `400` invalid `status` filter |
 | `GET` | `/api/v1/jobs/{id}` | `200` + job | `404` |
@@ -72,6 +75,7 @@ curl -s -X DELETE http://localhost:8080/api/v1/jobs/<id>
 - `title` is required, at most 200 characters.
 - `email` is required and stored lowercased, so `Dan@x.com` and `dan@x.com` are one account.
 - `password` must be at least 12 characters and at most 72 bytes. It is stored only as a bcrypt hash and never returned.
+- Send the login token as `Authorization: Bearer <token>`. It lasts 24 hours, and logout ends it immediately. The server stores only its SHA-256 hash.
 
 ### Errors
 

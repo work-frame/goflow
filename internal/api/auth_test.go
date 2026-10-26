@@ -160,3 +160,32 @@ func TestRegisterNeverLogsThePassword(t *testing.T) {
 		t.Errorf("logs contain the password: %s", logs.String())
 	}
 }
+
+// Added for login (Task 17b): the rest of the UserStore interface.
+
+func (s *memUsers) GetByEmail(_ context.Context, email string) (*auth.User, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	u, ok := s.byEmail[email]
+	if !ok {
+		return nil, auth.ErrUserNotFound
+	}
+	cp := *u
+	return &cp, nil
+}
+
+func (s *memUsers) UpdatePasswordHash(_ context.Context, id, hash string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, u := range s.byEmail {
+		if u.ID == id {
+			u.PasswordHash = hash
+			return nil
+		}
+	}
+	return auth.ErrUserNotFound
+}
+
+func (s errUsers) GetByEmail(context.Context, string) (*auth.User, error) { return nil, s.err }
+
+func (s errUsers) UpdatePasswordHash(context.Context, string, string) error { return s.err }

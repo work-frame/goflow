@@ -60,3 +60,20 @@ func (s *UserStore) GetByEmail(ctx context.Context, email string) (*auth.User, e
 	u.CreatedAt = u.CreatedAt.UTC()
 	return &u, nil
 }
+
+// UpdatePasswordHash replaces a user's password hash, for example after
+// re-hashing it at a higher cost. It returns auth.ErrUserNotFound if no user has id.
+func (s *UserStore) UpdatePasswordHash(ctx context.Context, id, hash string) error {
+	res, err := s.db.ExecContext(ctx, `UPDATE users SET password_hash = $1 WHERE id = $2`, hash, id)
+	if err != nil {
+		return fmt.Errorf("database: update password hash for user %s: %w", id, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("database: update password hash for user %s: %w", id, err)
+	}
+	if n == 0 {
+		return auth.ErrUserNotFound
+	}
+	return nil
+}
