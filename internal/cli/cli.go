@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -19,12 +20,25 @@ const (
 	exitUsage = 2
 )
 
+// commandTimeout bounds each command, so an unresponsive server can't hang the terminal.
+const commandTimeout = 10 * time.Second
+
 const usage = `Usage:
   goflow job create <title>
   goflow job list [--status <status>]
   goflow job get <id>
   goflow job delete <id>
+
+The CLI talks to a running GoFlow API. Set GOFLOW_API_URL (default http://localhost:8080).
 `
+
+// Jobs is what the CLI needs from GoFlow. client.Client satisfies it. Tests use a fake.
+type Jobs interface {
+	Create(ctx context.Context, title string) (*job.Job, error)
+	Get(ctx context.Context, id string) (*job.Job, error)
+	List(ctx context.Context, status job.Status, cursor string) ([]*job.Job, string, error)
+	Delete(ctx context.Context, id string) error
+}
 
 // usageError marks a mistake in how the command was called,
 // as opposed to a failure while running it.
@@ -34,28 +48,26 @@ func (e usageError) Error() string { return e.msg }
 
 // Run executes one CLI command and returns the process exit code.
 // It never calls os.Exit, so tests can call it directly.
-func Run(args []string, dataPath string, stdout, stderr io.Writer) int {
+func Run(ctx context.Context, args []string, jobs Jobs, stdout, stderr io.Writer) int {
 	if len(args) < 2 || args[0] != "job" {
 		fmt.Fprint(stderr, usage)
 		return exitUsage
 	}
 
-	store, err := job.Load(dataPath)
-	if err != nil {
-		fmt.Fprintf(stderr, "error: %v\n", err)
-		return exitError
-	}
+	ctx, cancel := context.WithTimeout(ctx, commandTimeout)
+	defer cancel()
 
 	cmd, rest := args[1], args[2:]
+	var err error
 	switch cmd {
 	case "create":
-		err = runCreate(store, dataPath, rest, stdout)
+		err = runCreate(ctx, jobs, rest, stdout)
 	case "list":
-		err = runList(store, rest, stdout)
+		err = runList(ctx, jobs, rest, stdout)
 	case "get":
-		err = runGet(store, rest, stdout)
+		err = runGet(ctx, jobs, rest, stdout)
 	case "delete":
-		err = runDelete(store, dataPath, rest, stdout)
+		err = runDelete(ctx, jobs, rest, stdout)
 	default:
 		err = usageError{fmt.Sprintf("unknown command %q", cmd)}
 	}
@@ -73,27 +85,20 @@ func Run(args []string, dataPath string, stdout, stderr io.Writer) int {
 	}
 }
 
-func runCreate(store *job.MemoryStore, dataPath string, args []string, stdout io.Writer) error {
+func runCreate(ctx context.Context, jobs Jobs, args []string, stdout io.Writer) error {
 	if len(args) == 0 {
 		return usageError{"create: missing title"}
 	}
 
-	j, err := job.New(strings.Join(args, " "))
+	j, err := jobs.Create(ctx, strings.Join(args, " "))
 	if err != nil {
-		return err
+		return fmt.Errorf("create: %w", err)
 	}
-	if err := store.Add(j); err != nil {
-		return err
-	}
-	if err := store.Save(dataPath); err != nil {
-		return err
-	}
-
 	fmt.Fprintln(stdout, j.ID)
 	return nil
 }
 
-func runList(store *job.MemoryStore, args []string, stdout io.Writer) error {
+func runList(ctx context.Context, jobs Jobs, args []string, stdout io.Writer) error {
 	flags := flag.NewFlagSet("list", flag.ContinueOnError)
 	flags.SetOutput(io.Discard) // we print our own usage message
 	status := flags.String("status", "", "only show jobs with this status")
@@ -104,7 +109,6 @@ func runList(store *job.MemoryStore, args []string, stdout io.Writer) error {
 	if flags.NArg() > 0 {
 		return usageError{fmt.Sprintf("list: unexpected argument %q", flags.Arg(0))}
 	}
-
 	want := job.Status(*status)
 	if want != "" && !want.Valid() {
 		return usageError{fmt.Sprintf("list: invalid status %q", *status)}
@@ -112,26 +116,35 @@ func runList(store *job.MemoryStore, args []string, stdout io.Writer) error {
 
 	tw := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "ID\tSTATUS\tCREATED\tTITLE")
-	for _, j := range store.List() {
-		if want != "" && j.Status != want {
-			continue
+
+	// The API returns one page at a time. Follow next cursors until the last page.
+	cursor := ""
+	for {
+		page, next, err := jobs.List(ctx, want, cursor)
+		if err != nil {
+			return fmt.Errorf("list: %w", err)
 		}
-		created := j.CreatedAt.Local().Format(time.DateTime)
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", j.ID, j.Status, created, j.Title)
+		for _, j := range page {
+			created := j.CreatedAt.Local().Format(time.DateTime)
+			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", j.ID, j.Status, created, j.Title)
+		}
+		if next == "" {
+			break
+		}
+		cursor = next
 	}
 	return tw.Flush()
 }
 
-func runGet(store *job.MemoryStore, args []string, stdout io.Writer) error {
+func runGet(ctx context.Context, jobs Jobs, args []string, stdout io.Writer) error {
 	if len(args) != 1 {
 		return usageError{"get: expected exactly one job ID"}
 	}
 
-	j, err := store.Get(args[0])
+	j, err := jobs.Get(ctx, args[0])
 	if err != nil {
 		return fmt.Errorf("get %s: %w", args[0], err)
 	}
-
 	out, err := json.MarshalIndent(j, "", "  ")
 	if err != nil {
 		return fmt.Errorf("get %s: encode: %w", args[0], err)
@@ -140,19 +153,15 @@ func runGet(store *job.MemoryStore, args []string, stdout io.Writer) error {
 	return nil
 }
 
-func runDelete(store *job.MemoryStore, dataPath string, args []string, stdout io.Writer) error {
+func runDelete(ctx context.Context, jobs Jobs, args []string, stdout io.Writer) error {
 	if len(args) != 1 {
 		return usageError{"delete: expected exactly one job ID"}
 	}
 
 	id := args[0]
-	if err := store.Delete(id); err != nil {
+	if err := jobs.Delete(ctx, id); err != nil {
 		return fmt.Errorf("delete %s: %w", id, err)
 	}
-	if err := store.Save(dataPath); err != nil {
-		return err
-	}
-
 	fmt.Fprintf(stdout, "deleted %s\n", id)
 	return nil
 }
