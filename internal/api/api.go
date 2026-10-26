@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/work-frame/goflow/internal/auth"
 	"github.com/work-frame/goflow/internal/job"
 )
 
@@ -34,16 +35,28 @@ type Pinger interface {
 	PingContext(ctx context.Context) error
 }
 
+// Deps is everything the API needs from the outside world.
+// A struct instead of a long parameter list: Task 17 adds a token signer
+// without touching every NewRouter call again. Tests fill in only what they use.
+type Deps struct {
+	Jobs   JobStore
+	Users  UserStore
+	Hasher auth.Hasher
+	DB     Pinger
+	Logger *slog.Logger
+}
+
 // NewRouter returns the HTTP handler for the whole API, wrapped in middleware.
 //
 // Request flow, outermost first:
 // withRequestID → logRequests → recoverPanics → jsonMuxErrors → mux → handler
-func NewRouter(store JobStore, db Pinger, logger *slog.Logger) http.Handler {
-	h := &handler{store: store, db: db, logger: logger}
+func NewRouter(d Deps) http.Handler {
+	h := &handler{store: d.Jobs, users: d.Users, hasher: d.Hasher, db: d.DB, logger: d.Logger}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", handleHealth)
 	mux.HandleFunc("GET /readyz", h.ready)
+	mux.HandleFunc("POST /api/v1/auth/register", h.register)
 	mux.HandleFunc("POST /api/v1/jobs", h.createJob)
 	mux.HandleFunc("GET /api/v1/jobs", h.listJobs)
 	mux.HandleFunc("GET /api/v1/jobs/{id}", h.getJob)
@@ -51,8 +64,8 @@ func NewRouter(store JobStore, db Pinger, logger *slog.Logger) http.Handler {
 
 	var handler http.Handler = mux
 	handler = jsonMuxErrors(handler)
-	handler = recoverPanics(logger, handler)
-	handler = logRequests(logger, handler)
+	handler = recoverPanics(d.Logger, handler)
+	handler = logRequests(d.Logger, handler)
 	handler = withRequestID(handler)
 	return handler
 }
@@ -60,6 +73,8 @@ func NewRouter(store JobStore, db Pinger, logger *slog.Logger) http.Handler {
 // handler holds what the endpoints depend on.
 type handler struct {
 	store  JobStore
+	users  UserStore
+	hasher auth.Hasher
 	db     Pinger
 	logger *slog.Logger
 }

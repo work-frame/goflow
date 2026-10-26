@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/work-frame/goflow/internal/api"
+	"github.com/work-frame/goflow/internal/auth"
 	"github.com/work-frame/goflow/internal/database"
 )
 
@@ -69,10 +70,16 @@ func run(ctx context.Context, logger *slog.Logger, addr, dbURL string, ready fun
 		return err
 	}
 
-	store := database.NewJobStore(db)
+	deps := api.Deps{
+		Jobs:   database.NewJobStore(db),
+		Users:  database.NewUserStore(db),
+		Hasher: auth.Hasher{Cost: auth.DefaultCost},
+		DB:     db,
+		Logger: logger,
+	}
 
 	srv := &http.Server{
-		Handler:           api.NewRouter(store, db, logger),
+		Handler:           api.NewRouter(deps),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      10 * time.Second,

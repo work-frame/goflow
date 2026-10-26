@@ -16,7 +16,7 @@ func newTestStore() JobStore { return memStore{m: job.NewMemoryStore()} }
 func discardLogger() *slog.Logger { return slog.New(slog.DiscardHandler) }
 
 func newRouter() http.Handler {
-	return NewRouter(newTestStore(), okPinger, discardLogger())
+	return NewRouter(Deps{Jobs: newTestStore(), Users: newMemUsers(), Hasher: testHasher, DB: okPinger, Logger: discardLogger()})
 }
 
 // do sends a request to h and returns the recorded response.

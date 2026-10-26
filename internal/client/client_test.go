@@ -30,7 +30,7 @@ func (alwaysReady) PingContext(context.Context) error { return nil }
 // The client and server are tested together, so they can't drift apart.
 func newTestClient(t *testing.T) *Client {
 	t.Helper()
-	router := api.NewRouter(memStore{m: job.NewMemoryStore()}, alwaysReady{}, slog.New(slog.DiscardHandler))
+	router := api.NewRouter(api.Deps{Jobs: memStore{m: job.NewMemoryStore()}, DB: alwaysReady{}, Logger: slog.New(slog.DiscardHandler)})
 	srv := httptest.NewServer(router)
 	t.Cleanup(srv.Close)
 	return New(srv.URL)

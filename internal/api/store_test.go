@@ -58,7 +58,7 @@ func TestStoreReceivesRequestContextWithDeadline(t *testing.T) {
 	defer cancel()
 
 	spy := &ctxSpyStore{JobStore: newTestStore(), cancelRequest: cancel}
-	router := NewRouter(spy, okPinger, discardLogger())
+	router := NewRouter(Deps{Jobs: spy, DB: okPinger, Logger: discardLogger()})
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/jobs/abc", nil).WithContext(reqCtx)
 	router.ServeHTTP(httptest.NewRecorder(), req)
@@ -84,7 +84,7 @@ func TestStoreErrorsMapToResponses(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			router := NewRouter(errStore{err: tc.err}, okPinger, discardLogger())
+			router := NewRouter(Deps{Jobs: errStore{err: tc.err}, DB: okPinger, Logger: discardLogger()})
 			rec := do(t, router, http.MethodGet, "/api/v1/jobs/abc", "")
 
 			if rec.Code != tc.want {
