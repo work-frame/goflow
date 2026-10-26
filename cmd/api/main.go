@@ -14,7 +14,6 @@ import (
 
 	"github.com/work-frame/goflow/internal/api"
 	"github.com/work-frame/goflow/internal/database"
-	"github.com/work-frame/goflow/internal/job"
 )
 
 func main() {
@@ -70,8 +69,7 @@ func run(ctx context.Context, logger *slog.Logger, addr, dbURL string, ready fun
 		return err
 	}
 
-	// Jobs are still in memory in Task 10. The jobs table arrives in Task 11.
-	store := job.NewMemoryStore()
+	store := database.NewJobStore(db)
 
 	srv := &http.Server{
 		Handler:           api.NewRouter(store, db, logger),

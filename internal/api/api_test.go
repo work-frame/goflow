@@ -11,7 +11,7 @@ import (
 	"github.com/work-frame/goflow/internal/job"
 )
 
-func newTestStore() *job.MemoryStore { return job.NewMemoryStore() }
+func newTestStore() JobStore { return memStore{m: job.NewMemoryStore()} }
 
 func discardLogger() *slog.Logger { return slog.New(slog.DiscardHandler) }
 

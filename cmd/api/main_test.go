@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -26,8 +27,48 @@ func testDatabaseURL(t *testing.T) string {
 
 func discardLogger() *slog.Logger { return slog.New(slog.DiscardHandler) }
 
+// startServer runs the real server on a random port and returns its base URL
+// and a stop function. stop is safe to call more than once and also runs at cleanup.
+func startServer(t *testing.T, dbURL string) (base string, stop func()) {
+	t.Helper()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	addrCh := make(chan string, 1)
+	runErr := make(chan error, 1)
+	go func() {
+		runErr <- run(ctx, discardLogger(), "127.0.0.1:0", dbURL, func(addr string) { addrCh <- addr })
+	}()
+
+	select {
+	case addr := <-addrCh:
+		base = "http://" + addr
+	case err := <-runErr:
+		cancel()
+		t.Fatalf("server failed to start: %v", err)
+	case <-time.After(10 * time.Second):
+		cancel()
+		t.Fatal("server did not start within 10s")
+	}
+
+	var once sync.Once
+	stop = func() {
+		once.Do(func() {
+			cancel()
+			select {
+			case err := <-runErr:
+				if err != nil {
+					t.Errorf("run returned error after shutdown: %v", err)
+				}
+			case <-time.After(15 * time.Second):
+				t.Error("server did not shut down within 15s")
+			}
+		})
+	}
+	t.Cleanup(stop)
+	return base, stop
+}
+
 // request sends one HTTP request and returns the status, headers and full body.
-// It always closes the response body.
 func request(t *testing.T, client *http.Client, method, url, body string) (int, http.Header, []byte) {
 	t.Helper()
 
@@ -56,52 +97,32 @@ func request(t *testing.T, client *http.Client, method, url, body string) (int, 
 	return resp.StatusCode, resp.Header, data
 }
 
-func TestServerEndToEnd(t *testing.T) {
-	dbURL := testDatabaseURL(t)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	addrCh := make(chan string, 1)
-	runErr := make(chan error, 1)
-	go func() {
-		runErr <- run(ctx, discardLogger(), "127.0.0.1:0", dbURL, func(addr string) { addrCh <- addr })
-	}()
-
-	var base string
-	select {
-	case addr := <-addrCh:
-		base = "http://" + addr
-	case err := <-runErr:
-		t.Fatalf("server failed to start: %v", err)
-	case <-time.After(10 * time.Second):
-		t.Fatal("server did not start within 10s")
-	}
-
-	client := &http.Client{Timeout: 5 * time.Second}
-
-	// Readiness: the real database is reachable.
-	if status, _, body := request(t, client, http.MethodGet, base+"/readyz", ""); status != http.StatusOK {
-		t.Fatalf("readyz: status %d, body %s", status, body)
-	}
-
-	// Create.
-	status, header, body := request(t, client, http.MethodPost, base+"/api/v1/jobs", `{"title":"e2e job"}`)
+func createJob(t *testing.T, client *http.Client, base, title string) string {
+	t.Helper()
+	status, _, body := request(t, client, http.MethodPost, base+"/api/v1/jobs", `{"title":"`+title+`"}`)
 	if status != http.StatusCreated {
 		t.Fatalf("create: status %d, body %s", status, body)
 	}
-	if header.Get("X-Request-ID") == "" {
-		t.Error("create: missing X-Request-ID header")
-	}
 	var created struct {
-		ID     string `json:"id"`
-		Status string `json:"status"`
+		ID string `json:"id"`
 	}
 	if err := json.Unmarshal(body, &created); err != nil {
 		t.Fatalf("decode create body %s: %v", body, err)
 	}
+	return created.ID
+}
 
-	jobURL := base + "/api/v1/jobs/" + created.ID
+func TestServerEndToEnd(t *testing.T) {
+	base, _ := startServer(t, testDatabaseURL(t))
+	client := &http.Client{Timeout: 5 * time.Second}
+
+	if status, _, body := request(t, client, http.MethodGet, base+"/readyz", ""); status != http.StatusOK {
+		t.Fatalf("readyz: status %d, body %s", status, body)
+	}
+
+	id := createJob(t, client, base, "e2e job")
+	jobURL := base + "/api/v1/jobs/" + id
+
 	if status, _, body := request(t, client, http.MethodGet, jobURL, ""); status != http.StatusOK {
 		t.Fatalf("get: status %d, body %s", status, body)
 	}
@@ -111,15 +132,27 @@ func TestServerEndToEnd(t *testing.T) {
 	if status, _, body := request(t, client, http.MethodGet, jobURL, ""); status != http.StatusNotFound {
 		t.Fatalf("get after delete: status %d, body %s", status, body)
 	}
+}
 
-	cancel()
-	select {
-	case err := <-runErr:
-		if err != nil {
-			t.Fatalf("run returned error after shutdown: %v", err)
-		}
-	case <-time.After(15 * time.Second):
-		t.Fatal("server did not shut down within 15s")
+func TestJobsSurviveRestart(t *testing.T) {
+	dbURL := testDatabaseURL(t)
+	client := &http.Client{Timeout: 5 * time.Second}
+
+	base, stop := startServer(t, dbURL)
+	id := createJob(t, client, base, "survive a restart")
+	stop()
+
+	// A brand-new server: new process state, new port, same database.
+	base, _ = startServer(t, dbURL)
+	jobURL := base + "/api/v1/jobs/" + id
+
+	if status, _, body := request(t, client, http.MethodGet, jobURL, ""); status != http.StatusOK {
+		t.Fatalf("job lost after restart: status %d, body %s", status, body)
+	}
+
+	// Leave the shared test database as we found it.
+	if status, _, body := request(t, client, http.MethodDelete, jobURL, ""); status != http.StatusNoContent {
+		t.Fatalf("cleanup delete: status %d, body %s", status, body)
 	}
 }
 
@@ -140,8 +173,6 @@ func TestRunFailsWhenPortIsTaken(t *testing.T) {
 	defer ln.Close()
 
 	err = run(context.Background(), discardLogger(), ln.Addr().String(), dbURL, nil)
-	// Check the specific cause. "Any error" would also pass if the database were down,
-	// and the test would be green for the wrong reason.
 	if !errors.Is(err, syscall.EADDRINUSE) {
 		t.Errorf("err = %v, want address already in use", err)
 	}

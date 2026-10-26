@@ -7,8 +7,6 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-
-	"github.com/work-frame/goflow/internal/job"
 )
 
 func TestRequestIDIsGenerated(t *testing.T) {
@@ -95,7 +93,7 @@ func TestRecoverPanicsReturnsJSON500(t *testing.T) {
 func TestLogRequestsWritesOneLinePerRequest(t *testing.T) {
 	var logs bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&logs, nil))
-	router := NewRouter(job.NewMemoryStore(), okPinger, logger)
+	router := NewRouter(newTestStore(), okPinger, logger)
 
 	req := httptest.NewRequest(http.MethodGet, "/nope?token=secret", nil)
 	req.Header.Set("X-Request-ID", "test-id")
