@@ -15,10 +15,7 @@ import (
 // newTestJobStore returns a JobStore on a fresh, migrated, throwaway database.
 func newTestJobStore(t *testing.T) *JobStore {
 	t.Helper()
-	db := newTestDB(t)
-	if _, err := Migrate(context.Background(), db); err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
+	db := newMigratedTestDB(t)
 	return NewJobStore(db)
 }
 
