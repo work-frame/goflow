@@ -258,3 +258,15 @@ These safeguards have tests, but the failure hasn't been run and recorded yet:
       password_test.go:74: crypto/bcrypt: bcrypt hashes must start with '$', but hashedSecret started with 'f'
   ```
 - **Why:** SHA-256 gives the same output for the same input on every machine. `echo -n "same password twice" | sha256sum` printed `f0f2b492...` twice. With a leaked users table, an attacker hashes millions of common passwords once and looks up every account. bcrypt stores a random salt inside each hash, so two users with the same password get different hashes. Its cost setting also makes every guess slow: measured with `go test -bench` on an i5-8265U, cost 12 took 446 ms per hash and cost 4 took 1.8 ms. SHA-256 has no cost to raise.
+
+## 18. A taken email is told apart by the constraint name
+
+- **Safeguard:** `UserStore.Create` returns `auth.ErrEmailTaken` only when the unique violation comes from `users_email_key`.
+- **Removed:** the `pgErr.ConstraintName == usersEmailKey` check, so every `23505` became "email taken".
+- **Caught by:** `TestUserStoreDuplicateIDIsNotEmailTaken`
+- **Observed:**
+  ```text
+  --- FAIL: TestUserStoreDuplicateIDIsNotEmailTaken (0.18s)
+      users_test.go:83: err = auth: email already registered, want a plain error: the email is free, the ID is not
+  ```
+- **Why:** the `users` table has two unique constraints, the primary key on `id` and `UNIQUE` on `email`, and both raise SQLSTATE `23505`. Without the name check, a duplicate ID reaches the client as `409 email is already registered` for an email nobody has used. Random 128-bit IDs practically never collide, so this would only appear through a bug, such as code that reuses an ID. The wrong message would then send the debugging in the wrong direction.
