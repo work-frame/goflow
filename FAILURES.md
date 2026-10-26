@@ -181,3 +181,16 @@ These safeguards have tests, but the failure hasn't been run and recorded yet:
 These safeguards have tests, but the failure hasn't been run and recorded yet:
 
 - `store.Save` in the CLI's `create` command (expected: `TestCreateThenGet` fails, because each command is a separate process).
+
+
+## 13. Storage calls inherit the request's context
+
+- **Safeguard:** `dbContext` derives the storage context from `r.Context()` with a 3-second timeout.
+- **Removed:** `context.WithTimeout(context.Background(), dbTimeout)`.
+- **Caught by:** `TestStoreReceivesRequestContextWithDeadline`. Its deadline check still passed.
+- **Observed:**
+  ```text
+  --- FAIL: TestStoreReceivesRequestContextWithDeadline
+      after the client disconnected, store ctx.Err() = <nil>, want context.Canceled
+  ```
+- **Why:** every request still succeeded and the 3-second limit still applied, but a client that disconnected no longer cancelled its query. Slow queries would keep running and holding pool connections for responses nobody reads.
