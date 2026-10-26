@@ -194,3 +194,20 @@ These safeguards have tests, but the failure hasn't been run and recorded yet:
       after the client disconnected, store ctx.Err() = <nil>, want context.Canceled
   ```
 - **Why:** every request still succeeded and the 3-second limit still applied, but a client that disconnected no longer cancelled its query. Slow queries would keep running and holding pool connections for responses nobody reads.
+
+
+
+## 14. The template database is closed before it's copied
+
+- **Safeguard:** `createTemplate` calls `tpl.Close()` after migrating the template database.
+- **Removed:** that call.
+- **Caught by:** every test that uses `newMigratedTestDB`
+- **Observed:**
+  ```text
+  --- FAIL: TestJobStoreAddAndGetRoundTrip (5.03s)
+      create test database: ERROR: source database "goflow_tpl_053c99f0476b" is being accessed by other users (SQLSTATE 55006)
+  ```
+  Every affected test took 5 seconds to fail. The run took 36.6 s instead of about 2 s.
+- **Why:** PostgreSQL won't copy a database that has open connections. It waits up to 5 seconds for them to close before failing. The template's pool kept idle connections open, so every copy waited the full 5 seconds and then failed. The leak first showed up as slowness, not as an error.
+
+- **Template databases as a speed-up:** measured over 5 runs each, the template version averaged 1.76 s against 2.06 s, but the ranges overlapped almost completely. With one migration, `CREATE DATABASE` dominates, and every `CREATE DATABASE` already copies a template. Kept for when migrations grow, not for speed today.
