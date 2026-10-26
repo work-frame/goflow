@@ -25,7 +25,7 @@ func TestConcurrentRequests(t *testing.T) {
 	}
 	wg.Wait()
 
-	rec := do(t, h, http.MethodGet, "/api/v1/jobs", "")
+	rec := do(t, h, http.MethodGet, "/api/v1/jobs?limit=200", "")
 	if got := len(decode[listJobsResponse](t, rec).Jobs); got != n {
 		t.Errorf("got %d jobs, want %d", got, n)
 	}

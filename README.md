@@ -137,3 +137,13 @@ scripts/         development scripts
 
 
 See [FAILURES.md](FAILURES.md) for what breaks when each safeguard is removed, with real output.
+
+`GET /api/v1/jobs` returns jobs oldest first, one page at a time:
+
+| Parameter | Default | Meaning |
+|---|---|---|
+| `status` | (all) | `pending`, `queued`, `processing`, `completed` or `failed` |
+| `limit` | 50 | Jobs per page, 1 to 200 |
+| `cursor` | (start) | The `next_cursor` from the previous page. Treat it as opaque |
+
+The response includes `next_cursor` until the last page, where it is omitted.

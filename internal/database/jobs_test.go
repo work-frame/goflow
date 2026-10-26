@@ -12,11 +12,10 @@ import (
 	"github.com/work-frame/goflow/internal/job"
 )
 
-// newTestJobStore returns a JobStore on a fresh, migrated, throwaway database.
+// newTestJobStore returns a JobStore on a private copy of the migrated template.
 func newTestJobStore(t *testing.T) *JobStore {
 	t.Helper()
-	db := newMigratedTestDB(t)
-	return NewJobStore(db)
+	return NewJobStore(newMigratedTestDB(t))
 }
 
 func mustNewJob(t *testing.T, title string) *job.Job {
@@ -32,6 +31,14 @@ func titles(jobs []*job.Job) []string {
 	out := make([]string, len(jobs))
 	for i, j := range jobs {
 		out[i] = j.Title
+	}
+	return out
+}
+
+func ids(jobs []*job.Job) []string {
+	out := make([]string, len(jobs))
+	for i, j := range jobs {
+		out[i] = j.ID
 	}
 	return out
 }
@@ -52,7 +59,6 @@ func TestJobStoreAddAndGetRoundTrip(t *testing.T) {
 	if got.ID != want.ID || got.Title != want.Title || got.Status != want.Status {
 		t.Errorf("got %+v, want %+v", got, want)
 	}
-	// Equal compares instants. == would also compare time zones and Go's monotonic clock reading.
 	if !got.CreatedAt.Equal(want.CreatedAt) || !got.UpdatedAt.Equal(want.UpdatedAt) {
 		t.Errorf("timestamps changed on round trip:\n got  %v\n want %v", got.CreatedAt, want.CreatedAt)
 	}
@@ -90,12 +96,12 @@ func TestJobStoreList(t *testing.T) {
 	s := newTestJobStore(t)
 	ctx := context.Background()
 
-	empty, err := s.List(ctx, "")
+	empty, err := s.List(ctx, job.ListParams{Limit: 10})
 	if err != nil {
 		t.Fatalf("List on empty table: %v", err)
 	}
-	if empty == nil || len(empty) != 0 {
-		t.Errorf("List on empty table = %v, want an empty non-nil slice", empty)
+	if empty.Jobs == nil || len(empty.Jobs) != 0 || empty.Next != nil {
+		t.Errorf("List on empty table = %+v, want an empty non-nil slice and no cursor", empty)
 	}
 
 	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
@@ -104,7 +110,6 @@ func TestJobStoreList(t *testing.T) {
 		offset time.Duration
 		status job.Status
 	}{
-		// Inserted out of order on purpose.
 		{"third", 2 * time.Minute, job.StatusPending},
 		{"first", 0, job.StatusCompleted},
 		{"second", time.Minute, job.StatusPending},
@@ -119,20 +124,79 @@ func TestJobStoreList(t *testing.T) {
 		}
 	}
 
-	all, err := s.List(ctx, "")
+	all, err := s.List(ctx, job.ListParams{Limit: 10})
 	if err != nil {
 		t.Fatalf("List all: %v", err)
 	}
-	if got, want := titles(all), []string{"first", "second", "third"}; !slices.Equal(got, want) {
+	if got, want := titles(all.Jobs), []string{"first", "second", "third"}; !slices.Equal(got, want) {
 		t.Errorf("List all = %v, want %v", got, want)
 	}
 
-	pending, err := s.List(ctx, job.StatusPending)
+	pending, err := s.List(ctx, job.ListParams{Status: job.StatusPending, Limit: 10})
 	if err != nil {
 		t.Fatalf("List pending: %v", err)
 	}
-	if got, want := titles(pending), []string{"second", "third"}; !slices.Equal(got, want) {
+	if got, want := titles(pending.Jobs), []string{"second", "third"}; !slices.Equal(got, want) {
 		t.Errorf("List pending = %v, want %v", got, want)
+	}
+}
+
+func TestJobStoreListPaginates(t *testing.T) {
+	s := newTestJobStore(t)
+	ctx := context.Background()
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	// Five jobs. The last two share a created_at, so the ID has to break the tie.
+	offsets := []time.Duration{0, time.Minute, 2 * time.Minute, 3 * time.Minute, 3 * time.Minute}
+	for i, off := range offsets {
+		j := mustNewJob(t, fmt.Sprintf("job %d", i))
+		j.CreatedAt = base.Add(off)
+		j.UpdatedAt = j.CreatedAt
+		if err := s.Add(ctx, j); err != nil {
+			t.Fatalf("Add: %v", err)
+		}
+	}
+
+	everything, err := s.List(ctx, job.ListParams{Limit: job.MaxPageSize})
+	if err != nil {
+		t.Fatalf("List everything: %v", err)
+	}
+	want := ids(everything.Jobs)
+	if len(want) != len(offsets) {
+		t.Fatalf("stored %d jobs, want %d", len(want), len(offsets))
+	}
+
+	var got []string
+	var after *job.Cursor
+	for pages := 1; ; pages++ {
+		page, err := s.List(ctx, job.ListParams{After: after, Limit: 2})
+		if err != nil {
+			t.Fatalf("List page %d: %v", pages, err)
+		}
+		got = append(got, ids(page.Jobs)...)
+		if page.Next == nil {
+			if pages != 3 {
+				t.Errorf("pages = %d, want 3 (2 + 2 + 1)", pages)
+			}
+			break
+		}
+		if pages > 100 {
+			t.Fatal("pagination never reached a last page")
+		}
+		after = page.Next
+	}
+
+	if !slices.Equal(got, want) {
+		t.Errorf("paged IDs = %v,\nwant %v", got, want)
+	}
+}
+
+func TestJobStoreListRejectsBadLimit(t *testing.T) {
+	s := newTestJobStore(t)
+
+	_, err := s.List(context.Background(), job.ListParams{Limit: 0})
+	if !errors.Is(err, job.ErrInvalidLimit) {
+		t.Errorf("err = %v, want job.ErrInvalidLimit", err)
 	}
 }
 
@@ -159,7 +223,7 @@ func TestJobStoreStopsWhenContextIsCancelled(t *testing.T) {
 	s := newTestJobStore(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // already cancelled, like a client that disconnected
+	cancel()
 
 	_, err := s.Get(ctx, "anything")
 	if !errors.Is(err, context.Canceled) {
@@ -177,7 +241,6 @@ func TestJobStoreConcurrentAdds(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			// Not mustNewJob: t.Fatalf must never be called from a goroutine the test started.
 			j, err := job.New(fmt.Sprintf("job %d", i))
 			if err != nil {
 				t.Errorf("job.New: %v", err)
@@ -190,11 +253,11 @@ func TestJobStoreConcurrentAdds(t *testing.T) {
 	}
 	wg.Wait()
 
-	all, err := s.List(ctx, "")
+	all, err := s.List(ctx, job.ListParams{Limit: job.MaxPageSize})
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
-	if len(all) != n {
-		t.Errorf("stored %d jobs, want %d", len(all), n)
+	if len(all.Jobs) != n {
+		t.Errorf("stored %d jobs, want %d", len(all.Jobs), n)
 	}
 }

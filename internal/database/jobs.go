@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/jackc/pgx/v5/pgconn"
 
@@ -17,7 +18,7 @@ const uniqueViolation = "23505"
 const selectJobColumns = `SELECT id, title, status, created_at, updated_at FROM jobs`
 
 // JobStore keeps jobs in PostgreSQL. It is safe for concurrent use because *sql.DB is.
-// Callers only ever see job package errors, never SQL or driver errors to decode.
+// Callers only ever see job package errors, never SQL or driver errors.
 type JobStore struct {
 	db *sql.DB
 }
@@ -62,42 +63,54 @@ func (s *JobStore) Get(ctx context.Context, id string) (*job.Job, error) {
 	return j, nil
 }
 
-// List returns jobs oldest first. An empty status means all jobs.
-// It never returns a nil slice.
-func (s *JobStore) List(ctx context.Context, status job.Status) ([]*job.Job, error) {
-	const order = ` ORDER BY created_at, id`
+// List returns one page of jobs, oldest first by (created_at, id).
+// It uses keyset pagination: "rows after this cursor", never OFFSET.
+func (s *JobStore) List(ctx context.Context, p job.ListParams) (job.Page, error) {
+	if err := p.Validate(); err != nil {
+		return job.Page{}, err
+	}
 
-	// Two separate queries rather than "WHERE $1 = '' OR status = $1": the OR form
-	// makes it hard for Postgres to use the (status, created_at) index.
+	// The SQL is built only from fixed strings written here. The $N numbers vary,
+	// but every value travels separately in args, so this is not injectable.
 	var (
-		rows *sql.Rows
-		err  error
+		where []string
+		args  []any
 	)
-	if status == "" {
-		rows, err = s.db.QueryContext(ctx, selectJobColumns+order)
-	} else {
-		rows, err = s.db.QueryContext(ctx, selectJobColumns+` WHERE status = $1`+order, string(status))
+	if p.Status != "" {
+		args = append(args, string(p.Status))
+		where = append(where, fmt.Sprintf("status = $%d", len(args)))
 	}
+	if p.After != nil {
+		args = append(args, p.After.CreatedAt, p.After.ID)
+		where = append(where, fmt.Sprintf("(created_at, id) > ($%d, $%d)", len(args)-1, len(args)))
+	}
+
+	query := selectJobColumns
+	if len(where) > 0 {
+		query += " WHERE " + strings.Join(where, " AND ")
+	}
+	// One extra row tells NewPage whether another page exists.
+	args = append(args, p.Limit+1)
+	query += fmt.Sprintf(" ORDER BY created_at, id LIMIT $%d", len(args))
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("database: list jobs: %w", err)
+		return job.Page{}, fmt.Errorf("database: list jobs: %w", err)
 	}
-	// Returns the connection to the pool. Forgetting this leaks connections
-	// until the pool's 10 are all stuck and every request waits forever.
 	defer rows.Close()
 
-	jobs := []*job.Job{}
+	jobs := make([]*job.Job, 0, p.Limit+1)
 	for rows.Next() {
 		j, err := scanJob(rows)
 		if err != nil {
-			return nil, fmt.Errorf("database: scan job: %w", err)
+			return job.Page{}, fmt.Errorf("database: scan job: %w", err)
 		}
 		jobs = append(jobs, j)
 	}
-	// rows.Next returns false on both "no more rows" and "error mid-stream". Err tells them apart.
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("database: list jobs: %w", err)
+		return job.Page{}, fmt.Errorf("database: list jobs: %w", err)
 	}
-	return jobs, nil
+	return job.NewPage(jobs, p.Limit), nil
 }
 
 // Delete removes the job with the given ID, or returns job.ErrNotFound.
@@ -116,8 +129,7 @@ func (s *JobStore) Delete(ctx context.Context, id string) error {
 	return nil
 }
 
-// scanner is the one method *sql.Row and *sql.Rows have in common,
-// so scanJob works for both Get and List.
+// scanner is the one method *sql.Row and *sql.Rows have in common.
 type scanner interface {
 	Scan(dest ...any) error
 }
@@ -127,8 +139,6 @@ func scanJob(s scanner) (*job.Job, error) {
 	if err := s.Scan(&j.ID, &j.Title, &j.Status, &j.CreatedAt, &j.UpdatedAt); err != nil {
 		return nil, err
 	}
-	// Postgres stores the instant. The driver returns it in the machine's local zone,
-	// so normalise to UTC to match everything else in GoFlow.
 	j.CreatedAt = j.CreatedAt.UTC()
 	j.UpdatedAt = j.UpdatedAt.UTC()
 	return &j, nil
