@@ -12,19 +12,37 @@ import (
 	"github.com/work-frame/goflow/internal/job"
 )
 
-// memStore adapts job.MemoryStore to JobStore so handler tests run without a database.
+// memStore adapts job.MemoryStore to JobStore so handler tests run without a
+// database. Like database.JobStore, it treats another user's job as missing.
 type memStore struct {
 	m *job.MemoryStore
 }
 
 func (s memStore) Add(_ context.Context, j *job.Job) error { return s.m.Add(j) }
 
-func (s memStore) Get(_ context.Context, id string) (*job.Job, error) { return s.m.Get(id) }
+func (s memStore) Get(_ context.Context, userID, id string) (*job.Job, error) {
+	j, err := s.m.Get(id)
+	if err == nil && j.UserID != userID {
+		return nil, job.ErrNotFound
+	}
+	return j, err
+}
 
-func (s memStore) Delete(_ context.Context, id string) error { return s.m.Delete(id) }
+func (s memStore) Delete(ctx context.Context, userID, id string) error {
+	if _, err := s.Get(ctx, userID, id); err != nil {
+		return err
+	}
+	return s.m.Delete(id)
+}
 
-func (s memStore) List(_ context.Context, p job.ListParams) (job.Page, error) {
-	return job.Paginate(s.m.List(), p)
+func (s memStore) List(_ context.Context, userID string, p job.ListParams) (job.Page, error) {
+	var mine []*job.Job
+	for _, j := range s.m.List() {
+		if j.UserID == userID {
+			mine = append(mine, j)
+		}
+	}
+	return job.Paginate(mine, p)
 }
 
 // errStore fails every call with the same error.
@@ -32,10 +50,12 @@ type errStore struct {
 	err error
 }
 
-func (s errStore) Add(context.Context, *job.Job) error                    { return s.err }
-func (s errStore) Get(context.Context, string) (*job.Job, error)          { return nil, s.err }
-func (s errStore) List(context.Context, job.ListParams) (job.Page, error) { return job.Page{}, s.err }
-func (s errStore) Delete(context.Context, string) error                   { return s.err }
+func (s errStore) Add(context.Context, *job.Job) error                   { return s.err }
+func (s errStore) Get(context.Context, string, string) (*job.Job, error) { return nil, s.err }
+func (s errStore) List(context.Context, string, job.ListParams) (job.Page, error) {
+	return job.Page{}, s.err
+}
+func (s errStore) Delete(context.Context, string, string) error { return s.err }
 
 // ctxSpyStore records what context the handler gave the store.
 // Embedding JobStore supplies the methods it doesn't override.
@@ -46,7 +66,7 @@ type ctxSpyStore struct {
 	errAfterCancel error
 }
 
-func (s *ctxSpyStore) Get(ctx context.Context, id string) (*job.Job, error) {
+func (s *ctxSpyStore) Get(ctx context.Context, userID, id string) (*job.Job, error) {
 	_, s.hadDeadline = ctx.Deadline()
 	s.cancelRequest() // the client disconnects while the "query" is running
 	s.errAfterCancel = ctx.Err()
@@ -58,7 +78,7 @@ func TestStoreReceivesRequestContextWithDeadline(t *testing.T) {
 	defer cancel()
 
 	spy := &ctxSpyStore{JobStore: newTestStore(), cancelRequest: cancel}
-	router := NewRouter(Deps{Jobs: spy, DB: okPinger, Logger: discardLogger()})
+	router := signedIn(Deps{Jobs: spy, DB: okPinger, Logger: discardLogger()})
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/jobs/abc", nil).WithContext(reqCtx)
 	router.ServeHTTP(httptest.NewRecorder(), req)
@@ -84,7 +104,7 @@ func TestStoreErrorsMapToResponses(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			router := NewRouter(Deps{Jobs: errStore{err: tc.err}, DB: okPinger, Logger: discardLogger()})
+			router := signedIn(Deps{Jobs: errStore{err: tc.err}, DB: okPinger, Logger: discardLogger()})
 			rec := do(t, router, http.MethodGet, "/api/v1/jobs/abc", "")
 
 			if rec.Code != tc.want {

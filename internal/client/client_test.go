@@ -1,39 +1,95 @@
 package client
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/work-frame/goflow/internal/api"
+	"github.com/work-frame/goflow/internal/auth"
 	"github.com/work-frame/goflow/internal/job"
 )
 
 // memStore lets the real API router run on job.MemoryStore, with no database.
+// Like database.JobStore, it treats another user's job as missing.
 type memStore struct{ m *job.MemoryStore }
 
-func (s memStore) Add(_ context.Context, j *job.Job) error            { return s.m.Add(j) }
-func (s memStore) Get(_ context.Context, id string) (*job.Job, error) { return s.m.Get(id) }
-func (s memStore) Delete(_ context.Context, id string) error          { return s.m.Delete(id) }
-func (s memStore) List(_ context.Context, p job.ListParams) (job.Page, error) {
-	return job.Paginate(s.m.List(), p)
+func (s memStore) Add(_ context.Context, j *job.Job) error { return s.m.Add(j) }
+
+func (s memStore) Get(_ context.Context, userID, id string) (*job.Job, error) {
+	j, err := s.m.Get(id)
+	if err == nil && j.UserID != userID {
+		return nil, job.ErrNotFound
+	}
+	return j, err
+}
+
+func (s memStore) Delete(ctx context.Context, userID, id string) error {
+	if _, err := s.Get(ctx, userID, id); err != nil {
+		return err
+	}
+	return s.m.Delete(id)
+}
+
+func (s memStore) List(_ context.Context, userID string, p job.ListParams) (job.Page, error) {
+	var mine []*job.Job
+	for _, j := range s.m.List() {
+		if j.UserID == userID {
+			mine = append(mine, j)
+		}
+	}
+	return job.Paginate(mine, p)
+}
+
+// oneSession is a SessionStore that knows a single valid token.
+type oneSession struct {
+	hash []byte
+	user auth.User
+}
+
+func (s oneSession) Create(context.Context, *auth.Session) error { return nil }
+func (s oneSession) Delete(context.Context, []byte) error        { return nil }
+
+func (s oneSession) Lookup(_ context.Context, hash []byte) (*auth.User, error) {
+	if !bytes.Equal(hash, s.hash) {
+		return nil, auth.ErrSessionNotFound
+	}
+	u := s.user
+	return &u, nil
 }
 
 type alwaysReady struct{}
 
 func (alwaysReady) PingContext(context.Context) error { return nil }
 
-// newTestClient runs the real API router on a local test server and returns a client for it.
-// The client and server are tested together, so they can't drift apart.
-func newTestClient(t *testing.T) *Client {
+// newTestServer runs the real API router on a local test server and returns
+// its URL and a valid session token for it. The client and server are tested
+// together, so they can't drift apart.
+func newTestServer(t *testing.T) (url, token string) {
 	t.Helper()
-	router := api.NewRouter(api.Deps{Jobs: memStore{m: job.NewMemoryStore()}, DB: alwaysReady{}, Logger: slog.New(slog.DiscardHandler)})
+	token, sess := auth.NewSession("client-test-user", time.Now())
+	sessions := oneSession{hash: sess.TokenHash, user: auth.User{ID: "client-test-user"}}
+
+	router := api.NewRouter(api.Deps{
+		Jobs:     memStore{m: job.NewMemoryStore()},
+		Sessions: sessions,
+		DB:       alwaysReady{},
+		Logger:   slog.New(slog.DiscardHandler),
+	})
 	srv := httptest.NewServer(router)
 	t.Cleanup(srv.Close)
-	return New(srv.URL)
+	return srv.URL, token
+}
+
+func newTestClient(t *testing.T) *Client {
+	t.Helper()
+	return New(newTestServer(t))
 }
 
 func TestClientCreateGetDelete(t *testing.T) {
@@ -113,7 +169,7 @@ func TestClientFollowsCursors(t *testing.T) {
 }
 
 func TestClientReportsUnreachableServer(t *testing.T) {
-	c := New("http://127.0.0.1:1") // nothing listens on port 1
+	c := New("http://127.0.0.1:1", "") // nothing listens on port 1
 
 	_, err := c.Get(context.Background(), "abc")
 	if err == nil {
@@ -122,5 +178,25 @@ func TestClientReportsUnreachableServer(t *testing.T) {
 	var apiErr *APIError
 	if errors.As(err, &apiErr) {
 		t.Errorf("a connection failure was reported as an API response: %v", err)
+	}
+}
+
+func TestClientWithoutAValidTokenIsUnauthenticated(t *testing.T) {
+	url, token := newTestServer(t)
+	ctx := context.Background()
+
+	for name, c := range map[string]*Client{
+		"no token":    New(url, ""),
+		"wrong token": New(url, "gfs_"+strings.Repeat("A", 43)),
+	} {
+		if _, _, err := c.List(ctx, "", ""); !errors.Is(err, ErrUnauthenticated) {
+			t.Errorf("%s: err = %v, want ErrUnauthenticated", name, err)
+		}
+	}
+
+	// The valid token works, and never appears in an error message.
+	c := New(url, token)
+	if _, err := c.Get(ctx, "does-not-exist"); !errors.Is(err, job.ErrNotFound) || strings.Contains(err.Error(), token) {
+		t.Errorf("err = %v, want job.ErrNotFound without the token in it", err)
 	}
 }

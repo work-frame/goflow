@@ -25,9 +25,9 @@ const (
 // database.JobStore satisfies it in production. Tests use small in-memory fakes.
 type JobStore interface {
 	Add(ctx context.Context, j *job.Job) error
-	Get(ctx context.Context, id string) (*job.Job, error)
-	List(ctx context.Context, p job.ListParams) (job.Page, error)
-	Delete(ctx context.Context, id string) error
+	Get(ctx context.Context, userID, id string) (*job.Job, error)
+	List(ctx context.Context, userID string, p job.ListParams) (job.Page, error)
+	Delete(ctx context.Context, userID, id string) error
 }
 
 // Pinger reports whether a dependency is reachable. *sql.DB satisfies it.
@@ -62,10 +62,10 @@ func NewRouter(d Deps) http.Handler {
 	mux.HandleFunc("POST /api/v1/auth/login", h.login)
 	mux.HandleFunc("POST /api/v1/auth/logout", h.requireSession(h.logout))
 	mux.HandleFunc("GET /api/v1/auth/me", h.requireSession(h.me))
-	mux.HandleFunc("POST /api/v1/jobs", h.createJob)
-	mux.HandleFunc("GET /api/v1/jobs", h.listJobs)
-	mux.HandleFunc("GET /api/v1/jobs/{id}", h.getJob)
-	mux.HandleFunc("DELETE /api/v1/jobs/{id}", h.deleteJob)
+	mux.HandleFunc("POST /api/v1/jobs", h.requireSession(h.createJob))
+	mux.HandleFunc("GET /api/v1/jobs", h.requireSession(h.listJobs))
+	mux.HandleFunc("GET /api/v1/jobs/{id}", h.requireSession(h.getJob))
+	mux.HandleFunc("DELETE /api/v1/jobs/{id}", h.requireSession(h.deleteJob))
 
 	var handler http.Handler = mux
 	handler = jsonMuxErrors(handler)
@@ -158,6 +158,8 @@ func (h *handler) createJob(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := dbContext(r)
 	defer cancel()
 
+	// The owner always comes from the session, never from the request body.
+	j.UserID = callerID(r)
 	if err := h.store.Add(ctx, j); err != nil {
 		h.storeError(w, r, err)
 		return
@@ -201,7 +203,7 @@ func (h *handler) listJobs(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := dbContext(r)
 	defer cancel()
 
-	page, err := h.store.List(ctx, job.ListParams{Status: status, After: after, Limit: limit})
+	page, err := h.store.List(ctx, callerID(r), job.ListParams{Status: status, After: after, Limit: limit})
 	if err != nil {
 		h.storeError(w, r, err)
 		return
@@ -218,7 +220,7 @@ func (h *handler) getJob(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := dbContext(r)
 	defer cancel()
 
-	j, err := h.store.Get(ctx, r.PathValue("id"))
+	j, err := h.store.Get(ctx, callerID(r), r.PathValue("id"))
 	if errors.Is(err, job.ErrNotFound) {
 		writeError(w, http.StatusNotFound, "job not found")
 		return
@@ -234,7 +236,7 @@ func (h *handler) deleteJob(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := dbContext(r)
 	defer cancel()
 
-	err := h.store.Delete(ctx, r.PathValue("id"))
+	err := h.store.Delete(ctx, callerID(r), r.PathValue("id"))
 	if errors.Is(err, job.ErrNotFound) {
 		writeError(w, http.StatusNotFound, "job not found")
 		return

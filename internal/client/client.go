@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -16,16 +17,23 @@ import (
 	"github.com/work-frame/goflow/internal/job"
 )
 
+// ErrUnauthenticated means the API refused the session token: it is missing,
+// wrong, expired, or was ended by logout.
+var ErrUnauthenticated = errors.New("client: not signed in, or the session has expired")
+
 // Client talks to a GoFlow API server. It is safe for concurrent use.
 type Client struct {
 	baseURL string
+	token   string // session token; never logged or put in an error
 	http    *http.Client
 }
 
 // New returns a Client for the API at baseURL, for example "http://localhost:8080".
-func New(baseURL string) *Client {
+// token is a session token from POST /api/v1/auth/login; "" sends none.
+func New(baseURL, token string) *Client {
 	return &Client{
 		baseURL: strings.TrimRight(baseURL, "/"),
+		token:   token,
 		// A backstop only. Callers should also pass a context with their own deadline.
 		http: &http.Client{Timeout: 30 * time.Second},
 	}
@@ -105,6 +113,9 @@ func (c *Client) do(ctx context.Context, method, path string, body []byte, want 
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
 
 	resp, err := c.http.Do(req)
 	if err != nil {
@@ -120,6 +131,9 @@ func (c *Client) do(ctx context.Context, method, path string, body []byte, want 
 		_ = json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&e)
 		if resp.StatusCode == http.StatusNotFound && e.Error == "job not found" {
 			return job.ErrNotFound
+		}
+		if resp.StatusCode == http.StatusUnauthorized {
+			return ErrUnauthenticated
 		}
 		return &APIError{Status: resp.StatusCode, Message: e.Error}
 	}

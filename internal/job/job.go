@@ -42,6 +42,7 @@ var (
 // Job is a unit of background work.
 type Job struct {
 	ID        string    `json:"id"`
+	UserID    string    `json:"-"` // the owner; clients only ever see their own jobs
 	Title     string    `json:"title"`
 	Status    Status    `json:"status"`
 	CreatedAt time.Time `json:"created_at"`
@@ -76,3 +77,6 @@ func newID() string {
 	rand.Read(b)
 	return hex.EncodeToString(b)
 }
+
+// ErrNoOwner is returned when a job is stored without an owner.
+var ErrNoOwner = errors.New("job: no owner")

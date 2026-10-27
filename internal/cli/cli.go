@@ -30,6 +30,7 @@ const usage = `Usage:
   goflow job delete <id>
 
 The CLI talks to a running GoFlow API. Set GOFLOW_API_URL (default http://localhost:8080).
+Set GOFLOW_TOKEN to a session token from POST /api/v1/auth/login (see README).
 `
 
 // Jobs is what the CLI needs from GoFlow. client.Client satisfies it. Tests use a fake.

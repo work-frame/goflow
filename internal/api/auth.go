@@ -268,3 +268,9 @@ func (h *handler) logout(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
+
+// callerID is the user ID of the signed-in caller. Only handlers behind
+// requireSession may call it.
+func callerID(r *http.Request) string {
+	return currentSession(r.Context()).user.ID
+}

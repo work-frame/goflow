@@ -98,7 +98,12 @@ func TestJobsTableConstraints(t *testing.T) {
 		t.Fatalf("Migrate: %v", err)
 	}
 
-	const insert = `INSERT INTO jobs (id, title, status, created_at, updated_at) VALUES ($1, $2, $3, $4, $5)`
+	// Since migration 4 every job needs an owner. The one user owns them all.
+	owner := mustNewUser(t, "owner@example.com")
+	if err := NewUserStore(db).Create(ctx, owner); err != nil {
+		t.Fatalf("create owner: %v", err)
+	}
+	const insert = `INSERT INTO jobs (id, user_id, title, status, created_at, updated_at) VALUES ($1, (SELECT id FROM users), $2, $3, $4, $5)`
 	now := time.Now().UTC()
 	existingID := strings.Repeat("a", 32)
 
