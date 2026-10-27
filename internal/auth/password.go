@@ -71,10 +71,20 @@ func (Hasher) Compare(hash, password string) error {
 	return nil
 }
 
-// NeedsRehash reports whether hash was made with a lower cost than h uses.
-// Login is the only time the server sees the password again, so that is
-// when an old, cheaper hash can be upgraded.
+// NeedsRehash reports whether hash was made with a different cost than h uses,
+// higher or lower. Login is the only time the server sees the password again,
+// so that is when the hash is brought to the configured cost. Keeping every
+// hash at one cost also keeps login timing the same for every account.
 func (h Hasher) NeedsRehash(hash string) bool {
 	cost, err := bcrypt.Cost([]byte(hash))
-	return err == nil && cost < h.Cost
+	return err == nil && cost != h.effectiveCost()
+}
+
+// effectiveCost is the cost Hash really uses: bcrypt replaces anything below
+// its minimum with its default.
+func (h Hasher) effectiveCost() int {
+	if h.Cost < bcrypt.MinCost {
+		return bcrypt.DefaultCost
+	}
+	return h.Cost
 }

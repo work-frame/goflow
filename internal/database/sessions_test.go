@@ -154,3 +154,157 @@ func TestUserStoreUpdatePasswordHash(t *testing.T) {
 		t.Errorf("unknown user: err = %v, want auth.ErrUserNotFound", err)
 	}
 }
+
+// sessionsOf creates n sessions for userID that started at start.
+func sessionsOf(t *testing.T, s *SessionStore, userID string, n int, start time.Time) []string {
+	t.Helper()
+	tokens := make([]string, n)
+	for i := range n {
+		token, sess := auth.NewSession(userID, start)
+		if err := s.Create(context.Background(), sess); err != nil {
+			t.Fatalf("create session: %v", err)
+		}
+		tokens[i] = token
+	}
+	return tokens
+}
+
+func countSessions(t *testing.T, db *sql.DB, userID string) int {
+	t.Helper()
+	var n int
+	if err := db.QueryRowContext(context.Background(), "SELECT count(*) FROM sessions WHERE user_id = $1", userID).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+// newTwoUserFixture adds a second user to newSessionFixture's database.
+func newTwoUserFixture(t *testing.T) (*sql.DB, *auth.User, *auth.User, *SessionStore) {
+	t.Helper()
+	db, dan, s := newSessionFixture(t)
+	eve := mustNewUser(t, "eve@example.com")
+	if err := NewUserStore(db).Create(context.Background(), eve); err != nil {
+		t.Fatal(err)
+	}
+	return db, dan, eve, s
+}
+
+func TestSessionStoreDeleteExpired(t *testing.T) {
+	db, u, s := newSessionFixture(t)
+	ctx := context.Background()
+
+	sessionsOf(t, s, u.ID, 3, time.Now().Add(-2*auth.SessionTTL)) // ended yesterday
+	live := sessionsOf(t, s, u.ID, 2, time.Now())
+
+	n, err := s.DeleteExpired(ctx)
+	if err != nil {
+		t.Fatalf("DeleteExpired: %v", err)
+	}
+	if n != 3 {
+		t.Errorf("deleted %d sessions, want the 3 expired ones", n)
+	}
+	if got := countSessions(t, db, u.ID); got != 2 {
+		t.Errorf("%d sessions left, want the 2 live ones", got)
+	}
+	if _, err := s.Lookup(ctx, auth.HashToken(live[0])); err != nil {
+		t.Errorf("a live session stopped working: %v", err)
+	}
+}
+
+func TestSessionStoreDeleteAllForUser(t *testing.T) {
+	db, dan, eve, s := newTwoUserFixture(t)
+
+	sessionsOf(t, s, dan.ID, 3, time.Now())
+	sessionsOf(t, s, eve.ID, 1, time.Now())
+
+	n, err := s.DeleteAllForUser(context.Background(), dan.ID)
+	if err != nil {
+		t.Fatalf("DeleteAllForUser: %v", err)
+	}
+	if n != 3 || countSessions(t, db, dan.ID) != 0 {
+		t.Errorf("ended %d of dan's sessions, %d left; want 3 and 0", n, countSessions(t, db, dan.ID))
+	}
+	if countSessions(t, db, eve.ID) != 1 {
+		t.Error("ending dan's sessions also ended eve's")
+	}
+}
+
+func TestUserStoreChangePassword(t *testing.T) {
+	db, dan, eve, s := newTwoUserFixture(t)
+	users := NewUserStore(db)
+	ctx := context.Background()
+
+	tokens := sessionsOf(t, s, dan.ID, 3, time.Now()) // laptop, phone, stolen tablet
+	sessionsOf(t, s, eve.ID, 1, time.Now())
+	current := auth.HashToken(tokens[0])
+
+	newHash, err := testHasher.Hash("a brand new password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ended, err := users.ChangePassword(ctx, dan.ID, newHash, current)
+	if err != nil {
+		t.Fatalf("ChangePassword: %v", err)
+	}
+	if ended != 2 {
+		t.Errorf("ended %d other sessions, want 2", ended)
+	}
+
+	if _, err := s.Lookup(ctx, current); err != nil {
+		t.Errorf("the session that changed the password was ended: %v", err)
+	}
+	for _, other := range tokens[1:] {
+		if _, err := s.Lookup(ctx, auth.HashToken(other)); !errors.Is(err, auth.ErrSessionNotFound) {
+			t.Errorf("another session survived the password change: err = %v", err)
+		}
+	}
+	if countSessions(t, db, eve.ID) != 1 {
+		t.Error("dan's password change ended eve's session")
+	}
+	got, err := users.GetByEmail(ctx, dan.Email)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.PasswordHash != newHash {
+		t.Error("password hash was not changed")
+	}
+
+	if _, err := users.ChangePassword(ctx, "ffffffffffffffffffffffffffffffff", newHash, current); !errors.Is(err, auth.ErrUserNotFound) {
+		t.Errorf("unknown user: err = %v, want auth.ErrUserNotFound", err)
+	}
+}
+
+// If ending the other sessions fails, the password must not change either.
+func TestUserStoreChangePasswordIsAllOrNothing(t *testing.T) {
+	db, dan, _, _ := newTwoUserFixture(t)
+	users := NewUserStore(db)
+	ctx := context.Background()
+
+	newHash, err := testHasher.Hash("a brand new password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := users.ChangePassword(ctx, dan.ID, newHash, []byte{}); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	// Renaming the column makes the DELETE fail after the UPDATE has run.
+	_, err = db.ExecContext(ctx, `ALTER TABLE sessions RENAME COLUMN token_hash TO token_hash_gone`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newer, err := testHasher.Hash("an even newer password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := users.ChangePassword(ctx, dan.ID, newer, []byte{}); err == nil {
+		t.Fatal("ChangePassword succeeded with a broken sessions table")
+	}
+
+	got, err := users.GetByEmail(ctx, dan.Email)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.PasswordHash != newHash {
+		t.Error("the password changed although ending the sessions failed")
+	}
+}

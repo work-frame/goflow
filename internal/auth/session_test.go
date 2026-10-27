@@ -75,7 +75,26 @@ func TestNeedsRehash(t *testing.T) {
 	if (Hasher{Cost: bcrypt.MinCost}).NeedsRehash(old) {
 		t.Error("a hash at the current cost should not need rehashing")
 	}
+	newer, err := Hasher{Cost: bcrypt.MinCost + 1}.Hash("correct horse battery")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !(Hasher{Cost: bcrypt.MinCost}).NeedsRehash(newer) {
+		t.Error("a cost-5 hash should be rehashed at cost 4 too: every hash at one cost")
+	}
+	if (Hasher{}).NeedsRehash(mustHashAt(t, bcrypt.DefaultCost)) {
+		t.Error("the zero Hasher hashes at bcrypt's default cost, so that cost is current")
+	}
 	if (Hasher{Cost: bcrypt.MinCost + 1}).NeedsRehash("not a hash") {
 		t.Error("a malformed hash should not be reported as upgradable")
 	}
+}
+
+func mustHashAt(t *testing.T, cost int) string {
+	t.Helper()
+	h, err := bcrypt.GenerateFromPassword([]byte("correct horse battery"), cost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(h)
 }

@@ -46,6 +46,8 @@ The server stops on `Ctrl+C` or `SIGTERM`, finishing in-flight requests first (u
 | `POST` | `/api/v1/auth/register` | `201` + user (`id`, `email`, `created_at`) | `400`, `409` email taken, `413`, `415` |
 | `POST` | `/api/v1/auth/login` | `200 {"token","expires_at"}` | `400`, `401` invalid email or password |
 | `POST` | `/api/v1/auth/logout` | `204` (needs token) | `401` |
+| `POST` | `/api/v1/auth/logout-all` | `200 {"sessions_ended":n}`, every device including this one (needs token) | `401` |
+| `POST` | `/api/v1/auth/password` | `200 {"sessions_ended":n}`, ends your other sessions (needs token) | `400`, `401`, `403` wrong current password |
 | `GET` | `/api/v1/auth/me` | `200` + user (needs token) | `401` |
 | `POST` | `/api/v1/jobs` | `201` + job, `Location` header (needs token) | `400`, `401`, `413`, `415` |
 | `GET` | `/api/v1/jobs` | `200 {"jobs":[...]}`, your jobs only (needs token) | `400` invalid `status` filter, `401` |
@@ -86,6 +88,7 @@ gf -X POST $API/auth/logout     # ends the session at once
 - `email` is required and stored lowercased, so `Dan@x.com` and `dan@x.com` are one account.
 - `password` must be at least 12 characters and at most 72 bytes. It is stored only as a bcrypt hash and never returned.
 - Send the login token as `Authorization: Bearer <token>`. It lasts 24 hours, and logout ends it immediately. The server stores only its SHA-256 hash.
+- `POST /api/v1/auth/password` takes `{"current_password": "...", "new_password": "..."}`. It keeps the session that made the change and ends all others. `logout-all` ends every session, this one included. The API deletes expired sessions every hour.
 
 ### Errors
 

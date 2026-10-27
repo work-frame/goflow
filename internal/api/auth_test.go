@@ -21,8 +21,9 @@ var testHasher = auth.Hasher{Cost: bcrypt.MinCost}
 // memUsers is an in-memory UserStore. Like PostgreSQL's UNIQUE constraint,
 // it refuses a second user with the same email.
 type memUsers struct {
-	mu      sync.Mutex
-	byEmail map[string]*auth.User
+	mu       sync.Mutex
+	byEmail  map[string]*auth.User
+	sessions *memSessions // set by newMemSessions, so ChangePassword can end sessions
 }
 
 func newMemUsers() *memUsers { return &memUsers{byEmail: map[string]*auth.User{}} }
@@ -189,3 +190,19 @@ func (s *memUsers) UpdatePasswordHash(_ context.Context, id, hash string) error 
 func (s errUsers) GetByEmail(context.Context, string) (*auth.User, error) { return nil, s.err }
 
 func (s errUsers) UpdatePasswordHash(context.Context, string, string) error { return s.err }
+
+// Added for session hardening (Task 19).
+
+func (s *memUsers) ChangePassword(ctx context.Context, userID, hash string, keepTokenHash []byte) (int64, error) {
+	if err := s.UpdatePasswordHash(ctx, userID, hash); err != nil {
+		return 0, err
+	}
+	if s.sessions == nil {
+		return 0, nil
+	}
+	return s.sessions.deleteForUser(userID, keepTokenHash), nil
+}
+
+func (s errUsers) ChangePassword(context.Context, string, string, []byte) (int64, error) {
+	return 0, s.err
+}

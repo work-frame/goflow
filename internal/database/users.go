@@ -77,3 +77,41 @@ func (s *UserStore) UpdatePasswordHash(ctx context.Context, id, hash string) err
 	}
 	return nil
 }
+
+// ChangePassword stores a new password hash for userID and ends every other
+// session that user has, keeping only the one whose hash is keepTokenHash.
+// Both happen in one transaction: if ending the sessions fails, the password
+// doesn't change either, so a change can never leave an intruder signed in.
+// It returns how many other sessions it ended, or auth.ErrUserNotFound.
+func (s *UserStore) ChangePassword(ctx context.Context, userID, hash string, keepTokenHash []byte) (int64, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("database: change password for user %s: %w", userID, err)
+	}
+	defer tx.Rollback() // a no-op after Commit
+
+	res, err := tx.ExecContext(ctx, `UPDATE users SET password_hash = $1 WHERE id = $2`, hash, userID)
+	if err != nil {
+		return 0, fmt.Errorf("database: change password for user %s: %w", userID, err)
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return 0, fmt.Errorf("database: change password for user %s: %w", userID, err)
+	} else if n == 0 {
+		return 0, auth.ErrUserNotFound
+	}
+
+	res, err = tx.ExecContext(ctx,
+		`DELETE FROM sessions WHERE user_id = $1 AND token_hash <> $2`, userID, keepTokenHash)
+	if err != nil {
+		return 0, fmt.Errorf("database: end other sessions for user %s: %w", userID, err)
+	}
+	ended, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("database: end other sessions for user %s: %w", userID, err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("database: change password for user %s: %w", userID, err)
+	}
+	return ended, nil
+}

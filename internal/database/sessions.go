@@ -61,3 +61,24 @@ func (s *SessionStore) Delete(ctx context.Context, tokenHash []byte) error {
 	}
 	return nil
 }
+
+// DeleteAllForUser ends every session userID has, on every device, and
+// returns how many it ended. Sessions live only in this table, so one
+// statement is enough: there is nothing to reach out to on the devices.
+func (s *SessionStore) DeleteAllForUser(ctx context.Context, userID string) (int64, error) {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM sessions WHERE user_id = $1`, userID)
+	if err != nil {
+		return 0, fmt.Errorf("database: delete sessions for user %s: %w", userID, err)
+	}
+	return res.RowsAffected()
+}
+
+// DeleteExpired removes sessions whose expiry has passed and returns how many.
+// Lookup already ignores them; this only stops the table growing forever.
+func (s *SessionStore) DeleteExpired(ctx context.Context) (int64, error) {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM sessions WHERE expires_at <= now()`)
+	if err != nil {
+		return 0, fmt.Errorf("database: delete expired sessions: %w", err)
+	}
+	return res.RowsAffected()
+}

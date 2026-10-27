@@ -63,3 +63,56 @@ func TestSessionEndToEnd(t *testing.T) {
 		t.Fatalf("me after logout: status %d, want 401", status)
 	}
 }
+
+// TestAccountSecurityEndToEnd: a password change ends the other sessions and
+// keeps this one; logout-all then ends this one too. Real server, real database.
+func TestAccountSecurityEndToEnd(t *testing.T) {
+	dbURL := testDatabaseURL(t)
+	base, _ := startServer(t, dbURL)
+	client := &http.Client{Timeout: 5 * time.Second}
+
+	laptop := signUp(t, client, base, dbURL)
+	me := base + "/api/v1/auth/me"
+
+	// A second login for the same account: the "stolen tablet".
+	status, _, body := requestAs(t, client, http.MethodGet, me, laptop, "")
+	if status != http.StatusOK {
+		t.Fatalf("me: status %d, body %s", status, body)
+	}
+	var user struct {
+		Email string `json:"email"`
+	}
+	if err := json.Unmarshal(body, &user); err != nil {
+		t.Fatal(err)
+	}
+	creds := `{"email":"` + user.Email + `","password":"correct horse battery"}`
+	status, _, body = request(t, client, http.MethodPost, base+"/api/v1/auth/login", creds)
+	if status != http.StatusOK {
+		t.Fatalf("second login: status %d, body %s", status, body)
+	}
+	var login struct {
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal(body, &login); err != nil {
+		t.Fatal(err)
+	}
+	tablet := login.Token
+
+	change := `{"current_password":"correct horse battery","new_password":"a brand new password"}`
+	if status, _, body := requestAs(t, client, http.MethodPost, base+"/api/v1/auth/password", laptop, change); status != http.StatusOK {
+		t.Fatalf("change password: status %d, body %s", status, body)
+	}
+	if status := authed(t, client, http.MethodGet, me, tablet); status != http.StatusUnauthorized {
+		t.Errorf("tablet after password change: status %d, want 401", status)
+	}
+	if status := authed(t, client, http.MethodGet, me, laptop); status != http.StatusOK {
+		t.Errorf("laptop after password change: status %d, want 200", status)
+	}
+
+	if status := authed(t, client, http.MethodPost, base+"/api/v1/auth/logout-all", laptop); status != http.StatusOK {
+		t.Fatalf("logout-all: status %d", status)
+	}
+	if status := authed(t, client, http.MethodGet, me, laptop); status != http.StatusUnauthorized {
+		t.Errorf("laptop after logout-all: status %d, want 401", status)
+	}
+}

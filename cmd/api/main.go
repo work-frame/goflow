@@ -64,6 +64,11 @@ func run(ctx context.Context, logger *slog.Logger, cfg config, ready func(addr s
 		logger.Info("database schema up to date")
 	}
 
+	sessions := database.NewSessionStore(db)
+	// Deferred after db.Close, so it runs first: cleanup stops, then the pool closes.
+	stopCleanup := startSessionCleanup(ctx, logger, sessions, sessionCleanupInterval)
+	defer stopCleanup()
+
 	ln, err := net.Listen("tcp", cfg.Addr)
 	if err != nil {
 		return err
@@ -72,7 +77,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg config, ready func(addr s
 	deps := api.Deps{
 		Jobs:     database.NewJobStore(db),
 		Users:    database.NewUserStore(db),
-		Sessions: database.NewSessionStore(db),
+		Sessions: sessions,
 		Hasher:   auth.Hasher{Cost: cfg.BcryptCost},
 		DB:       db,
 		Logger:   logger,
