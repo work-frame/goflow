@@ -17,7 +17,9 @@ func main() {
 
 	// Ctrl+C cancels the request in flight instead of leaving the terminal waiting.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
-	code := cli.Run(ctx, os.Args[1:], client.New(baseURL), os.Stdout, os.Stderr)
+	// GOFLOW_TOKEN is a stopgap until "goflow login" (Task 20). The token is only
+	// sent in the Authorization header, never printed.
+	code := cli.Run(ctx, os.Args[1:], client.New(baseURL, os.Getenv("GOFLOW_TOKEN")), os.Stdout, os.Stderr)
 	stop() // called directly, not deferred: os.Exit skips defers
 	os.Exit(code)
 }

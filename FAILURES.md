@@ -299,3 +299,17 @@ These safeguards have tests, but the failure hasn't been run and recorded yet:
       login_test.go:189: unknown email took 45.552µs, wrong password 28.189995ms: the difference reveals which emails exist
   ```
 - **Why:** the error message stayed identical, but the response time didn't. An unknown email answered in 46 µs, a registered one in 28 ms (cost 8 in the test; about half a second at cost 12). Anyone can time a list of emails with curl, learn who has an account, and then aim password guessing or phishing at exactly those people. Same message is not enough; same work is needed.
+
+## 21. Every job query filters by owner
+
+- **Safeguard:** `JobStore.Get` puts the caller's user ID in the WHERE clause: `WHERE id = $1 AND user_id = $2`.
+- **Removed:** the owner filter, leaving `WHERE id = $1`.
+- **Caught by:** `TestJobStoreKeepsUsersApart` and `TestServerEndToEnd`. The API handler tests still passed.
+- **Observed:**
+  ```text
+  --- FAIL: TestJobStoreKeepsUsersApart
+      jobs_test.go:135: bob reading alice's job: err = <nil>, want job.ErrNotFound
+  --- FAIL: TestServerEndToEnd
+      main_test.go:172: get as another user: status 200, body {"id":"…","title":"e2e job",…}
+  ```
+- **Why:** the route still required a session, so only signed-in users got through. But being signed in is authentication, not authorization: any signed-in user could read any job by its ID. This is number one on OWASP's API Security list, Broken Object Level Authorization. Random 128-bit IDs are hard to guess, but IDs leak through links, logs and screenshots, so they are not a lock. Because the owner check lives in the SQL, there is one place to get it right, and no handler can forget it.
