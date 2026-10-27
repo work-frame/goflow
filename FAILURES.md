@@ -328,3 +328,15 @@ These safeguards have tests, but the failure hasn't been run and recorded yet:
       session_test.go:106: tablet after password change: status 200, want 401
   ```
 - **Why:** the password changed and the old one stopped working, so from the user's side everything looked fine. But people change a password because they think someone else got in, and that someone was still signed in on the "stolen tablet" with a valid session for up to 24 hours. A password change has to end the other sessions, or it only locks the front door while the intruder is already inside.
+
+## 23. The CLI only sends a saved token to the API that issued it
+
+- **Safeguard:** `credentials.File.TokenFor` returns the saved token only when `GOFLOW_API_URL` matches the API it came from.
+- **Removed:** the `c.APIURL != apiURL` check, so only the expiry was checked.
+- **Caught by:** `TestTokenFor`
+- **Observed:**
+  ```text
+  --- FAIL: TestTokenFor
+      credentials_test.go:150: the token was offered to a different API
+  ```
+- **Why:** `GOFLOW_API_URL` is just an environment variable. A shared script, a copied `.env` file or a typo can point it at another server, and the CLI would then send your session token to that server in the first request. Whoever runs it could act as you until the session expires. Remembering which API issued the token, and sending it nowhere else, keeps a wrong setting from turning into a stolen session.
