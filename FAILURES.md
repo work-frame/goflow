@@ -313,3 +313,18 @@ These safeguards have tests, but the failure hasn't been run and recorded yet:
       main_test.go:172: get as another user: status 200, body {"id":"…","title":"e2e job",…}
   ```
 - **Why:** the route still required a session, so only signed-in users got through. But being signed in is authentication, not authorization: any signed-in user could read any job by its ID. This is number one on OWASP's API Security list, Broken Object Level Authorization. Random 128-bit IDs are hard to guess, but IDs leak through links, logs and screenshots, so they are not a lock. Because the owner check lives in the SQL, there is one place to get it right, and no handler can forget it.
+
+## 22. A password change ends every other session
+
+- **Safeguard:** the change-password handler calls `UserStore.ChangePassword`, which stores the new hash and deletes the user's other sessions in one transaction.
+- **Removed:** the handler called the older `UpdatePasswordHash` instead. Both methods exist, so this compiles and looks reasonable.
+- **Caught by:** `TestChangePassword` and `TestAccountSecurityEndToEnd`. The database tests still passed.
+- **Observed:**
+  ```text
+  --- FAIL: TestChangePassword (0.01s)
+      account_test.go:64: sessions_ended = 0, want 1 (the tablet)
+      account_test.go:71: another session survived the password change: status 200
+  --- FAIL: TestAccountSecurityEndToEnd (0.05s)
+      session_test.go:106: tablet after password change: status 200, want 401
+  ```
+- **Why:** the password changed and the old one stopped working, so from the user's side everything looked fine. But people change a password because they think someone else got in, and that someone was still signed in on the "stolen tablet" with a valid session for up to 24 hours. A password change has to end the other sessions, or it only locks the front door while the intruder is already inside.
