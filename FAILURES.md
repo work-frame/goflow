@@ -340,3 +340,18 @@ These safeguards have tests, but the failure hasn't been run and recorded yet:
       credentials_test.go:150: the token was offered to a different API
   ```
 - **Why:** `GOFLOW_API_URL` is just an environment variable. A shared script, a copied `.env` file or a typo can point it at another server, and the CLI would then send your session token to that server in the first request. Whoever runs it could act as you until the session expires. Remembering which API issued the token, and sending it nowhere else, keeps a wrong setting from turning into a stolen session.
+
+## 24. A remote database needs TLS
+
+- **Safeguard:** `loadConfig` refuses a `GOFLOW_DATABASE_URL` on another machine unless it asks for TLS (`sslmode=verify-full`, `verify-ca` or `require`).
+- **Removed:** the `checkDatabaseTLS` call.
+- **Caught by:** `TestLoadConfigRequiresTLSForRemoteDatabases`
+- **Observed:**
+  ```text
+  --- FAIL: TestLoadConfigRequiresTLSForRemoteDatabases
+      config_test.go:134: postgres://u:pw@db.example.com/db: err = <nil>, want ok = false
+      config_test.go:134: postgres://u:pw@db.example.com/db?sslmode=disable: err = <nil>, want ok = false
+      config_test.go:134: postgres://u:pw@db.example.com/db?sslmode=prefer: err = <nil>, want ok = false
+      config_test.go:134: not a url: err = <nil>, want ok = false
+  ```
+- **Why:** without TLS, the database password and every row, including password hashes and session token hashes, cross the internet in plain text. `sslmode=prefer` looks safe but quietly falls back to plain text if TLS fails. Refusing to start is louder than a silent downgrade: a wrong URL is found at deploy time, not after the data has leaked.
