@@ -17,9 +17,13 @@ import (
 	"github.com/work-frame/goflow/internal/job"
 )
 
-// ErrUnauthenticated means the API refused the session token: it is missing,
-// wrong, expired, or was ended by logout.
-var ErrUnauthenticated = errors.New("client: not signed in, or the session has expired")
+var (
+	// ErrUnauthenticated means the API refused the session token: it is missing,
+	// wrong, expired, or was ended by logout.
+	ErrUnauthenticated = errors.New("client: not signed in, or the session has expired")
+	// ErrInvalidCredentials means login failed: wrong email or password.
+	ErrInvalidCredentials = errors.New("client: invalid email or password")
+)
 
 // Client talks to a GoFlow API server. It is safe for concurrent use.
 type Client struct {
@@ -50,6 +54,33 @@ func (e *APIError) Error() string {
 		return fmt.Sprintf("API returned HTTP %d", e.Status)
 	}
 	return fmt.Sprintf("%s (HTTP %d)", e.Message, e.Status)
+}
+
+// Login exchanges an email and password for a session token. The password is
+// only ever sent in the request body, never in the URL.
+func (c *Client) Login(ctx context.Context, email, password string) (token string, expiresAt time.Time, err error) {
+	body, err := json.Marshal(map[string]string{"email": email, "password": password})
+	if err != nil {
+		return "", time.Time{}, fmt.Errorf("client: encode request: %w", err)
+	}
+	var resp struct {
+		Token     string    `json:"token"`
+		ExpiresAt time.Time `json:"expires_at"`
+	}
+	err = c.do(ctx, http.MethodPost, "/api/v1/auth/login", body, http.StatusOK, &resp)
+	if errors.Is(err, ErrUnauthenticated) {
+		return "", time.Time{}, ErrInvalidCredentials
+	}
+	if err != nil {
+		return "", time.Time{}, err
+	}
+	return resp.Token, resp.ExpiresAt, nil
+}
+
+// Logout ends the session for token on the server, whatever token the Client
+// was created with. After this the token is useless, even if a copy leaked.
+func (c *Client) Logout(ctx context.Context, token string) error {
+	return New(c.baseURL, token).do(ctx, http.MethodPost, "/api/v1/auth/logout", nil, http.StatusNoContent, nil)
 }
 
 // Create submits a new job.
