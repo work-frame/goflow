@@ -49,7 +49,7 @@ export GOFLOW_TEST_DATABASE_URL='postgres://goflow:goflow@127.0.0.1:5432/goflow_
 | `GOFLOW_BCRYPT_COST` | API; 10 to 14, refused otherwise | `12` |
 | `GOFLOW_TEST_DATABASE_URL` | tests; database tests skip without it | none |
 | `GOFLOW_API_URL` | CLI | `http://localhost:8080` |
-| `GOFLOW_TOKEN` | CLI; session token, stopgap until `goflow login` | none |
+| `GOFLOW_TOKEN` | CLI; overrides the saved login from `goflow login` (scripts, CI) | none |
 
 Tests must never point at the development database.
 

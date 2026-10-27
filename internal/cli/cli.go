@@ -11,6 +11,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/work-frame/goflow/internal/client"
 	"github.com/work-frame/goflow/internal/job"
 )
 
@@ -24,13 +25,16 @@ const (
 const commandTimeout = 10 * time.Second
 
 const usage = `Usage:
+  goflow login
+  goflow logout
   goflow job create <title>
   goflow job list [--status <status>]
   goflow job get <id>
   goflow job delete <id>
 
 The CLI talks to a running GoFlow API. Set GOFLOW_API_URL (default http://localhost:8080).
-Set GOFLOW_TOKEN to a session token from POST /api/v1/auth/login (see README).
+Log in once with "goflow login"; the session is saved in ~/.config/goflow/credentials.
+GOFLOW_TOKEN, if set, is used instead (for scripts).
 `
 
 // Jobs is what the CLI needs from GoFlow. client.Client satisfies it. Tests use a fake.
@@ -82,6 +86,9 @@ func Run(ctx context.Context, args []string, jobs Jobs, stdout, stderr io.Writer
 		return exitUsage
 	default:
 		fmt.Fprintf(stderr, "error: %v\n", err)
+		if errors.Is(err, client.ErrUnauthenticated) {
+			fmt.Fprintln(stderr, "run: goflow login")
+		}
 		return exitError
 	}
 }

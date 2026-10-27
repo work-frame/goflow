@@ -109,17 +109,21 @@ Every response carries an `X-Request-ID` header, and the same ID appears in the 
 The CLI is a client for the HTTP API, so the API must be running.
 
 ```bash
+goflow login                             # asks for email and password (the password isn't shown)
 goflow job create send welcome email     # prints the new job's ID
 goflow job list                          # every job, oldest first (follows pages)
 goflow job list --status pending         # filter by status
 goflow job get <id>                      # one job as JSON
 goflow job delete <id>                   # remove a job
+goflow logout                            # ends the session on the server and deletes the saved login
 ```
 
 | Variable | Default | Meaning |
 |---|---|---|
 | `GOFLOW_API_URL` | `http://localhost:8080` | Where the API is running |
-| `GOFLOW_TOKEN` | none | Session token from login (see the examples above). A stopgap until `goflow login` |
+| `GOFLOW_TOKEN` | none | A session token to use instead of the saved login, for scripts and CI |
+
+`goflow login` saves the session in `~/.config/goflow/credentials` (or `$XDG_CONFIG_HOME/goflow/credentials`) with mode `0600`, so only you can read it. The CLI refuses to use the file if other users can read it, and only sends the token to the API that issued it. In a script, pipe the email and password on two lines: `printf '%s\n%s\n' "$EMAIL" "$PASSWORD" | goflow login`.
 
 Exit codes: `0` success, `1` failure (including an unreachable API), `2` incorrect usage. Each command gives up after 10 seconds.
 
