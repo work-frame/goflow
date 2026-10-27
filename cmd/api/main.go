@@ -42,7 +42,7 @@ func main() {
 // address once the server is listening. cfg is trusted: loadConfig validates it.
 func run(ctx context.Context, logger *slog.Logger, cfg config, ready func(addr string)) error {
 	// Never log cfg.DatabaseURL: it contains the database password.
-	logger.Info("starting", "addr", cfg.Addr, "bcrypt_cost", cfg.BcryptCost)
+	logger.Info("starting", "addr", cfg.Addr, "bcrypt_cost", cfg.BcryptCost, "registration_open", cfg.RegistrationOpen)
 
 	// Connect before opening the port: an instance that can't reach its database
 	// should never start accepting traffic.
@@ -81,6 +81,8 @@ func run(ctx context.Context, logger *slog.Logger, cfg config, ready func(addr s
 		Hasher:   auth.Hasher{Cost: cfg.BcryptCost},
 		DB:       db,
 		Logger:   logger,
+
+		RegistrationClosed: !cfg.RegistrationOpen,
 	}
 
 	srv := &http.Server{

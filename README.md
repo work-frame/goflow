@@ -33,8 +33,11 @@ go build -o bin/api ./cmd/api         # HTTP API
 
 | Variable | Default | Meaning |
 |---|---|---|
+| `GOFLOW_DATABASE_URL` | none (required) | PostgreSQL URL. A database on another machine must use `sslmode=verify-full` (or `require`); the server refuses to start otherwise. |
 | `GOFLOW_ADDR` | `:8080` | Address to listen on. Use `:0` for any free port. |
 | `GOFLOW_BCRYPT_COST` | `12` | bcrypt cost for password hashes, 10 to 14. Each step doubles the time per hash. The server refuses to start outside this range. |
+| `GOFLOW_REGISTRATION` | `closed` | `open` lets anyone create an account with `POST /api/v1/auth/register`; `closed` answers `403`. |
+| `PORT` | none | Port to listen on, as set by hosting platforms such as Render. Used only when `GOFLOW_ADDR` is not set. |
 
 The server stops on `Ctrl+C` or `SIGTERM`, finishing in-flight requests first (up to 10 seconds).
 
@@ -125,7 +128,7 @@ goflow logout                            # ends the session on the server and de
 
 `goflow login` saves the session in `~/.config/goflow/credentials` (or `$XDG_CONFIG_HOME/goflow/credentials`) with mode `0600`, so only you can read it. The CLI refuses to use the file if other users can read it, and only sends the token to the API that issued it. In a script, pipe the email and password on two lines: `printf '%s\n%s\n' "$EMAIL" "$PASSWORD" | goflow login`.
 
-Exit codes: `0` success, `1` failure (including an unreachable API), `2` incorrect usage. Each command gives up after 10 seconds.
+Exit codes: `0` success, `1` failure (including an unreachable API), `2` incorrect usage. Each command gives up after 90 seconds, long enough for a free hosting plan to wake a sleeping server; Ctrl+C stops it sooner.
 
 ## Development
 

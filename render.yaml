@@ -1,0 +1,26 @@
+# Render Blueprint for the GoFlow API (Phase 4, Task 21).
+#
+# This file is public on GitHub, so it holds no secrets. Values marked
+# "sync: false" are typed into the Render dashboard when the Blueprint is
+# created, and can be changed there later.
+services:
+  - type: web
+    name: goflow-api
+    runtime: go
+    region: frankfurt # next to the Neon database in AWS Frankfurt
+    plan: free # 0.1 CPU, 512 MB; sleeps after 15 minutes without requests
+    buildCommand: go build -trimpath -o bin/api ./cmd/api
+    startCommand: ./bin/api
+    # Liveness only: /readyz would also wait for the database, and a paused
+    # free Neon database could make a fresh deploy look unhealthy.
+    healthCheckPath: /healthz
+    autoDeployTrigger: commit
+    envVars:
+      - key: GOFLOW_DATABASE_URL # from Neon, with sslmode=verify-full
+        sync: false
+      - key: GOFLOW_REGISTRATION # "open" just long enough to create your account, then "closed"
+        sync: false
+      # A free instance has a tenth of a CPU. Cost 12 would make each login
+      # take seconds there; 10 is the lowest the server accepts.
+      - key: GOFLOW_BCRYPT_COST
+        value: "10"

@@ -38,8 +38,9 @@ func New(baseURL, token string) *Client {
 	return &Client{
 		baseURL: strings.TrimRight(baseURL, "/"),
 		token:   token,
-		// A backstop only. Callers should also pass a context with their own deadline.
-		http: &http.Client{Timeout: 30 * time.Second},
+		// A backstop only, longer than the CLI's own 90 s deadline so the
+		// context decides. Callers should pass a context with their own deadline.
+		http: &http.Client{Timeout: 2 * time.Minute},
 	}
 }
 
