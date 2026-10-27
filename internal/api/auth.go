@@ -48,6 +48,13 @@ func newUserResponse(u *auth.User) userResponse {
 }
 
 func (h *handler) register(w http.ResponseWriter, r *http.Request) {
+	// Checked first: a closed server does no work at all for a sign-up,
+	// not even reading the body or hashing a password.
+	if h.registrationClosed {
+		writeError(w, http.StatusForbidden, "registration is closed")
+		return
+	}
+
 	var req registerRequest
 	if err := decodeJSON(w, r, &req); err != nil {
 		writeRequestError(w, err)

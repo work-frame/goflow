@@ -21,8 +21,11 @@ const (
 	exitUsage = 2
 )
 
-// commandTimeout bounds each command, so an unresponsive server can't hang the terminal.
-const commandTimeout = 10 * time.Second
+// commandTimeout bounds each command, so an unresponsive server can't hang the
+// terminal forever. It is long enough for a free hosting plan to wake a
+// sleeping server (about a minute on Render's free tier). Ctrl+C still stops
+// a command at any time.
+const commandTimeout = 90 * time.Second
 
 const usage = `Usage:
   goflow login

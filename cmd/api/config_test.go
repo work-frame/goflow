@@ -10,7 +10,7 @@ import (
 // testConfig is a valid config for tests. It uses bcrypt's minimum cost,
 // which loadConfig would refuse: tests skip loadConfig and call run directly.
 func testConfig(addr, dbURL string) config {
-	return config{Addr: addr, DatabaseURL: dbURL, BcryptCost: bcrypt.MinCost}
+	return config{Addr: addr, DatabaseURL: dbURL, BcryptCost: bcrypt.MinCost, RegistrationOpen: true}
 }
 
 // env turns a map into a getenv function.
@@ -32,6 +32,9 @@ func TestLoadConfigDefaults(t *testing.T) {
 	if cfg.BcryptCost != 12 {
 		t.Errorf("BcryptCost = %d, want 12", cfg.BcryptCost)
 	}
+	if cfg.RegistrationOpen {
+		t.Error("registration is open by default; a public server must start closed")
+	}
 }
 
 func TestLoadConfigReadsEverySetting(t *testing.T) {
@@ -39,11 +42,12 @@ func TestLoadConfigReadsEverySetting(t *testing.T) {
 		"GOFLOW_ADDR":         "127.0.0.1:9000",
 		"GOFLOW_DATABASE_URL": testDBURL,
 		"GOFLOW_BCRYPT_COST":  "11",
+		"GOFLOW_REGISTRATION": "open",
 	}))
 	if err != nil {
 		t.Fatalf("loadConfig: %v", err)
 	}
-	want := config{Addr: "127.0.0.1:9000", DatabaseURL: testDBURL, BcryptCost: 11}
+	want := config{Addr: "127.0.0.1:9000", DatabaseURL: testDBURL, BcryptCost: 11, RegistrationOpen: true}
 	if cfg != want {
 		t.Errorf("config = %+v, want %+v", cfg, want)
 	}
@@ -61,6 +65,8 @@ func TestLoadConfigRejectsBadSettings(t *testing.T) {
 		{"cost above 14", map[string]string{"GOFLOW_DATABASE_URL": testDBURL, "GOFLOW_BCRYPT_COST": "15"}, []string{"got 15"}},
 		{"cost not a number", map[string]string{"GOFLOW_DATABASE_URL": testDBURL, "GOFLOW_BCRYPT_COST": "twelve"}, []string{`whole number, got "twelve"`}},
 		{"every problem reported", map[string]string{"GOFLOW_BCRYPT_COST": "3"}, []string{"GOFLOW_DATABASE_URL is required", "got 3"}},
+		{"bad registration value", map[string]string{"GOFLOW_DATABASE_URL": testDBURL, "GOFLOW_REGISTRATION": "yes"}, []string{`"open" or "closed", got "yes"`}},
+		{"bad port", map[string]string{"GOFLOW_DATABASE_URL": testDBURL, "PORT": "http"}, []string{`PORT must be a port number, got "http"`}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -84,5 +90,51 @@ func TestLoadConfigErrorsNeverContainTheDatabaseURL(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "secret-db-password") {
 		t.Errorf("error leaks the database password: %v", err)
+	}
+}
+
+func TestLoadConfigUsesPORTFromTheHost(t *testing.T) {
+	cfg, err := loadConfig(env(map[string]string{"GOFLOW_DATABASE_URL": testDBURL, "PORT": "10000"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Addr != ":10000" {
+		t.Errorf("Addr = %q, want :10000", cfg.Addr)
+	}
+
+	cfg, err = loadConfig(env(map[string]string{"GOFLOW_DATABASE_URL": testDBURL, "PORT": "10000", "GOFLOW_ADDR": "127.0.0.1:9000"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Addr != "127.0.0.1:9000" {
+		t.Errorf("Addr = %q, want GOFLOW_ADDR to win over PORT", cfg.Addr)
+	}
+}
+
+// A database on another machine must be reached over TLS. One on this machine
+// (the development container) may skip it.
+func TestLoadConfigRequiresTLSForRemoteDatabases(t *testing.T) {
+	tests := []struct {
+		url string
+		ok  bool
+	}{
+		{"postgres://u:pw@localhost:5432/db?sslmode=disable", true},
+		{"postgres://u:pw@127.0.0.1:5432/db?sslmode=disable", true},
+		{"postgres://u:pw@[::1]:5432/db", true},
+		{"postgres://u:pw@db.example.com/db?sslmode=verify-full", true},
+		{"postgres://u:pw@db.example.com/db?sslmode=require", true},
+		{"postgres://u:pw@db.example.com/db", false},
+		{"postgres://u:pw@db.example.com/db?sslmode=disable", false},
+		{"postgres://u:pw@db.example.com/db?sslmode=prefer", false},
+		{"not a url", false},
+	}
+	for _, tc := range tests {
+		_, err := loadConfig(env(map[string]string{"GOFLOW_DATABASE_URL": tc.url}))
+		if (err == nil) != tc.ok {
+			t.Errorf("%s: err = %v, want ok = %v", tc.url, err, tc.ok)
+		}
+		if err != nil && strings.Contains(err.Error(), "pw@") {
+			t.Errorf("%s: error contains the password: %v", tc.url, err)
+		}
 	}
 }

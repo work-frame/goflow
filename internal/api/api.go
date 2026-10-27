@@ -45,6 +45,11 @@ type Deps struct {
 	Hasher   auth.Hasher
 	DB       Pinger
 	Logger   *slog.Logger
+
+	// RegistrationClosed turns POST /api/v1/auth/register off. The zero value
+	// is open so tests stay short; production sets it from GOFLOW_REGISTRATION,
+	// which defaults to closed.
+	RegistrationClosed bool
 }
 
 // NewRouter returns the HTTP handler for the whole API, wrapped in middleware.
@@ -52,7 +57,7 @@ type Deps struct {
 // Request flow, outermost first:
 // withRequestID → logRequests → recoverPanics → jsonMuxErrors → mux → handler
 func NewRouter(d Deps) http.Handler {
-	h := &handler{store: d.Jobs, users: d.Users, sessions: d.Sessions, hasher: d.Hasher, db: d.DB, logger: d.Logger}
+	h := &handler{store: d.Jobs, users: d.Users, sessions: d.Sessions, hasher: d.Hasher, db: d.DB, logger: d.Logger, registrationClosed: d.RegistrationClosed}
 	h.prepareDummyHash()
 
 	mux := http.NewServeMux()
@@ -86,6 +91,8 @@ type handler struct {
 	hasher   auth.Hasher
 	db       Pinger
 	logger   *slog.Logger
+
+	registrationClosed bool
 }
 
 // dbContext derives a storage context from the request: it ends when the client

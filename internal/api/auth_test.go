@@ -206,3 +206,19 @@ func (s *memUsers) ChangePassword(ctx context.Context, userID, hash string, keep
 func (s errUsers) ChangePassword(context.Context, string, string, []byte) (int64, error) {
 	return 0, s.err
 }
+
+func TestRegisterWhenClosed(t *testing.T) {
+	users := newMemUsers()
+	router := NewRouter(Deps{Users: users, Hasher: testHasher, Logger: discardLogger(), RegistrationClosed: true})
+
+	rec := do(t, router, http.MethodPost, registerPath, `{"email":"dan@example.com","password":"correct horse battery"}`)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403, body %s", rec.Code, rec.Body)
+	}
+	if msg := decode[map[string]string](t, rec)["error"]; msg != "registration is closed" {
+		t.Errorf("error = %q", msg)
+	}
+	if len(users.byEmail) != 0 {
+		t.Error("a closed server still created the account")
+	}
+}
