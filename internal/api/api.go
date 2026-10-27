@@ -61,6 +61,8 @@ func NewRouter(d Deps) http.Handler {
 	mux.HandleFunc("POST /api/v1/auth/register", h.register)
 	mux.HandleFunc("POST /api/v1/auth/login", h.login)
 	mux.HandleFunc("POST /api/v1/auth/logout", h.requireSession(h.logout))
+	mux.HandleFunc("POST /api/v1/auth/logout-all", h.requireSession(h.logoutAll))
+	mux.HandleFunc("POST /api/v1/auth/password", h.requireSession(h.changePassword))
 	mux.HandleFunc("GET /api/v1/auth/me", h.requireSession(h.me))
 	mux.HandleFunc("POST /api/v1/jobs", h.requireSession(h.createJob))
 	mux.HandleFunc("GET /api/v1/jobs", h.requireSession(h.listJobs))

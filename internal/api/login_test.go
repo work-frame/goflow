@@ -25,7 +25,9 @@ type memSessions struct {
 }
 
 func newMemSessions(users *memUsers) *memSessions {
-	return &memSessions{users: users, byKey: map[string]*auth.Session{}}
+	s := &memSessions{users: users, byKey: map[string]*auth.Session{}}
+	users.sessions = s
+	return s
 }
 
 func (s *memSessions) Create(_ context.Context, sess *auth.Session) error {
@@ -305,4 +307,22 @@ func TestAuthNeverLogsSecrets(t *testing.T) {
 			t.Errorf("logs contain a secret %q:\n%s", secret, logs.String())
 		}
 	}
+}
+
+func (s *memSessions) DeleteAllForUser(_ context.Context, userID string) (int64, error) {
+	return s.deleteForUser(userID, nil), nil
+}
+
+// deleteForUser ends userID's sessions except the one stored under keep.
+func (s *memSessions) deleteForUser(userID string, keep []byte) int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var n int64
+	for key, sess := range s.byKey {
+		if sess.UserID == userID && key != string(keep) {
+			delete(s.byKey, key)
+			n++
+		}
+	}
+	return n
 }

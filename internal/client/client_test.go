@@ -55,6 +55,9 @@ type oneSession struct {
 
 func (s oneSession) Create(context.Context, *auth.Session) error { return nil }
 func (s oneSession) Delete(context.Context, []byte) error        { return nil }
+func (s oneSession) DeleteAllForUser(context.Context, string) (int64, error) {
+	return 0, nil
+}
 
 func (s oneSession) Lookup(_ context.Context, hash []byte) (*auth.User, error) {
 	if !bytes.Equal(hash, s.hash) {

@@ -18,6 +18,7 @@ type UserStore interface {
 	Create(ctx context.Context, u *auth.User) error
 	GetByEmail(ctx context.Context, email string) (*auth.User, error)
 	UpdatePasswordHash(ctx context.Context, id, hash string) error
+	ChangePassword(ctx context.Context, userID, hash string, keepTokenHash []byte) (int64, error)
 }
 
 // SessionStore is what the API needs from login storage. It only ever
@@ -26,6 +27,7 @@ type SessionStore interface {
 	Create(ctx context.Context, s *auth.Session) error
 	Lookup(ctx context.Context, tokenHash []byte) (*auth.User, error)
 	Delete(ctx context.Context, tokenHash []byte) error
+	DeleteAllForUser(ctx context.Context, userID string) (int64, error)
 }
 
 type registerRequest struct {
@@ -59,13 +61,7 @@ func (h *handler) register(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, auth.ErrInvalidEmail):
 		writeError(w, http.StatusBadRequest, "email is invalid")
 		return
-	case errors.Is(err, auth.ErrPasswordTooShort):
-		writeError(w, http.StatusBadRequest,
-			fmt.Sprintf("password must be at least %d characters", auth.MinPasswordLength))
-		return
-	case errors.Is(err, auth.ErrPasswordTooLong):
-		writeError(w, http.StatusBadRequest,
-			fmt.Sprintf("password must be at most %d bytes", auth.MaxPasswordBytes))
+	case writePasswordPolicyError(w, "password", err):
 		return
 	case err != nil:
 		h.internalError(w, r, err)
@@ -86,6 +82,22 @@ func (h *handler) register(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusCreated, newUserResponse(u))
+}
+
+// writePasswordPolicyError answers 400 if err is a password rule violation,
+// naming the JSON field, and reports whether it did.
+func writePasswordPolicyError(w http.ResponseWriter, field string, err error) bool {
+	switch {
+	case errors.Is(err, auth.ErrPasswordTooShort):
+		writeError(w, http.StatusBadRequest,
+			fmt.Sprintf("%s must be at least %d characters", field, auth.MinPasswordLength))
+	case errors.Is(err, auth.ErrPasswordTooLong):
+		writeError(w, http.StatusBadRequest,
+			fmt.Sprintf("%s must be at most %d bytes", field, auth.MaxPasswordBytes))
+	default:
+		return false
+	}
+	return true
 }
 
 type loginRequest struct {
@@ -273,4 +285,75 @@ func (h *handler) logout(w http.ResponseWriter, r *http.Request) {
 // requireSession may call it.
 func callerID(r *http.Request) string {
 	return currentSession(r.Context()).user.ID
+}
+
+type sessionsEndedResponse struct {
+	SessionsEnded int64 `json:"sessions_ended"`
+}
+
+// logoutAll ends every session of the caller, including this one: the
+// "my laptop was stolen" button. Afterwards every device has to log in again.
+func (h *handler) logoutAll(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := dbContext(r)
+	defer cancel()
+
+	n, err := h.sessions.DeleteAllForUser(ctx, callerID(r))
+	if err != nil {
+		h.storeError(w, r, err)
+		return
+	}
+	h.logger.Info("logged out everywhere", "request_id", RequestID(r.Context()), "user_id", callerID(r), "sessions_ended", n)
+	writeJSON(w, http.StatusOK, sessionsEndedResponse{SessionsEnded: n})
+}
+
+type changePasswordRequest struct {
+	CurrentPassword string `json:"current_password"`
+	NewPassword     string `json:"new_password"`
+}
+
+// changePassword needs the current password as well as a session: a stolen
+// session alone must not be enough to lock the real owner out. On success it
+// ends every other session, because a password change often means "someone
+// else may be signed in", and keeps the one that made the change.
+func (h *handler) changePassword(w http.ResponseWriter, r *http.Request) {
+	var req changePasswordRequest
+	if err := decodeJSON(w, r, &req); err != nil {
+		writeRequestError(w, err)
+		return
+	}
+	s := currentSession(r.Context())
+
+	err := h.hasher.Compare(s.user.PasswordHash, req.CurrentPassword)
+	if errors.Is(err, auth.ErrWrongPassword) {
+		writeError(w, http.StatusForbidden, "current password is incorrect")
+		return
+	}
+	if err != nil {
+		h.internalError(w, r, err)
+		return
+	}
+
+	hash, err := h.hasher.Hash(req.NewPassword)
+	if writePasswordPolicyError(w, "new_password", err) {
+		return
+	}
+	if err != nil {
+		h.internalError(w, r, err)
+		return
+	}
+
+	ctx, cancel := dbContext(r)
+	defer cancel()
+
+	ended, err := h.users.ChangePassword(ctx, s.user.ID, hash, s.tokenHash)
+	if errors.Is(err, auth.ErrUserNotFound) {
+		unauthorized(w) // the account was deleted while this request ran
+		return
+	}
+	if err != nil {
+		h.storeError(w, r, err)
+		return
+	}
+	h.logger.Info("password changed", "request_id", RequestID(r.Context()), "user_id", s.user.ID, "other_sessions_ended", ended)
+	writeJSON(w, http.StatusOK, sessionsEndedResponse{SessionsEnded: ended})
 }

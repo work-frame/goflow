@@ -151,7 +151,7 @@ Each case was reproduced on a real machine (Arch Linux, Go 1.27, PostgreSQL 17) 
 
 - **`Lock` instead of `RLock` in `Get`:** every test passed. The code is correct but reads queue one at a time. Correctness tests can't measure throughput. That needs a benchmark (planned for Phase 13).
 - **A cheap bcrypt cost:** setting `DefaultCost` to 4 passes every test, because tests use cost 4 on purpose. Production hashes would be about 240 times cheaper to crack. Fixed in Task 17: the cost comes from `GOFLOW_BCRYPT_COST`, the server refuses anything below 10, and `TestLoadConfigDefaults` expects a literal 12 (case 19).
-- **Timing while the bcrypt cost is raised:** with `GOFLOW_BCRYPT_COST` raised from 12 to 13, two unknown emails took 0.91 s and 0.95 s, while a registered user whose hash was still at cost 12 took 0.47 s. Until every user has logged in once at the new cost, response time can still tell old accounts apart from unknown emails. Tests run at a single cost, so they cannot see this.
+- **Timing while the bcrypt cost is raised:** with `GOFLOW_BCRYPT_COST` raised from 12 to 13, two unknown emails took 0.91 s and 0.95 s, while a registered user whose hash was still at cost 12 took 0.47 s. Until every user has logged in once at the new cost, response time can still tell old accounts apart from unknown emails. Tests run at a single cost, so they cannot see this. Narrowed in Task 19: a successful login now re-hashes to the configured cost in both directions, so the gap lasts only until each user next logs in.
 
 ## Environment incidents
 
