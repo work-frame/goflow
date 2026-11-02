@@ -34,10 +34,14 @@ func TestEnqueueKeepsOrder(t *testing.T) {
 	q := openTestQueue(t)
 	ctx := context.Background()
 
-	for _, id := range []string{"first", "second", "third"} {
-		if err := q.Enqueue(ctx, id); err != nil {
-			t.Fatalf("Enqueue(%s): %v", id, err)
-		}
+	if err := q.Enqueue(ctx, "first", "second"); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	if err := q.Enqueue(ctx, "third"); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	if err := q.Enqueue(ctx); err != nil {
+		t.Fatalf("Enqueue with no IDs: %v", err)
 	}
 
 	n, err := q.Len(ctx)
@@ -55,6 +59,9 @@ func TestEnqueueKeepsOrder(t *testing.T) {
 	}
 	if got != "first" {
 		t.Errorf("oldest ID = %q, want first", got)
+	}
+	if got, _ := q.rdb.RPop(ctx, q.key).Result(); got != "second" {
+		t.Errorf("next ID = %q, want second: one call must keep its IDs in order", got)
 	}
 }
 

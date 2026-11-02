@@ -16,7 +16,12 @@ import (
 	"github.com/work-frame/goflow/internal/auth"
 	"github.com/work-frame/goflow/internal/database"
 	"github.com/work-frame/goflow/internal/queue"
+	"github.com/work-frame/goflow/internal/relay"
 )
+
+// relayInterval is the longest a job waits in the outbox when no wake-up
+// arrives: after Redis comes back, or for jobs another instance saved.
+const relayInterval = 30 * time.Second
 
 func main() {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
@@ -66,18 +71,26 @@ func run(ctx context.Context, logger *slog.Logger, cfg config, ready func(addr s
 		logger.Info("database schema up to date")
 	}
 
-	// The queue is optional until workers exist (Phase 6). q stays a nil
-	// *queue.Queue when GOFLOW_REDIS_URL is unset.
-	var q *queue.Queue
+	// The queue is optional until workers exist (Phase 6). Without it, jobs
+	// and their outbox rows are saved and wait until a relay runs.
+	// rl stays a nil *relay.Relay when GOFLOW_REDIS_URL is unset.
+	var rl *relay.Relay
 	if cfg.RedisURL != "" {
-		q, err = queue.Open(ctx, cfg.RedisURL)
+		queue.UseLogger(logger)
+		q, err := queue.Open(ctx, cfg.RedisURL)
 		if err != nil {
 			return err
 		}
 		defer q.Close()
 		logger.Info("queue connected")
+
+		rl = relay.New(database.NewOutboxStore(db), q, logger, relayInterval)
+		// Deferred after q.Close and db.Close, so it runs first: the relay
+		// stops, then the queue and the database close.
+		stopRelay := rl.Start(ctx)
+		defer stopRelay()
 	} else {
-		logger.Warn("queue disabled: GOFLOW_REDIS_URL is not set, so new jobs are saved but not queued")
+		logger.Warn("queue disabled: GOFLOW_REDIS_URL is not set, so new jobs wait in the outbox")
 	}
 
 	sessions := database.NewSessionStore(db)
@@ -100,11 +113,11 @@ func run(ctx context.Context, logger *slog.Logger, cfg config, ready func(addr s
 
 		RegistrationClosed: !cfg.RegistrationOpen,
 	}
-	// Only a real queue goes into the interface. Assigning a nil *queue.Queue
-	// would make deps.Queue != nil (an interface holding a nil pointer is not
-	// nil), and the first job would call Enqueue on nil and panic.
-	if q != nil {
-		deps.Queue = q
+	// Only a real relay goes into the interface. Assigning a nil *relay.Relay
+	// would make deps.Relay != nil (an interface holding a nil pointer is not
+	// nil), and the first job would call Wake on nil and panic (case 25).
+	if rl != nil {
+		deps.Relay = rl
 	}
 
 	srv := &http.Server{

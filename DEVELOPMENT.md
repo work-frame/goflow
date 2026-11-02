@@ -128,6 +128,8 @@ Look at the data directly:
 
 ```bash
 docker exec goflow-postgres psql -U goflow -c 'SELECT id, title, status FROM jobs'
+docker exec goflow-postgres psql -U goflow -c 'SELECT * FROM job_outbox'          # jobs not yet in Redis
+docker exec goflow-redis valkey-cli lrange goflow:jobs:pending 0 -1                # job IDs in Redis
 ```
 
 ## Deploying
