@@ -18,6 +18,7 @@ internal/credentials                                                     ├─�
 - **`internal/auth`** is the account domain: users, email normalization, password hashing with bcrypt, and session tokens. Like `job`, it imports no HTTP or SQL packages.
 - **`internal/queue`** owns Redis: a list of job IDs waiting for a worker (`goflow:jobs:pending`). Only IDs go through Redis; PostgreSQL stays the source of truth.
 - **`internal/relay`** moves IDs from the outbox table to the queue in the background (see [The outbox](#the-outbox)).
+- **`internal/worker`** and **`cmd/worker`** take IDs off the queue and run the jobs (see [The worker](#the-worker)). **`internal/urlcheck`** holds the TLS rules both programs apply to their URLs.
 - **`internal/database`** owns PostgreSQL: connecting, migrating, and storing jobs, users and sessions.
 - **`internal/api`** owns HTTP: routes, middleware, handlers.
 - **`internal/client`** is a Go client for the API. **`internal/cli`** uses it. **`internal/credentials`** saves the login on disk.
@@ -170,6 +171,24 @@ relay (every 30 s, and when woken):
 - **Several instances are safe.** `FOR UPDATE SKIP LOCKED` gives each relay different rows.
 - **`Wake` never blocks.** It's a send on a channel with room for one signal; extra wake-ups are dropped because the next pass sends everything anyway. The 30 s tick covers wake-ups that never came.
 
+### The worker
+
+```text
+Take      BLMOVE goflow:jobs:pending → goflow:jobs:processing   (atomic; waits up to 5 s)
+Claim     UPDATE jobs SET status = 'processing' WHERE status IN ('pending','queued','processing')
+            no row (completed, failed, deleted) → skip, Ack
+Handle    the work (a 5-second placeholder for now)
+Complete  status = 'completed'   (or Fail → 'failed')
+Ack       LREM goflow:jobs:processing
+```
+
+- **An ID is never only in memory.** `BLMOVE` moves it between lists in one step, so a worker that dies mid-job leaves it in `processing`. On start, `Recover` moves those IDs back to the front of `pending`.
+- **Duplicates are harmless.** Delivery is at least once. The second copy of an ID finds the job `completed` and is skipped: the job runs once, the ID is acknowledged twice.
+- **Saved before acknowledged.** The outcome is written to PostgreSQL before the `Ack`. A crash in between leaves the ID in `processing`; after recovery `Claim` sees the job finished and skips it.
+- **Stopping mid-job records nothing.** On `Ctrl+C` the job stays `processing` and its ID stays in `processing`; it runs again after the next start.
+- **One worker only, for now.** `Recover` can't tell a dead worker's IDs from a live one's, and `Claim` lets a `processing` job be claimed again. Both are safe with one worker; several workers need leases and heartbeats (Phases 6 and 12).
+- **The worker doesn't migrate.** The API owns the schema.
+
 ## CLI: `internal/cli`, `internal/client`, `cmd/goflow`
 
 - `goflow job create | list [--status] | get | delete` sends HTTP requests to `GOFLOW_API_URL` (default `http://localhost:8080`).
@@ -214,7 +233,8 @@ Everything runs with the race detector (`./scripts/check.sh`). [FAILURES.md](FAI
 
 ## Known limitations
 
-- Jobs are stored but never run: no workers yet (Phase 6).
+- The work itself is a placeholder; real job types, retries and timeouts come in Phases 6–7.
+- One worker process at a time (see [The worker](#the-worker)). It isn't deployed on Render yet.
 - Jobs reach Redis at least once; a duplicate ID is possible after a failed commit. Workers must be idempotent (Phase 6–7).
 - Every API instance with Redis polls the outbox every 30 s. On a database that sleeps when idle (Neon free), that keeps it awake: decide in Phase 6, when Redis is hosted.
 - No rate limit on login or password change (Phase 9). Closed registration limits who has an account meanwhile.
