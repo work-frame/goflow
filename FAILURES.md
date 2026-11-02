@@ -145,26 +145,6 @@ Each case was reproduced on a real machine (Arch Linux, Go 1.27, PostgreSQL 17) 
   ```
 - **Why:** Go keeps nanoseconds and PostgreSQL keeps microseconds, so a stored job no longer equaled itself. PostgreSQL also rounds the extra digits, which can push a time later. Truncating once in Go leaves nothing to round.
 
----
-
-## What tests did not catch
-
-- **`Lock` instead of `RLock` in `Get`:** every test passed. The code is correct but reads queue one at a time. Correctness tests can't measure throughput. That needs a benchmark (planned for Phase 13).
-- **A cheap bcrypt cost:** setting `DefaultCost` to 4 passes every test, because tests use cost 4 on purpose. Production hashes would be about 240 times cheaper to crack. Fixed in Task 17: the cost comes from `GOFLOW_BCRYPT_COST`, the server refuses anything below 10, and `TestLoadConfigDefaults` expects a literal 12 (case 19).
-- **Timing while the bcrypt cost is raised:** with `GOFLOW_BCRYPT_COST` raised from 12 to 13, two unknown emails took 0.91 s and 0.95 s, while a registered user whose hash was still at cost 12 took 0.47 s. Until every user has logged in once at the new cost, response time can still tell old accounts apart from unknown emails. Tests run at a single cost, so they cannot see this. Narrowed in Task 19: a successful login now re-hashes to the configured cost in both directions, so the gap lasts only until each user next logs in.
-
-## Environment incidents
-
-- **Tests migrated the development database.** `schema_migrations.applied_at` showed migration 1 applied 13 seconds before the API first started, matching the time `./scripts/check.sh` ran. The end-to-end test was using the development database URL. Fixed by giving tests their own database (`goflow_test`).
-
-## Not yet reproduced
-
-These safeguards have tests, but the failure hasn't been run and recorded yet:
-
-- `r.WithContext(ctx)` in `withRequestID` (expected: `TestLogRequestsWritesOneLinePerRequest` fails, while the `X-Request-ID` response header still works).
-- `store.Save` in the CLI's `create` command (expected: `TestCreateThenGet` fails, because each command is a separate process).
-
-
 ## 12. The request ID travels in the context
 
 - **Safeguard:** `withRequestID` passes `r.WithContext(ctx)` to the next handler.
@@ -178,13 +158,6 @@ These safeguards have tests, but the failure hasn't been run and recorded yet:
   ```
 - **Why:** the response header is written straight to `w`, so the client still received an ID. The log reads the ID from the request's context, and `context.WithValue` returns a new context that only the new request carries. A user would report an ID that appears nowhere in the logs.
 
-## Not yet reproduced
-
-These safeguards have tests, but the failure hasn't been run and recorded yet:
-
-- `store.Save` in the CLI's `create` command (expected: `TestCreateThenGet` fails, because each command is a separate process).
-
-
 ## 13. Storage calls inherit the request's context
 
 - **Safeguard:** `dbContext` derives the storage context from `r.Context()` with a 3-second timeout.
@@ -196,8 +169,6 @@ These safeguards have tests, but the failure hasn't been run and recorded yet:
       after the client disconnected, store ctx.Err() = <nil>, want context.Canceled
   ```
 - **Why:** every request still succeeded and the 3-second limit still applied, but a client that disconnected no longer cancelled its query. Slow queries would keep running and holding pool connections for responses nobody reads.
-
-
 
 ## 14. The template database is closed before it's copied
 
@@ -214,7 +185,6 @@ These safeguards have tests, but the failure hasn't been run and recorded yet:
 
 - **Template databases as a speed-up:** measured over 5 runs each, the template version averaged 1.76 s against 2.06 s, but the ranges overlapped almost completely. With one migration, `CREATE DATABASE` dominates, and every `CREATE DATABASE` already copies a template. Kept for when migrations grow, not for speed today.
 
-
 ## 15. Pages fetch one extra row
 
 - **Safeguard:** `JobStore.List` queries `LIMIT limit + 1`. The extra row only proves that another page exists.
@@ -229,7 +199,6 @@ These safeguards have tests, but the failure hasn't been run and recorded yet:
 - **Why:** a full first page looked exactly like a last page, so no `next_cursor` was returned. Clients stopped after page 1 and three of five jobs were never shown, with no error anywhere.
 
 - **Since Task 15:** the JSON file store was removed when the CLI became an API client. The lesson stands.
-
 
 ## 16. The CLI moves to the next page
 
@@ -355,3 +324,22 @@ These safeguards have tests, but the failure hasn't been run and recorded yet:
       config_test.go:134: not a url: err = <nil>, want ok = false
   ```
 - **Why:** without TLS, the database password and every row, including password hashes and session token hashes, cross the internet in plain text. `sslmode=prefer` looks safe but quietly falls back to plain text if TLS fails. Refusing to start is louder than a silent downgrade: a wrong URL is found at deploy time, not after the data has leaked.
+
+---
+
+## What tests did not catch
+
+- **`Lock` instead of `RLock` in `Get`:** every test passed. The code is correct but reads queue one at a time. Correctness tests can't measure throughput. That needs a benchmark (planned for Phase 13).
+- **A cheap bcrypt cost:** setting `DefaultCost` to 4 passes every test, because tests use cost 4 on purpose. Production hashes would be about 240 times cheaper to crack. Fixed in Task 17: the cost comes from `GOFLOW_BCRYPT_COST`, the server refuses anything below 10, and `TestLoadConfigDefaults` expects a literal 12 (case 19).
+- **Timing while the bcrypt cost is raised:** with `GOFLOW_BCRYPT_COST` raised from 12 to 13, two unknown emails took 0.91 s and 0.95 s, while a registered user whose hash was still at cost 12 took 0.47 s. Until every user has logged in once at the new cost, response time can still tell old accounts apart from unknown emails. Tests run at a single cost, so they cannot see this. Narrowed in Task 19: a successful login now re-hashes to the configured cost in both directions, so the gap lasts only until each user next logs in.
+
+## Environment incidents
+
+- **Tests migrated the development database.** `schema_migrations.applied_at` showed migration 1 applied 13 seconds before the API first started, matching the time `./scripts/check.sh` ran. The end-to-end test was using the development database URL. Fixed by giving tests their own database (`goflow_test`).
+- **DNS timeouts on a phone hotspot stopped the API from starting.** Against Neon from a laptop on a phone's mobile hotspot, startup failed with `hostname resolving error: ... i/o timeout`. `getent ahosts` for the same host took 5.06 s once and 0.01 s later: most likely the hotspot dropped the first DNS query, and the API's 5-second startup ping ran out first. Worked around with `ipv4.dns-options "single-request-reopen,timeout:2,attempts:3"` on that connection only (Go reads these options from `/etc/resolv.conf`). The same hotspot makes the first request after a few idle minutes take 2–5 s ([DEPLOYMENT.md](DEPLOYMENT.md#measured-2-november-2026)).
+
+## Not yet reproduced
+
+These safeguards have tests, but the failure hasn't been run and recorded yet:
+
+- `store.Save` in the CLI's `create` command (expected: `TestCreateThenGet` fails, because each command is a separate process).
