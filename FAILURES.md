@@ -357,6 +357,20 @@ Each case was reproduced on a real machine (Arch Linux, Go 1.27, PostgreSQL 17) 
   ```
 - **Why:** one word brought back two bugs. First, the dual write: with the outbox insert failing, the job was already committed and would never be queued. Second, a connection-pool deadlock: each `Add` held one pooled connection for its open transaction and asked the pool for a second one for the job insert. The pool has 10 connections; with enough concurrent `Add` calls, every connection is held by a transaction waiting for another, and nobody ever finishes. Inside a transaction, every statement has to go through `tx`. The concurrent test only finished because of `-timeout`.
 
+## 27. A taken job ID moves, it isn't popped
+
+- **Safeguard:** `queue.Take` uses `BLMOVE`, which moves the ID from `goflow:jobs:pending` to `goflow:jobs:processing` in one step. Only `Ack`, after the outcome is saved, removes it.
+- **Removed:** `BRPOP` instead, which takes the ID out of Redis entirely.
+- **Caught by:** `TestTakeKeepsTheIDUntilAck` and `TestRecoverPutsUnfinishedIDsFirst`. Every `internal/worker` test still passed: they use an in-memory queue.
+- **Observed:**
+  ```text
+  --- FAIL: TestTakeKeepsTheIDUntilAck (0.01s)
+      queue_test.go:128: processing list = [], want [older]: a taken ID must not exist only in memory
+  --- FAIL: TestRecoverPutsUnfinishedIDsFirst (0.01s)
+      queue_test.go:166: Recover = 0, <nil>; want 2, nil
+  ```
+- **Why:** with `BRPOP`, between taking an ID and finishing the job the ID exists only in the worker's memory. A crash, a deploy or Ctrl+C in that window loses it: the job stays `processing` in PostgreSQL forever and no list holds its ID, so nothing will ever run or retry it. It's the dual-write problem again, on the consumer side. Moving the ID keeps it in exactly one Redis list at every moment.
+
 ## Experiment: the naive dual write loses a job
 
 Not a removed safeguard but the design of Task 22, run live on 2 November 2026 to see the failure Task 23 fixes. `POST /api/v1/jobs` saved the job in PostgreSQL, then pushed its ID to Redis, with nothing tying the two together.
@@ -394,6 +408,26 @@ Task 23, run live on 2 November 2026 on the database left behind by the dual-wri
   ```
 - **When Redis came back**, the relay queued it: `msg="relay: jobs queued" count=1`, 0.3 s after the create. The relay's push had been retrying inside go-redis (about 1.7 s of dial retries) when Redis started, so the retry succeeded and no "will retry" warning was logged. A longer outage would leave the row for the next 30-second tick.
 - **Compared with the dual write:** same outage, but the request succeeded and the job reached the queue by itself.
+
+## Experiment: a worker stopped mid-job
+
+Task 24, run live on 3 November 2026 with the API and one worker.
+
+- **The backlog:** the worker completed the six jobs left from the earlier experiments, 5 s each, and skipped the duplicate ID: `worker: skipping, already finished or deleted job_id=2676a8c2fc57deea9b627d89b7f76ed7`. At-least-once delivery, but the job ran once.
+- **The crash:** a job was created, and the worker was sent SIGINT 2 s into its 5 s of work:
+  ```text
+  00:03:23.030 worker: stopped mid-job; it will run again after restart job_id=1627a0c861d907904df6884e9f6d772e
+  --- processing list:
+  1627a0c861d907904df6884e9f6d772e
+  1627a0c861d907904df6884e9f6d772e  processing  2026-11-03 00:03:20  crash for real
+  ```
+- **The restart:**
+  ```text
+  00:03:26.818 worker: unfinished jobs put back in the queue count=1
+  00:03:31.827 worker: job completed job_id=1627a0c861d907904df6884e9f6d772e duration=5.006s
+  1627a0c861d907904df6884e9f6d772e  completed  2026-11-03 00:03:20  crash for real
+  ```
+- **Timing note:** two earlier attempts pressed Ctrl+C by hand after the job had already completed (5 s and 30 s too late), and one ran with the API stopped. The shell timed it reliably: `./bin/worker & W=$!`, then `sleep 2; kill -INT $W`.
 ---
 
 ## What tests did not catch
