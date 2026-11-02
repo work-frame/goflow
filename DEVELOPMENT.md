@@ -94,18 +94,30 @@ Commit first. Then make the change, run the test, read the output, and restore w
 ## Running locally
 
 ```bash
-go build -o bin/api ./cmd/api && ./bin/api           # terminal 1
-go build -o bin/goflow ./cmd/goflow                  # terminal 2
+go build -o bin/api ./cmd/api && GOFLOW_REGISTRATION=open ./bin/api   # terminal 1
+```
+
+Registration is closed by default. Open it locally, create your development account once with the `register` example in the [README](README.md#examples), then log in from terminal 2:
+
+```bash
+go build -o bin/goflow ./cmd/goflow
+./bin/goflow login
 id=$(./bin/goflow job create send welcome email)
 ./bin/goflow job get "$id"
-curl -s "localhost:8080/api/v1/jobs?limit=2" | jq
+./bin/goflow job list
 ```
+
+`goflow login` saves one API at a time. Logging in locally replaces a saved login to the hosted API, and the other way round.
 
 Look at the data directly:
 
 ```bash
 docker exec goflow-postgres psql -U goflow -c 'SELECT id, title, status FROM jobs'
 ```
+
+## Deploying
+
+The hosted API deploys itself from `main` on Render. Setup, settings, measurements and limits are in [DEPLOYMENT.md](DEPLOYMENT.md).
 
 ## Debugging
 
@@ -128,3 +140,7 @@ docker exec goflow-postgres psql -U goflow -c 'SELECT id, title, status FROM job
 | `curl -d` returns 415 | Add `-H 'Content-Type: application/json'` |
 | `cannot reach the GoFlow API` | The API isn't running, or `GOFLOW_API_URL` is wrong |
 | Database tests are skipped | `GOFLOW_TEST_DATABASE_URL` isn't set in this shell |
+| `registration is closed` (403) | `GOFLOW_REGISTRATION` isn't `open` for this server. That is the default on purpose |
+| `error: ...` then `run: goflow login` | The API answered 401: no saved login for this `GOFLOW_API_URL`, or the session expired after 24 hours or was logged out |
+| `hostname resolving error: ... i/o timeout` at startup | DNS on this network dropped or delayed the lookup (seen on a phone hotspot). Retry, or see FAILURES.md, Environment incidents |
+| `event not found` in zsh | `!` inside double quotes triggers history expansion. Use single quotes, or run the script with `bash file.sh` |

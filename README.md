@@ -7,8 +7,10 @@ I'm building it to learn production Go: the standard library first, then HTTP, P
 ## Status
 
 - **Phase 1 (done):** command-line tool backed by a local JSON file
-- **Phase 2 (done):** HTTP API with request IDs, structured logs, panic recovery and graceful shutdown. Jobs are kept in memory and lost on restart.
-- **Phase 3 (next):** PostgreSQL storage
+- **Phase 2 (done):** HTTP API with request IDs, structured logs, panic recovery and graceful shutdown
+- **Phase 3 (done):** PostgreSQL storage with migrations, constraints and keyset pagination
+- **Phase 4 (done):** accounts, login sessions, per-user jobs, `goflow login`, and a first deployment on Render and Neon ([DEPLOYMENT.md](DEPLOYMENT.md))
+- **Phase 5 (next):** Redis job queue. Jobs are stored and listed, but nothing runs them yet.
 
 ## Requirements
 
@@ -45,7 +47,8 @@ The server stops on `Ctrl+C` or `SIGTERM`, finishing in-flight requests first (u
 
 | Method | Path | Success | Errors |
 |---|---|---|---|
-| `GET` | `/healthz` | `200 {"status":"ok"}` | |
+| `GET` | `/healthz` | `200 {"status":"ok"}`: the process is alive | |
+| `GET` | `/readyz` | `200`: the database answers within 2 s | `503` |
 | `POST` | `/api/v1/auth/register` | `201` + user (`id`, `email`, `created_at`) | `400`, `409` email taken, `413`, `415` |
 | `POST` | `/api/v1/auth/login` | `200 {"token","expires_at"}` | `400`, `401` invalid email or password |
 | `POST` | `/api/v1/auth/logout` | `204` (needs token) | `401` |
@@ -57,18 +60,44 @@ The server stops on `Ctrl+C` or `SIGTERM`, finishing in-flight requests first (u
 | `GET` | `/api/v1/jobs/{id}` | `200` + job (needs token) | `401`, `404` |
 | `DELETE` | `/api/v1/jobs/{id}` | `204`, no body (needs token) | `401`, `404` |
 
-`GET /api/v1/jobs` accepts an optional `?status=` filter: `pending`, `queued`, `processing`, `completed` or `failed`.
+`GET /api/v1/jobs` returns jobs oldest first, one page at a time:
+
+| Parameter | Default | Meaning |
+|---|---|---|
+| `status` | (all) | `pending`, `queued`, `processing`, `completed` or `failed` |
+| `limit` | 50 | Jobs per page, 1 to 200 |
+| `cursor` | (start) | The `next_cursor` from the previous page. Treat it as opaque |
+
+The response includes `next_cursor` until the last page, where it is omitted.
 
 Every job belongs to the user who created it. Users only ever see their own jobs: someone else's job answers `404`, exactly like a job that doesn't exist.
 
 ### Examples
 
-Log in once and keep the token in an environment variable. `read -s` asks for the password without showing it, so neither the password nor the token ends up in your shell history (in bash, use `read -s -p "Password: " PW`):
+`read -s` asks for the password without showing it, so neither the password nor the token ends up in your shell history (in bash, use `read -s -p "Password: " PW`). Paste each block separately: a `read` pasted together with the next lines takes those lines as its answer.
 
 ```bash
 API=http://localhost:8080/api/v1
+read "EMAIL?Email: "
+```
+
+```bash
 read -s "PW?Password: " && echo
-export GOFLOW_TOKEN=$(jq -n --arg e dan@example.com --arg p "$PW" '{email:$e,password:$p}' \
+```
+
+Create an account (only while the server runs with `GOFLOW_REGISTRATION=open`):
+
+```bash
+E="$EMAIL" P="$PW" jq -n '{email:env.E,password:env.P}' \
+  | curl -s -X POST $API/auth/register -H 'Content-Type: application/json' -d @-
+```
+
+Log in once and keep the token in an environment variable:
+
+```bash
+# jq reads the password from its environment (env.P). Passed as an argument
+# (--arg p "$PW") it would show in the process list while jq runs.
+export GOFLOW_TOKEN=$(E="$EMAIL" P="$PW" jq -n '{email:env.E,password:env.P}' \
   | curl -s -X POST $API/auth/login -H 'Content-Type: application/json' -d @- | jq -r .token)
 unset PW
 
@@ -109,7 +138,7 @@ Every response carries an `X-Request-ID` header, and the same ID appears in the 
 
 ## CLI
 
-The CLI is a client for the HTTP API, so the API must be running.
+The CLI is a client for the HTTP API, so the API must be running, locally or hosted (`export GOFLOW_API_URL=https://goflow-api-hewh.onrender.com`).
 
 ```bash
 goflow login                             # asks for email and password (the password isn't shown)
@@ -143,20 +172,25 @@ It runs `gofmt`, `go vet` and `go test -race`, and stops at the first failure.
 ## Project layout
 
 ```text
-cmd/goflow/      CLI entry point
-cmd/api/         HTTP server: startup, timeouts, graceful shutdown
-internal/api/    routes, handlers, middleware, JSON helpers
-internal/cli/    CLI command parsing and output
-internal/job/    Job type, validation, concurrent-safe store, JSON persistence
-scripts/         development scripts
+cmd/goflow/            CLI entry point
+cmd/api/               HTTP server: settings, startup, session cleanup, graceful shutdown
+internal/api/          routes, handlers, middleware, JSON helpers
+internal/auth/         users, password hashing, session tokens
+internal/cli/          CLI commands, login prompt, output
+internal/client/       Go client for the HTTP API
+internal/credentials/  the saved login file (~/.config/goflow/credentials)
+internal/database/     PostgreSQL: connection, migrations, stores
+internal/job/          Job type, validation, pagination rules
+scripts/               development scripts
+render.yaml            Render deployment (see DEPLOYMENT.md)
 ```
 
 ## Roadmap
 
 1. CLI and Go fundamentals (done)
 2. HTTP API (done)
-3. PostgreSQL
-4. Authentication
+3. PostgreSQL (done)
+4. Authentication and first deployment (done)
 5. Redis job queue
 6. Worker pool
 7. Retries, backoff, dead letter queue
@@ -168,15 +202,4 @@ scripts/         development scripts
 13. Integration and load testing
 14. CI/CD
 
-
-See [FAILURES.md](FAILURES.md) for what breaks when each safeguard is removed, with real output.
-
-`GET /api/v1/jobs` returns jobs oldest first, one page at a time:
-
-| Parameter | Default | Meaning |
-|---|---|---|
-| `status` | (all) | `pending`, `queued`, `processing`, `completed` or `failed` |
-| `limit` | 50 | Jobs per page, 1 to 200 |
-| `cursor` | (start) | The `next_cursor` from the previous page. Treat it as opaque |
-
-The response includes `next_cursor` until the last page, where it is omitted.
+See [FAILURES.md](FAILURES.md) for what breaks when each safeguard is removed, with real output, and [DEPLOYMENT.md](DEPLOYMENT.md) for how the hosted API is set up.
