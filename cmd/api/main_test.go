@@ -27,18 +27,35 @@ func testDatabaseURL(t *testing.T) string {
 	return url
 }
 
+// testRedisURL returns GOFLOW_TEST_REDIS_URL, or skips the test without it.
+func testRedisURL(t *testing.T) string {
+	t.Helper()
+	url := os.Getenv("GOFLOW_TEST_REDIS_URL")
+	if url == "" {
+		t.Skip("GOFLOW_TEST_REDIS_URL not set; skipping test that needs Redis")
+	}
+	return url
+}
+
 func discardLogger() *slog.Logger { return slog.New(slog.DiscardHandler) }
 
 // startServer runs the real server on a random port and returns its base URL
 // and a stop function. stop is safe to call more than once and also runs at cleanup.
+// It runs without a queue, like the hosted API today.
 func startServer(t *testing.T, dbURL string) (base string, stop func()) {
+	t.Helper()
+	return startServerWith(t, testConfig("127.0.0.1:0", dbURL))
+}
+
+// startServerWith is startServer with a config of the test's choosing.
+func startServerWith(t *testing.T, cfg config) (base string, stop func()) {
 	t.Helper()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	addrCh := make(chan string, 1)
 	runErr := make(chan error, 1)
 	go func() {
-		runErr <- run(ctx, discardLogger(), testConfig("127.0.0.1:0", dbURL), func(addr string) { addrCh <- addr })
+		runErr <- run(ctx, discardLogger(), cfg, func(addr string) { addrCh <- addr })
 	}()
 
 	select {

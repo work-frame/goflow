@@ -16,6 +16,7 @@ internal/credentials                                                     ├─�
 - **One way in.** The CLI is an HTTP client of the API. Only the API knows the database URL, so every change to a job passes through the same validation, logging and authentication.
 - **`internal/job`** is the domain: what a job is and the rules for listing jobs. It imports no HTTP or SQL packages.
 - **`internal/auth`** is the account domain: users, email normalization, password hashing with bcrypt, and session tokens. Like `job`, it imports no HTTP or SQL packages.
+- **`internal/queue`** owns Redis: a list of job IDs waiting for a worker (`goflow:jobs:pending`). Only IDs go through Redis; PostgreSQL stays the source of truth.
 - **`internal/database`** owns PostgreSQL: connecting, migrating, and storing jobs, users and sessions.
 - **`internal/api`** owns HTTP: routes, middleware, handlers.
 - **`internal/client`** is a Go client for the API. **`internal/cli`** uses it. **`internal/credentials`** saves the login on disk.
@@ -136,9 +137,10 @@ All errors are `{"error": "..."}`.
 
 1. Read every setting with `loadConfig` and report all problems at once (`errors.Join`): a missing or non-TLS remote `GOFLOW_DATABASE_URL`, a bcrypt cost outside 10–14, a `GOFLOW_REGISTRATION` other than `open` or `closed`. Errors never include the URL, which holds the password.
 2. Connect (5 s ping), run migrations. No port is opened if this fails.
-3. Start the hourly expired-session cleanup, and build the dummy bcrypt hash used for unknown emails in the background.
-4. Bind the port (`GOFLOW_ADDR`, else `PORT`, else `:8080`), log `listening`, serve.
-5. On `SIGINT`/`SIGTERM`: stop accepting connections, finish in-flight requests (up to 10 s), stop the cleanup, then close the database pool.
+3. If `GOFLOW_REDIS_URL` is set, connect to Redis (5 s ping). Otherwise log a warning: jobs are saved but not queued.
+4. Start the hourly expired-session cleanup, and build the dummy bcrypt hash used for unknown emails in the background.
+5. Bind the port (`GOFLOW_ADDR`, else `PORT`, else `:8080`), log `listening`, serve.
+6. On `SIGINT`/`SIGTERM`: stop accepting connections, finish in-flight requests (up to 10 s), stop the cleanup, then close the database pool.
 
 ## CLI: `internal/cli`, `internal/client`, `cmd/goflow`
 
@@ -183,7 +185,8 @@ Everything runs with the race detector (`./scripts/check.sh`). [FAILURES.md](FAI
 
 ## Known limitations
 
-- Jobs are stored but never run: there is no queue (Phase 5) and no workers (Phase 6).
+- Jobs are stored but never run: no workers yet (Phase 6).
+- Creating a job is a naive dual write (Task 22): PostgreSQL, then Redis. If Redis fails in between, the job is saved but never queued, and the client gets a `500` for a job that exists. Task 23 replaces it with a transactional outbox.
 - No rate limit on login or password change (Phase 9). Closed registration limits who has an account meanwhile.
 - After the bcrypt cost changes, response time can tell old accounts from unknown emails until each user logs in once.
 - A failed readiness check is logged twice, and every `/healthz` check from Render is logged (Phase 10).

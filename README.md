@@ -10,7 +10,7 @@ I'm building it to learn production Go: the standard library first, then HTTP, P
 - **Phase 2 (done):** HTTP API with request IDs, structured logs, panic recovery and graceful shutdown
 - **Phase 3 (done):** PostgreSQL storage with migrations, constraints and keyset pagination
 - **Phase 4 (done):** accounts, login sessions, per-user jobs, `goflow login`, and a first deployment on Render and Neon ([DEPLOYMENT.md](DEPLOYMENT.md))
-- **Phase 5 (next):** Redis job queue. Jobs are stored and listed, but nothing runs them yet.
+- **Phase 5 (in progress):** Redis job queue. With `GOFLOW_REDIS_URL` set, each new job's ID is pushed onto a Redis list. Nothing runs jobs yet (workers come in Phase 6).
 
 ## Requirements
 
@@ -40,6 +40,7 @@ go build -o bin/api ./cmd/api         # HTTP API
 | `GOFLOW_BCRYPT_COST` | `12` | bcrypt cost for password hashes, 10 to 14. Each step doubles the time per hash. The server refuses to start outside this range. |
 | `GOFLOW_REGISTRATION` | `closed` | `open` lets anyone create an account with `POST /api/v1/auth/register`; `closed` answers `403`. |
 | `PORT` | none | Port to listen on, as set by hosting platforms such as Render. Used only when `GOFLOW_ADDR` is not set. |
+| `GOFLOW_REDIS_URL` | none (queue off) | Redis for the job queue, e.g. `redis://127.0.0.1:6379/0`. A Redis on another machine must use `rediss://` (TLS). Without it, jobs are saved but not queued, and `/readyz` doesn't check Redis. |
 
 The server stops on `Ctrl+C` or `SIGTERM`, finishing in-flight requests first (up to 10 seconds).
 
@@ -48,7 +49,7 @@ The server stops on `Ctrl+C` or `SIGTERM`, finishing in-flight requests first (u
 | Method | Path | Success | Errors |
 |---|---|---|---|
 | `GET` | `/healthz` | `200 {"status":"ok"}`: the process is alive | |
-| `GET` | `/readyz` | `200`: the database answers within 2 s | `503` |
+| `GET` | `/readyz` | `200`: the database (and Redis, when configured) answer within 2 s | `503` |
 | `POST` | `/api/v1/auth/register` | `201` + user (`id`, `email`, `created_at`) | `400`, `409` email taken, `413`, `415` |
 | `POST` | `/api/v1/auth/login` | `200 {"token","expires_at"}` | `400`, `401` invalid email or password |
 | `POST` | `/api/v1/auth/logout` | `204` (needs token) | `401` |
@@ -181,6 +182,7 @@ internal/client/       Go client for the HTTP API
 internal/credentials/  the saved login file (~/.config/goflow/credentials)
 internal/database/     PostgreSQL: connection, migrations, stores
 internal/job/          Job type, validation, pagination rules
+internal/queue/        Redis list of job IDs waiting for a worker
 scripts/               development scripts
 render.yaml            Render deployment (see DEPLOYMENT.md)
 ```
