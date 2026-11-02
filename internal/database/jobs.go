@@ -32,8 +32,10 @@ func NewJobStore(db *sql.DB) *JobStore {
 	return &JobStore{db: db}
 }
 
-// Add inserts j. It returns job.ErrNoOwner if j has no owner and
-// job.ErrDuplicateID if a job with the same ID exists.
+// Add inserts j together with its job_outbox row, in one transaction:
+// either the job exists and will be queued, or neither row exists.
+// It returns job.ErrNoOwner if j has no owner and job.ErrDuplicateID if a
+// job with the same ID exists.
 func (s *JobStore) Add(ctx context.Context, j *job.Job) error {
 	if j == nil {
 		return job.ErrNilJob
@@ -42,17 +44,34 @@ func (s *JobStore) Add(ctx context.Context, j *job.Job) error {
 		return job.ErrNoOwner
 	}
 
-	_, err := s.db.ExecContext(ctx,
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("database: add job %s: begin: %w", j.ID, err)
+	}
+	defer tx.Rollback() // does nothing once Commit has succeeded
+
+	_, err = tx.ExecContext(ctx,
 		`INSERT INTO jobs (id, user_id, title, status, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6)`,
 		j.ID, j.UserID, j.Title, string(j.Status), j.CreatedAt, j.UpdatedAt,
 	)
-
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == uniqueViolation {
 		return job.ErrDuplicateID
 	}
 	if err != nil {
 		return fmt.Errorf("database: add job %s: %w", j.ID, err)
+	}
+
+	// Same transaction (tx, not s.db): if this insert fails, the job above
+	// is rolled back with it.
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO job_outbox (job_id, created_at) VALUES ($1, $2)`, j.ID, j.CreatedAt,
+	); err != nil {
+		return fmt.Errorf("database: add job %s: outbox: %w", j.ID, err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("database: add job %s: commit: %w", j.ID, err)
 	}
 	return nil
 }

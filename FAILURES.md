@@ -340,6 +340,23 @@ Each case was reproduced on a real machine (Arch Linux, Go 1.27, PostgreSQL 17) 
   ```
 - **Why:** an interface value holds a type and a value. A nil `*queue.Queue` stored in it is `(*queue.Queue, nil)`, which is not `== nil`, so the handler's `h.queue != nil` check passed and `PingContext` and `Enqueue` ran on a nil pointer. The panic was recovered into a `500`. Every server without Redis, including the hosted API on Render, would have failed every readiness check and every new job. Render checks `/healthz`, which doesn't touch the queue, so the deploy would still have shown **Live**.
 
+## 26. The job and its outbox row share one transaction
+
+- **Safeguard:** `JobStore.Add` inserts the job with `tx.ExecContext`, the same transaction as its `job_outbox` row.
+- **Removed:** `s.db.ExecContext` for the job insert, so the job is committed on its own before the outbox insert runs.
+- **Caught by:** `TestAddIsAllOrNothing`, and, differently, `TestJobStoreConcurrentAdds`.
+- **Observed:**
+  ```text
+  --- FAIL: TestAddIsAllOrNothing (0.10s)
+      outbox_test.go:76: Get after the failed Add: err = <nil>, want job.ErrNotFound: the job was saved without its outbox row
+
+  go test -timeout 30s -run TestJobStoreConcurrentAdds ./internal/database/
+  panic: test timed out after 30s
+          running tests:
+                  TestJobStoreConcurrentAdds (30s)
+  ```
+- **Why:** one word brought back two bugs. First, the dual write: with the outbox insert failing, the job was already committed and would never be queued. Second, a connection-pool deadlock: each `Add` held one pooled connection for its open transaction and asked the pool for a second one for the job insert. The pool has 10 connections; with enough concurrent `Add` calls, every connection is held by a transaction waiting for another, and nobody ever finishes. Inside a transaction, every statement has to go through `tx`. The concurrent test only finished because of `-timeout`.
+
 ## Experiment: the naive dual write loses a job
 
 Not a removed safeguard but the design of Task 22, run live on 2 November 2026 to see the failure Task 23 fixes. `POST /api/v1/jobs` saved the job in PostgreSQL, then pushed its ID to Redis, with nothing tying the two together.
@@ -359,6 +376,24 @@ Not a removed safeguard but the design of Task 22, run live on 2 November 2026 t
   ```
 - **Why it matters:** the client was told the job failed, but it exists. A retry would create a second copy. The saved one is never queued, and nothing in the system notices: it stays `pending` forever, like the two jobs created before the queue existed. Two writes to two systems can't succeed or fail together. Task 23 writes the job and an outbox row in one PostgreSQL transaction and lets a relay deliver the ID to Redis later.
 - **Also seen:** go-redis logged its retries with its own logger (`redis: 2026/11/02 22:19:03 pool.go:770: ... failed to dial after 5 attempts`), outside GoFlow's structured logs and without a request ID.
+
+## Experiment: the outbox survives a Redis outage
+
+Task 23, run live on 2 November 2026 on the database left behind by the dual-write experiment.
+
+- **On start**, migration 6 gave the four jobs still `pending` an outbox row, and the relay queued them at once:
+  ```text
+  msg="migrations applied" versions=[6]
+  msg="relay: jobs queued" count=4
+  ```
+  Redis then held `2676a8c2fc57deea9b627d89b7f76ed7` **twice**. Task 22 had pushed it but never marked it `queued`, so the backfill queued it again. That is at-least-once delivery, seen live: workers (Phase 6) must handle the same job twice.
+- **With Redis stopped**, `goflow job create survives an outage` succeeded (`201` in 2.7 ms), the job was `pending`, and its row waited in `job_outbox`:
+  ```text
+   id |              job_id              |          created_at
+    5 | 88cb882b2242e5a7a4a9de53f9cfd358 | 2026-11-02 21:39:00.73624+00
+  ```
+- **When Redis came back**, the relay queued it: `msg="relay: jobs queued" count=1`, 0.3 s after the create. The relay's push had been retrying inside go-redis (about 1.7 s of dial retries) when Redis started, so the retry succeeded and no "will retry" warning was logged. A longer outage would leave the row for the next 30-second tick.
+- **Compared with the dual write:** same outage, but the request succeeded and the job reached the queue by itself.
 ---
 
 ## What tests did not catch

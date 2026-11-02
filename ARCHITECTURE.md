@@ -17,6 +17,7 @@ internal/credentials                                                     ├─�
 - **`internal/job`** is the domain: what a job is and the rules for listing jobs. It imports no HTTP or SQL packages.
 - **`internal/auth`** is the account domain: users, email normalization, password hashing with bcrypt, and session tokens. Like `job`, it imports no HTTP or SQL packages.
 - **`internal/queue`** owns Redis: a list of job IDs waiting for a worker (`goflow:jobs:pending`). Only IDs go through Redis; PostgreSQL stays the source of truth.
+- **`internal/relay`** moves IDs from the outbox table to the queue in the background (see [The outbox](#the-outbox)).
 - **`internal/database`** owns PostgreSQL: connecting, migrating, and storing jobs, users and sessions.
 - **`internal/api`** owns HTTP: routes, middleware, handlers.
 - **`internal/client`** is a Go client for the API. **`internal/cli`** uses it. **`internal/credentials`** saves the login on disk.
@@ -80,7 +81,15 @@ jobs (
 )
 INDEX (user_id, created_at, id)  -- one user's jobs, oldest first, paginated
 INDEX (status, created_at)       -- status filter; workers in Phase 6
+
+job_outbox (
+  id         BIGINT      GENERATED ALWAYS AS IDENTITY PRIMARY KEY  -- delivery order
+  job_id     TEXT        NOT NULL UNIQUE REFERENCES jobs ON DELETE CASCADE
+  created_at TIMESTAMPTZ NOT NULL
+)
 ```
+
+Migration 6 gave every job that was still `pending` an outbox row, so jobs created before the queue existed get queued too.
 
 Migration 4 deleted every job that existed before accounts did, because no user could own them. It runs in one transaction, so a failure rolls the deletion back too.
 
@@ -137,10 +146,29 @@ All errors are `{"error": "..."}`.
 
 1. Read every setting with `loadConfig` and report all problems at once (`errors.Join`): a missing or non-TLS remote `GOFLOW_DATABASE_URL`, a bcrypt cost outside 10–14, a `GOFLOW_REGISTRATION` other than `open` or `closed`. Errors never include the URL, which holds the password.
 2. Connect (5 s ping), run migrations. No port is opened if this fails.
-3. If `GOFLOW_REDIS_URL` is set, connect to Redis (5 s ping). Otherwise log a warning: jobs are saved but not queued.
+3. If `GOFLOW_REDIS_URL` is set, connect to Redis (5 s ping) and start the relay. Otherwise log a warning: new jobs wait in the outbox.
 4. Start the hourly expired-session cleanup, and build the dummy bcrypt hash used for unknown emails in the background.
 5. Bind the port (`GOFLOW_ADDR`, else `PORT`, else `:8080`), log `listening`, serve.
-6. On `SIGINT`/`SIGTERM`: stop accepting connections, finish in-flight requests (up to 10 s), stop the cleanup, then close the database pool.
+6. On `SIGINT`/`SIGTERM`: stop accepting connections, finish in-flight requests (up to 10 s), stop the cleanup and the relay, then close Redis and the database pool.
+
+### The outbox
+
+Creating a job writes two things to two systems: the job (PostgreSQL) and its ID on the queue (Redis). They can't be one transaction, so the API writes only to PostgreSQL:
+
+```text
+POST /api/v1/jobs ─► BEGIN; INSERT jobs; INSERT job_outbox; COMMIT ─► 201 ─► relay.Wake()
+relay (every 30 s, and when woken):
+  BEGIN
+  SELECT ... FROM job_outbox ORDER BY id LIMIT 100 FOR UPDATE SKIP LOCKED
+  LPUSH goflow:jobs:pending <ids>            ── fails? ROLLBACK; rows wait for the next try
+  DELETE FROM job_outbox ...; UPDATE jobs SET status = 'queued' ...
+  COMMIT
+```
+
+- **Nothing is lost.** A job exists only together with its outbox row. If Redis is down, the rows wait; the request still succeeds.
+- **Delivered at least once, not exactly once.** If `LPUSH` succeeds and the `COMMIT` then fails, the rows remain and the same IDs are pushed again. Workers (Phase 6) must handle seeing a job twice.
+- **Several instances are safe.** `FOR UPDATE SKIP LOCKED` gives each relay different rows.
+- **`Wake` never blocks.** It's a send on a channel with room for one signal; extra wake-ups are dropped because the next pass sends everything anyway. The 30 s tick covers wake-ups that never came.
 
 ## CLI: `internal/cli`, `internal/client`, `cmd/goflow`
 
@@ -174,6 +202,7 @@ Everything runs with the race detector (`./scripts/check.sh`). [FAILURES.md](FAI
 | The same `401` and the same time for every login failure | Response and timing can't reveal which emails have accounts |
 | Registration closed by default | A public server doesn't accept strangers until there is a reason to |
 | Remote database only over TLS (`verify-full`) | Passwords, hashes and session hashes never cross the internet in plain text |
+| Transactional outbox instead of writing to PostgreSQL and Redis in the request | Two systems can't share a transaction. Writing to both loses jobs when the second write fails ([FAILURES.md](FAILURES.md), the dual-write experiment) |
 | CLI goes through the API | One set of rules; no back door around authentication |
 | Interfaces defined by the code that uses them, only once a second implementation exists | `JobStore` and `Pinger` each have a real and a test implementation |
 | Keyset pagination with opaque cursors | Fast at any depth; correct when jobs are added or removed between pages |
@@ -186,7 +215,8 @@ Everything runs with the race detector (`./scripts/check.sh`). [FAILURES.md](FAI
 ## Known limitations
 
 - Jobs are stored but never run: no workers yet (Phase 6).
-- Creating a job is a naive dual write (Task 22): PostgreSQL, then Redis. If Redis fails in between, the job is saved but never queued, and the client gets a `500` for a job that exists. Task 23 replaces it with a transactional outbox.
+- Jobs reach Redis at least once; a duplicate ID is possible after a failed commit. Workers must be idempotent (Phase 6–7).
+- Every API instance with Redis polls the outbox every 30 s. On a database that sleeps when idle (Neon free), that keeps it awake: decide in Phase 6, when Redis is hosted.
 - No rate limit on login or password change (Phase 9). Closed registration limits who has an account meanwhile.
 - After the bcrypt cost changes, response time can tell old accounts from unknown emails until each user logs in once.
 - A failed readiness check is logged twice, and every `/healthz` check from Render is logged (Phase 10).

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"slices"
 	"testing"
@@ -11,7 +12,8 @@ import (
 	"github.com/work-frame/goflow/internal/queue"
 )
 
-// A job created through the API ends up in Redis, by ID.
+// A job created through the API reaches Redis through the outbox and the
+// relay, and its status moves from pending to queued.
 func TestCreatedJobsReachTheQueue(t *testing.T) {
 	dbURL := testDatabaseURL(t)
 	redisURL := testRedisURL(t)
@@ -20,10 +22,6 @@ func TestCreatedJobsReachTheQueue(t *testing.T) {
 	cfg.RedisURL = redisURL
 	base, _ := startServerWith(t, cfg)
 	client := &http.Client{Timeout: 5 * time.Second}
-
-	if status, _, body := request(t, client, http.MethodGet, base+"/readyz", ""); status != http.StatusOK {
-		t.Fatalf("readyz with a queue: status %d, body %s", status, body)
-	}
 
 	token := signUp(t, client, base, dbURL)
 	id := createJob(t, client, base, token, "queued e2e job")
@@ -39,11 +37,32 @@ func TestCreatedJobsReachTheQueue(t *testing.T) {
 	t.Cleanup(func() { rdb.Close() })
 	t.Cleanup(func() { rdb.LRem(ctx, queue.PendingKey, 0, id) })
 
-	ids, err := rdb.LRange(ctx, queue.PendingKey, 0, -1).Result()
-	if err != nil {
-		t.Fatalf("LRANGE: %v", err)
+	// The relay runs in the background, woken by the create. It pushes the ID
+	// to Redis first and commits "queued" a moment later, so wait for both.
+	var ids []string
+	var got struct {
+		Status string `json:"status"`
 	}
-	if !slices.Contains(ids, id) {
-		t.Fatalf("job %s not in %s: %v", id, queue.PendingKey, ids)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		ids, err = rdb.LRange(ctx, queue.PendingKey, 0, -1).Result()
+		if err != nil {
+			t.Fatalf("LRANGE: %v", err)
+		}
+		status, _, body := requestAs(t, client, http.MethodGet, base+"/api/v1/jobs/"+id, token, "")
+		if status != http.StatusOK {
+			t.Fatalf("get: status %d, body %s", status, body)
+		}
+		if err := json.Unmarshal(body, &got); err != nil {
+			t.Fatal(err)
+		}
+		if slices.Contains(ids, id) && got.Status == "queued" {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("after 5s: job %s in %s = %v, status = %q; want the ID there and status queued",
+				id, queue.PendingKey, slices.Contains(ids, id), got.Status)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }

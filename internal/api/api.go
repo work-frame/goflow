@@ -35,11 +35,10 @@ type Pinger interface {
 	PingContext(ctx context.Context) error
 }
 
-// JobQueue hands new jobs to workers. *queue.Queue satisfies it in
-// production; tests use fakes.
-type JobQueue interface {
-	Enqueue(ctx context.Context, jobID string) error
-	Pinger
+// Waker is told that a new job is waiting in the outbox. *relay.Relay
+// satisfies it. Wake must never block.
+type Waker interface {
+	Wake()
 }
 
 // Deps is everything the API needs from the outside world.
@@ -52,12 +51,13 @@ type Deps struct {
 	Hasher   auth.Hasher
 	DB       Pinger
 	Logger   *slog.Logger
-	// Queue is optional. nil means "no queue configured": jobs are saved
-	// but not queued, and readiness doesn't check Redis.
+	// Relay is optional. nil means no queue is configured: jobs and their
+	// outbox rows are saved, and wait there until a relay runs.
 	//
-	// It must be a true nil, not a nil *queue.Queue stored in the interface:
-	// an interface holding a nil pointer is not == nil (see cmd/api).
-	Queue JobQueue
+	// It must be a true nil, not a nil *relay.Relay stored in the interface:
+	// an interface holding a nil pointer is not == nil (see cmd/api and
+	// FAILURES.md, case 25).
+	Relay Waker
 
 	// RegistrationClosed turns POST /api/v1/auth/register off. The zero value
 	// is open so tests stay short; production sets it from GOFLOW_REGISTRATION,
@@ -70,7 +70,7 @@ type Deps struct {
 // Request flow, outermost first:
 // withRequestID → logRequests → recoverPanics → jsonMuxErrors → mux → handler
 func NewRouter(d Deps) http.Handler {
-	h := &handler{store: d.Jobs, queue: d.Queue, users: d.Users, sessions: d.Sessions, hasher: d.Hasher, db: d.DB, logger: d.Logger, registrationClosed: d.RegistrationClosed}
+	h := &handler{store: d.Jobs, relay: d.Relay, users: d.Users, sessions: d.Sessions, hasher: d.Hasher, db: d.DB, logger: d.Logger, registrationClosed: d.RegistrationClosed}
 	h.prepareDummyHash()
 
 	mux := http.NewServeMux()
@@ -98,7 +98,7 @@ func NewRouter(d Deps) http.Handler {
 // handler holds what the endpoints depend on.
 type handler struct {
 	store    JobStore
-	queue    JobQueue // nil when no queue is configured
+	relay    Waker // nil when no queue is configured
 	users    UserStore
 	sessions SessionStore
 	dummy    dummyHash
@@ -145,15 +145,11 @@ func (h *handler) ready(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 	defer cancel()
 
+	// Only the database: with the outbox, this instance can accept jobs
+	// while Redis is down. They wait in the outbox until it's back.
 	if err := h.db.PingContext(ctx); err != nil {
 		h.notReady(w, r, "database", err)
 		return
-	}
-	if h.queue != nil {
-		if err := h.queue.PingContext(ctx); err != nil {
-			h.notReady(w, r, "queue", err)
-			return
-		}
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
 }
@@ -195,20 +191,17 @@ func (h *handler) createJob(w http.ResponseWriter, r *http.Request) {
 
 	// The owner always comes from the session, never from the request body.
 	j.UserID = callerID(r)
+	// One transaction: the job and its outbox row. Redis is not involved,
+	// so a Redis outage can't fail this request or lose the job.
 	if err := h.store.Add(ctx, j); err != nil {
 		h.storeError(w, r, err)
 		return
 	}
-
-	// DELIBERATELY NAIVE (Task 22): two separate writes, PostgreSQL then
-	// Redis, with nothing tying them together. If Enqueue fails, the job is
-	// already saved but never queued, and the client gets an error for a job
-	// that exists. Task 23 replaces this with a transactional outbox.
-	if h.queue != nil {
-		if err := h.queue.Enqueue(ctx, j.ID); err != nil {
-			h.storeError(w, r, err)
-			return
-		}
+	// Tell the relay there's something to send. Only after a successful
+	// Add: a wake-up for a rolled-back job would find nothing, which is
+	// harmless, but there's no reason to send one.
+	if h.relay != nil {
+		h.relay.Wake()
 	}
 
 	w.Header().Set("Location", "/api/v1/jobs/"+j.ID)

@@ -10,6 +10,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -54,10 +56,19 @@ func Open(ctx context.Context, rawURL string) (*Queue, error) {
 	return q, nil
 }
 
-// Enqueue adds a job ID to the pending list.
-func (q *Queue) Enqueue(ctx context.Context, jobID string) error {
-	if err := q.rdb.LPush(ctx, q.key, jobID).Err(); err != nil {
-		return fmt.Errorf("queue: enqueue %s: %w", jobID, err)
+// Enqueue adds job IDs to the pending list in one command, keeping their
+// order: the first ID given is the first a worker will pop.
+func (q *Queue) Enqueue(ctx context.Context, jobIDs ...string) error {
+	if len(jobIDs) == 0 {
+		return nil
+	}
+	// LPUSH takes ...any, so the strings are copied into a []any first.
+	args := make([]any, len(jobIDs))
+	for i, id := range jobIDs {
+		args[i] = id
+	}
+	if err := q.rdb.LPush(ctx, q.key, args...).Err(); err != nil {
+		return fmt.Errorf("queue: enqueue %d job(s): %w", len(jobIDs), err)
 	}
 	return nil
 }
@@ -80,4 +91,21 @@ func (q *Queue) PingContext(ctx context.Context) error {
 // Close closes every connection in the pool.
 func (q *Queue) Close() error {
 	return q.rdb.Close()
+}
+
+// UseLogger sends go-redis's own log lines (connection retries, pool
+// errors) through logger instead of go-redis's default, which prints plain
+// text to stderr outside GoFlow's structured logs.
+//
+// go-redis has one logger for the whole process, so this changes it for
+// every client. Call it once, at startup.
+func UseLogger(logger *slog.Logger) {
+	redis.SetLogger(slogAdapter{logger})
+}
+
+// slogAdapter satisfies go-redis's logging interface with a *slog.Logger.
+type slogAdapter struct{ l *slog.Logger }
+
+func (a slogAdapter) Printf(ctx context.Context, format string, v ...any) {
+	a.l.WarnContext(ctx, "redis", "detail", strings.TrimSpace(fmt.Sprintf(format, v...)))
 }
