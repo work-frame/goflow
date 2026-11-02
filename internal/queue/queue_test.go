@@ -2,7 +2,9 @@ package queue
 
 import (
 	"context"
+	"errors"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -21,10 +23,11 @@ func openTestQueue(t *testing.T) *Queue {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	q.key = "goflow:test:" + t.Name()
-	q.rdb.Del(context.Background(), q.key)
+	q.key = "goflow:test:" + t.Name() + ":pending"
+	q.processing = "goflow:test:" + t.Name() + ":processing"
+	q.rdb.Del(context.Background(), q.key, q.processing)
 	t.Cleanup(func() {
-		q.rdb.Del(context.Background(), q.key)
+		q.rdb.Del(context.Background(), q.key, q.processing)
 		q.Close()
 	})
 	return q
@@ -94,5 +97,83 @@ func TestOpenRejectsBadURLsWithoutQuotingThem(t *testing.T) {
 		if strings.Contains(err.Error(), "secret-redis-password") {
 			t.Errorf("Open(%q): error leaks the password: %v", url, err)
 		}
+	}
+}
+
+func processingIDs(t *testing.T, q *Queue) []string {
+	t.Helper()
+	ids, err := q.rdb.LRange(context.Background(), q.processing, 0, -1).Result()
+	if err != nil {
+		t.Fatalf("LRANGE processing: %v", err)
+	}
+	return ids
+}
+
+// Take moves the ID into the processing list; only Ack removes it.
+func TestTakeKeepsTheIDUntilAck(t *testing.T) {
+	q := openTestQueue(t)
+	ctx := context.Background()
+	if err := q.Enqueue(ctx, "older", "newer"); err != nil {
+		t.Fatal(err)
+	}
+
+	id, err := q.Take(ctx, time.Second)
+	if err != nil {
+		t.Fatalf("Take: %v", err)
+	}
+	if id != "older" {
+		t.Fatalf("Take = %q, want the oldest ID", id)
+	}
+	if got := processingIDs(t, q); len(got) != 1 || got[0] != "older" {
+		t.Fatalf("processing list = %v, want [older]: a taken ID must not exist only in memory", got)
+	}
+
+	if err := q.Ack(ctx, "older"); err != nil {
+		t.Fatalf("Ack: %v", err)
+	}
+	if got := processingIDs(t, q); len(got) != 0 {
+		t.Fatalf("processing list after Ack = %v, want empty", got)
+	}
+}
+
+func TestTakeWaitsThenReportsEmpty(t *testing.T) {
+	q := openTestQueue(t)
+
+	start := time.Now()
+	_, err := q.Take(context.Background(), time.Second)
+	if !errors.Is(err, ErrEmpty) {
+		t.Fatalf("Take on an empty queue: err = %v, want ErrEmpty", err)
+	}
+	if waited := time.Since(start); waited < 900*time.Millisecond {
+		t.Errorf("Take returned after %v, want it to wait about 1s", waited)
+	}
+}
+
+func TestRecoverPutsUnfinishedIDsFirst(t *testing.T) {
+	q := openTestQueue(t)
+	ctx := context.Background()
+	if err := q.Enqueue(ctx, "a", "b", "c"); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 { // a worker takes a and b, then dies without Ack
+		if _, err := q.Take(ctx, time.Second); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	n, err := q.Recover(ctx)
+	if err != nil || n != 2 {
+		t.Fatalf("Recover = %d, %v; want 2, nil", n, err)
+	}
+	var order []string
+	for range 3 {
+		id, err := q.Take(ctx, time.Second)
+		if err != nil {
+			t.Fatal(err)
+		}
+		order = append(order, id)
+	}
+	if want := []string{"a", "b", "c"}; !slices.Equal(order, want) {
+		t.Fatalf("order after Recover = %v, want %v", order, want)
 	}
 }

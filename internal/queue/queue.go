@@ -17,16 +17,26 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-// PendingKey is the Redis list of job IDs waiting for a worker.
-// The API pushes on the left (LPUSH); workers (Phase 6) will pop on the
-// right, so the oldest ID comes out first.
-const PendingKey = "goflow:jobs:pending"
+// The two Redis lists GoFlow uses.
+const (
+	// PendingKey holds job IDs waiting for a worker. The relay pushes on the
+	// left (LPUSH); workers take from the right, so the oldest comes first.
+	PendingKey = "goflow:jobs:pending"
+	// ProcessingKey holds the IDs a worker has taken but not yet finished.
+	// An ID stays here until Ack, so a worker that dies mid-job leaves it
+	// behind instead of losing it.
+	ProcessingKey = "goflow:jobs:processing"
+)
 
-// Queue is a connection pool to Redis plus the list it uses.
+// ErrEmpty means Take waited and no job ID arrived.
+var ErrEmpty = errors.New("queue: no job waiting")
+
+// Queue is a connection pool to Redis plus the lists it uses.
 // It is safe for concurrent use: go-redis manages its own pool.
 type Queue struct {
-	rdb *redis.Client
-	key string
+	rdb        *redis.Client
+	key        string // pending list
+	processing string
 }
 
 // Open connects to the Redis server at rawURL and checks it with a PING.
@@ -45,7 +55,7 @@ func Open(ctx context.Context, rawURL string) (*Queue, error) {
 	opts.ReadTimeout = 2 * time.Second
 	opts.WriteTimeout = 2 * time.Second
 
-	q := &Queue{rdb: redis.NewClient(opts), key: PendingKey}
+	q := &Queue{rdb: redis.NewClient(opts), key: PendingKey, processing: ProcessingKey}
 
 	pingCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
@@ -71,6 +81,63 @@ func (q *Queue) Enqueue(ctx context.Context, jobIDs ...string) error {
 		return fmt.Errorf("queue: enqueue %d job(s): %w", len(jobIDs), err)
 	}
 	return nil
+}
+
+// Take waits up to timeout for a job ID and moves it from the pending list
+// to the processing list in one atomic step (BLMOVE). It returns ErrEmpty if
+// nothing arrived in time.
+//
+// Moving instead of popping is what makes the queue reliable: at every
+// moment the ID is in exactly one of the two lists, never only in a
+// worker's memory.
+func (q *Queue) Take(ctx context.Context, timeout time.Duration) (string, error) {
+	id, err := q.rdb.BLMove(ctx, q.key, q.processing, "RIGHT", "LEFT", timeout).Result()
+	if errors.Is(err, redis.Nil) {
+		return "", ErrEmpty
+	}
+	if err != nil {
+		return "", fmt.Errorf("queue: take: %w", err)
+	}
+	return id, nil
+}
+
+// Ack removes a finished job ID from the processing list. Call it only
+// after the job's result is saved: an ID acknowledged too early is lost
+// if the worker dies before saving.
+func (q *Queue) Ack(ctx context.Context, jobID string) error {
+	if err := q.rdb.LRem(ctx, q.processing, 1, jobID).Err(); err != nil {
+		return fmt.Errorf("queue: ack %s: %w", jobID, err)
+	}
+	return nil
+}
+
+// Recover moves every ID left in the processing list back to the front of
+// the pending list, so it's taken next. It returns how many it moved.
+//
+// Only safe while no other worker is running: it can't tell a crashed
+// worker's IDs from a live one's. For now GoFlow runs one worker process,
+// which calls Recover at start. Several workers will need leases (Phase 12).
+func (q *Queue) Recover(ctx context.Context) (int, error) {
+	n := 0
+	for {
+		// Take puts each ID on the LEFT of processing, so the newest is on the
+		// left. Moving newest first onto the RIGHT of pending, where Take
+		// looks, leaves the oldest unfinished ID to be taken first.
+		err := q.rdb.LMove(ctx, q.processing, q.key, "LEFT", "RIGHT").Err()
+		if errors.Is(err, redis.Nil) {
+			return n, nil
+		}
+		if err != nil {
+			return n, fmt.Errorf("queue: recover: %w", err)
+		}
+		n++
+	}
+}
+
+// WithKeys returns a Queue that shares q's connections but uses other
+// lists. Tests use it so they never touch the real lists.
+func (q *Queue) WithKeys(pending, processing string) *Queue {
+	return &Queue{rdb: q.rdb, key: pending, processing: processing}
 }
 
 // Len reports how many job IDs are waiting.

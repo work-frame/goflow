@@ -122,6 +122,14 @@ id=$(./bin/goflow job create send welcome email)
 ./bin/goflow job list
 ```
 
+In a third terminal, run the worker. It needs the same database and Redis as the API, and the API must have started once (it runs the migrations):
+
+```bash
+go build -o bin/worker ./cmd/worker && GOFLOW_REDIS_URL='redis://127.0.0.1:6379/0' ./bin/worker
+```
+
+Each job takes 5 seconds of placeholder work and ends `completed`. Stop the worker mid-job with `Ctrl+C`: the next start logs `unfinished jobs put back in the queue` and runs it again.
+
 `goflow login` saves one API at a time. Logging in locally replaces a saved login to the hosted API, and the other way round.
 
 Look at the data directly:
@@ -129,7 +137,8 @@ Look at the data directly:
 ```bash
 docker exec goflow-postgres psql -U goflow -c 'SELECT id, title, status FROM jobs'
 docker exec goflow-postgres psql -U goflow -c 'SELECT * FROM job_outbox'          # jobs not yet in Redis
-docker exec goflow-redis valkey-cli lrange goflow:jobs:pending 0 -1                # job IDs in Redis
+docker exec goflow-redis valkey-cli lrange goflow:jobs:pending 0 -1                # job IDs waiting
+docker exec goflow-redis valkey-cli lrange goflow:jobs:processing 0 -1             # taken, not finished
 ```
 
 ## Deploying
