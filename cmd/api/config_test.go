@@ -18,7 +18,10 @@ func env(vars map[string]string) func(string) string {
 	return func(key string) string { return vars[key] }
 }
 
-const testDBURL = "postgres://u:secret-db-password@localhost/db"
+const (
+	testDBURL      = "postgres://u:secret-db-password@localhost/db"
+	sampleRedisURL = "redis://:secret-redis-password@localhost:6379/0"
+)
 
 func TestLoadConfigDefaults(t *testing.T) {
 	cfg, err := loadConfig(env(map[string]string{"GOFLOW_DATABASE_URL": testDBURL}))
@@ -35,6 +38,9 @@ func TestLoadConfigDefaults(t *testing.T) {
 	if cfg.RegistrationOpen {
 		t.Error("registration is open by default; a public server must start closed")
 	}
+	if cfg.RedisURL != "" {
+		t.Errorf("RedisURL = %q, want empty: the queue is optional", cfg.RedisURL)
+	}
 }
 
 func TestLoadConfigReadsEverySetting(t *testing.T) {
@@ -43,11 +49,12 @@ func TestLoadConfigReadsEverySetting(t *testing.T) {
 		"GOFLOW_DATABASE_URL": testDBURL,
 		"GOFLOW_BCRYPT_COST":  "11",
 		"GOFLOW_REGISTRATION": "open",
+		"GOFLOW_REDIS_URL":    sampleRedisURL,
 	}))
 	if err != nil {
 		t.Fatalf("loadConfig: %v", err)
 	}
-	want := config{Addr: "127.0.0.1:9000", DatabaseURL: testDBURL, BcryptCost: 11, RegistrationOpen: true}
+	want := config{Addr: "127.0.0.1:9000", DatabaseURL: testDBURL, RedisURL: sampleRedisURL, BcryptCost: 11, RegistrationOpen: true}
 	if cfg != want {
 		t.Errorf("config = %+v, want %+v", cfg, want)
 	}
@@ -130,6 +137,32 @@ func TestLoadConfigRequiresTLSForRemoteDatabases(t *testing.T) {
 	}
 	for _, tc := range tests {
 		_, err := loadConfig(env(map[string]string{"GOFLOW_DATABASE_URL": tc.url}))
+		if (err == nil) != tc.ok {
+			t.Errorf("%s: err = %v, want ok = %v", tc.url, err, tc.ok)
+		}
+		if err != nil && strings.Contains(err.Error(), "pw@") {
+			t.Errorf("%s: error contains the password: %v", tc.url, err)
+		}
+	}
+}
+
+// Like the database: a Redis on another machine must be reached over TLS,
+// which for Redis means the rediss:// scheme.
+func TestLoadConfigRequiresTLSForRemoteRedis(t *testing.T) {
+	tests := []struct {
+		url string
+		ok  bool
+	}{
+		{"redis://localhost:6379/0", true},
+		{"redis://:pw@127.0.0.1:6379/0", true},
+		{"redis://[::1]:6379", true},
+		{"rediss://default:pw@cache.example.com:6379", true},
+		{"redis://default:pw@cache.example.com:6379", false},
+		{"http://default:pw@localhost:6379", false},
+		{"not a url", false},
+	}
+	for _, tc := range tests {
+		_, err := loadConfig(env(map[string]string{"GOFLOW_DATABASE_URL": testDBURL, "GOFLOW_REDIS_URL": tc.url}))
 		if (err == nil) != tc.ok {
 			t.Errorf("%s: err = %v, want ok = %v", tc.url, err, tc.ok)
 		}

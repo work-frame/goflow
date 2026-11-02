@@ -35,11 +35,24 @@ docker exec goflow-postgres psql -U goflow -c 'CREATE DATABASE goflow_test'
 
 Bind to `127.0.0.1` only: Docker's port rules bypass most host firewalls. The container has no restart policy, so after a reboot run `docker start goflow-postgres`.
 
+### Redis
+
+GoFlow uses [Valkey](https://valkey.io), the open-source fork of Redis. It speaks the same protocol and commands, and it's what Render's Key Value runs.
+
+```bash
+docker run -d --name goflow-redis -p 127.0.0.1:6379:6379 -v goflow-redisdata:/data valkey/valkey:8
+docker exec goflow-redis valkey-cli ping   # PONG
+```
+
+Development uses database 0 and tests use database 1 of the same server, like `goflow` and `goflow_test` in PostgreSQL. After a reboot run `docker start goflow-redis`.
+
 ### Environment
 
 ```bash
 export GOFLOW_DATABASE_URL='postgres://goflow:goflow@127.0.0.1:5432/goflow?sslmode=disable'
 export GOFLOW_TEST_DATABASE_URL='postgres://goflow:goflow@127.0.0.1:5432/goflow_test?sslmode=disable'
+export GOFLOW_REDIS_URL='redis://127.0.0.1:6379/0'
+export GOFLOW_TEST_REDIS_URL='redis://127.0.0.1:6379/1'
 ```
 
 | Variable | Used by | Default |
@@ -49,6 +62,8 @@ export GOFLOW_TEST_DATABASE_URL='postgres://goflow:goflow@127.0.0.1:5432/goflow_
 | `GOFLOW_BCRYPT_COST` | API; 10 to 14, refused otherwise | `12` |
 | `GOFLOW_REGISTRATION` | API; `open` or `closed` | `closed` |
 | `PORT` | API, when `GOFLOW_ADDR` is unset (hosting platforms) | none |
+| `GOFLOW_REDIS_URL` | API; optional, remote hosts need `rediss://` | none (queue off) |
+| `GOFLOW_TEST_REDIS_URL` | tests; Redis tests skip without it | none |
 | `GOFLOW_TEST_DATABASE_URL` | tests; database tests skip without it | none |
 | `GOFLOW_API_URL` | CLI | `http://localhost:8080` |
 | `GOFLOW_TOKEN` | CLI; overrides the saved login from `goflow login` (scripts, CI) | none |

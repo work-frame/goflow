@@ -35,6 +35,13 @@ type Pinger interface {
 	PingContext(ctx context.Context) error
 }
 
+// JobQueue hands new jobs to workers. *queue.Queue satisfies it in
+// production; tests use fakes.
+type JobQueue interface {
+	Enqueue(ctx context.Context, jobID string) error
+	Pinger
+}
+
 // Deps is everything the API needs from the outside world.
 // A struct instead of a long parameter list: Task 17 adds a token signer
 // without touching every NewRouter call again. Tests fill in only what they use.
@@ -45,6 +52,12 @@ type Deps struct {
 	Hasher   auth.Hasher
 	DB       Pinger
 	Logger   *slog.Logger
+	// Queue is optional. nil means "no queue configured": jobs are saved
+	// but not queued, and readiness doesn't check Redis.
+	//
+	// It must be a true nil, not a nil *queue.Queue stored in the interface:
+	// an interface holding a nil pointer is not == nil (see cmd/api).
+	Queue JobQueue
 
 	// RegistrationClosed turns POST /api/v1/auth/register off. The zero value
 	// is open so tests stay short; production sets it from GOFLOW_REGISTRATION,
@@ -57,7 +70,7 @@ type Deps struct {
 // Request flow, outermost first:
 // withRequestID → logRequests → recoverPanics → jsonMuxErrors → mux → handler
 func NewRouter(d Deps) http.Handler {
-	h := &handler{store: d.Jobs, users: d.Users, sessions: d.Sessions, hasher: d.Hasher, db: d.DB, logger: d.Logger, registrationClosed: d.RegistrationClosed}
+	h := &handler{store: d.Jobs, queue: d.Queue, users: d.Users, sessions: d.Sessions, hasher: d.Hasher, db: d.DB, logger: d.Logger, registrationClosed: d.RegistrationClosed}
 	h.prepareDummyHash()
 
 	mux := http.NewServeMux()
@@ -85,6 +98,7 @@ func NewRouter(d Deps) http.Handler {
 // handler holds what the endpoints depend on.
 type handler struct {
 	store    JobStore
+	queue    JobQueue // nil when no queue is configured
 	users    UserStore
 	sessions SessionStore
 	dummy    dummyHash
@@ -132,11 +146,23 @@ func (h *handler) ready(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	if err := h.db.PingContext(ctx); err != nil {
-		h.logger.Warn("readiness check failed", "request_id", RequestID(r.Context()), "err", err)
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "not ready"})
+		h.notReady(w, r, "database", err)
 		return
 	}
+	if h.queue != nil {
+		if err := h.queue.PingContext(ctx); err != nil {
+			h.notReady(w, r, "queue", err)
+			return
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
+}
+
+// notReady logs which dependency failed and answers 503. The client learns
+// only "not ready": addresses and error details stay in the logs.
+func (h *handler) notReady(w http.ResponseWriter, r *http.Request, dependency string, err error) {
+	h.logger.Warn("readiness check failed", "request_id", RequestID(r.Context()), "dependency", dependency, "err", err)
+	writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "not ready"})
 }
 
 type createJobRequest struct {
@@ -172,6 +198,17 @@ func (h *handler) createJob(w http.ResponseWriter, r *http.Request) {
 	if err := h.store.Add(ctx, j); err != nil {
 		h.storeError(w, r, err)
 		return
+	}
+
+	// DELIBERATELY NAIVE (Task 22): two separate writes, PostgreSQL then
+	// Redis, with nothing tying them together. If Enqueue fails, the job is
+	// already saved but never queued, and the client gets an error for a job
+	// that exists. Task 23 replaces this with a transactional outbox.
+	if h.queue != nil {
+		if err := h.queue.Enqueue(ctx, j.ID); err != nil {
+			h.storeError(w, r, err)
+			return
+		}
 	}
 
 	w.Header().Set("Location", "/api/v1/jobs/"+j.ID)

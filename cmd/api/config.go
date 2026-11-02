@@ -23,6 +23,7 @@ const (
 type config struct {
 	Addr             string
 	DatabaseURL      string // holds the database password: never log it
+	RedisURL         string // optional; may hold a password: never log it
 	BcryptCost       int
 	RegistrationOpen bool
 }
@@ -36,6 +37,7 @@ func loadConfig(getenv func(string) string) (config, error) {
 	cfg := config{
 		Addr:        getenv("GOFLOW_ADDR"),
 		DatabaseURL: getenv("GOFLOW_DATABASE_URL"),
+		RedisURL:    getenv("GOFLOW_REDIS_URL"),
 		BcryptCost:  auth.DefaultCost,
 	}
 	var errs []error
@@ -57,6 +59,14 @@ func loadConfig(getenv func(string) string) (config, error) {
 		errs = append(errs, errors.New("GOFLOW_DATABASE_URL is required"))
 	} else if err := checkDatabaseTLS(cfg.DatabaseURL); err != nil {
 		errs = append(errs, err)
+	}
+
+	// Redis is optional until workers exist (Phase 6): without it, jobs are
+	// saved but not queued.
+	if cfg.RedisURL != "" {
+		if err := checkRedisTLS(cfg.RedisURL); err != nil {
+			errs = append(errs, err)
+		}
 	}
 
 	if raw := getenv("GOFLOW_BCRYPT_COST"); raw != "" {
@@ -98,10 +108,7 @@ func checkDatabaseTLS(raw string) error {
 		return errors.New("GOFLOW_DATABASE_URL must look like postgres://user:password@host/database")
 	}
 	host := u.Hostname()
-	if host == "localhost" {
-		return nil
-	}
-	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+	if isThisMachine(host) {
 		return nil
 	}
 	switch u.Query().Get("sslmode") {
@@ -109,4 +116,35 @@ func checkDatabaseTLS(raw string) error {
 		return nil
 	}
 	return fmt.Errorf("GOFLOW_DATABASE_URL points at %s, a remote database, so it needs sslmode=verify-full (or require)", host)
+}
+
+// checkRedisTLS is checkDatabaseTLS for Redis. TLS is chosen by the scheme:
+// rediss:// (two s's) is encrypted, redis:// is plain text and only allowed
+// for a Redis on this machine. Errors never include the URL.
+func checkRedisTLS(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return errors.New("GOFLOW_REDIS_URL must look like redis://host:6379/0 or rediss://user:password@host:6379")
+	}
+	switch u.Scheme {
+	case "rediss":
+		return nil
+	case "redis":
+		if isThisMachine(u.Hostname()) {
+			return nil
+		}
+		return fmt.Errorf("GOFLOW_REDIS_URL points at %s, a remote Redis, so it must start with rediss:// (TLS)", u.Hostname())
+	default:
+		return fmt.Errorf("GOFLOW_REDIS_URL must start with redis:// or rediss://, got %q", u.Scheme)
+	}
+}
+
+// isThisMachine reports whether host is the loopback interface, where
+// traffic never leaves the machine and plain text is acceptable.
+func isThisMachine(host string) bool {
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }

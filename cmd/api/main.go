@@ -15,6 +15,7 @@ import (
 	"github.com/work-frame/goflow/internal/api"
 	"github.com/work-frame/goflow/internal/auth"
 	"github.com/work-frame/goflow/internal/database"
+	"github.com/work-frame/goflow/internal/queue"
 )
 
 func main() {
@@ -41,8 +42,9 @@ func main() {
 // then shuts down gracefully. If ready is not nil, it is called with the bound
 // address once the server is listening. cfg is trusted: loadConfig validates it.
 func run(ctx context.Context, logger *slog.Logger, cfg config, ready func(addr string)) error {
-	// Never log cfg.DatabaseURL: it contains the database password.
-	logger.Info("starting", "addr", cfg.Addr, "bcrypt_cost", cfg.BcryptCost, "registration_open", cfg.RegistrationOpen)
+	// Never log cfg.DatabaseURL or cfg.RedisURL: they can contain passwords.
+	logger.Info("starting", "addr", cfg.Addr, "bcrypt_cost", cfg.BcryptCost,
+		"registration_open", cfg.RegistrationOpen, "queue_enabled", cfg.RedisURL != "")
 
 	// Connect before opening the port: an instance that can't reach its database
 	// should never start accepting traffic.
@@ -64,6 +66,20 @@ func run(ctx context.Context, logger *slog.Logger, cfg config, ready func(addr s
 		logger.Info("database schema up to date")
 	}
 
+	// The queue is optional until workers exist (Phase 6). q stays a nil
+	// *queue.Queue when GOFLOW_REDIS_URL is unset.
+	var q *queue.Queue
+	if cfg.RedisURL != "" {
+		q, err = queue.Open(ctx, cfg.RedisURL)
+		if err != nil {
+			return err
+		}
+		defer q.Close()
+		logger.Info("queue connected")
+	} else {
+		logger.Warn("queue disabled: GOFLOW_REDIS_URL is not set, so new jobs are saved but not queued")
+	}
+
 	sessions := database.NewSessionStore(db)
 	// Deferred after db.Close, so it runs first: cleanup stops, then the pool closes.
 	stopCleanup := startSessionCleanup(ctx, logger, sessions, sessionCleanupInterval)
@@ -83,6 +99,12 @@ func run(ctx context.Context, logger *slog.Logger, cfg config, ready func(addr s
 		Logger:   logger,
 
 		RegistrationClosed: !cfg.RegistrationOpen,
+	}
+	// Only a real queue goes into the interface. Assigning a nil *queue.Queue
+	// would make deps.Queue != nil (an interface holding a nil pointer is not
+	// nil), and the first job would call Enqueue on nil and panic.
+	if q != nil {
+		deps.Queue = q
 	}
 
 	srv := &http.Server{
