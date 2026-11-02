@@ -325,6 +325,40 @@ Each case was reproduced on a real machine (Arch Linux, Go 1.27, PostgreSQL 17) 
   ```
 - **Why:** without TLS, the database password and every row, including password hashes and session token hashes, cross the internet in plain text. `sslmode=prefer` looks safe but quietly falls back to plain text if TLS fails. Refusing to start is louder than a silent downgrade: a wrong URL is found at deploy time, not after the data has leaked.
 
+
+## 25. Only a real queue goes into the interface
+
+- **Safeguard:** `run` puts the queue into `api.Deps` only when there is one: `if q != nil { deps.Queue = q }`.
+- **Removed:** `deps.Queue = q` on every start, so a server without `GOFLOW_REDIS_URL` stores a nil `*queue.Queue` in the `JobQueue` interface.
+- **Caught by:** `TestServerEndToEnd` and `TestJobsSurviveRestart`, which run without Redis. `TestCreatedJobsReachTheQueue` still passed (it has Redis), and so did every `internal/api` test (they build `Deps` with a fake queue or none).
+- **Observed:**
+  ```text
+  --- FAIL: TestServerEndToEnd (0.05s)
+      main_test.go:177: readyz: status 500, body {"error":"internal error"}
+  --- FAIL: TestJobsSurviveRestart (0.09s)
+      main_test.go:210: create: status 500, body {"error":"internal error"}
+  ```
+- **Why:** an interface value holds a type and a value. A nil `*queue.Queue` stored in it is `(*queue.Queue, nil)`, which is not `== nil`, so the handler's `h.queue != nil` check passed and `PingContext` and `Enqueue` ran on a nil pointer. The panic was recovered into a `500`. Every server without Redis, including the hosted API on Render, would have failed every readiness check and every new job. Render checks `/healthz`, which doesn't touch the queue, so the deploy would still have shown **Live**.
+
+## Experiment: the naive dual write loses a job
+
+Not a removed safeguard but the design of Task 22, run live on 2 November 2026 to see the failure Task 23 fixes. `POST /api/v1/jobs` saved the job in PostgreSQL, then pushed its ID to Redis, with nothing tying the two together.
+
+- **Steps:** create a job, stop Redis (`docker stop goflow-redis`), create another, list jobs, start Redis, read the list.
+- **Observed:**
+  ```text
+  2676a8c2fc57deea9b627d89b7f76ed7                      # "queued fine", 201 in 5 ms
+  1                                                     # LLEN goflow:jobs:pending
+  error: create: internal error (HTTP 500)              # "lost in between", Redis stopped
+  7a7a19b4304aae6b6f01468fa8d46b4a  pending  2026-11-02 22:19:03  lost in between
+  2676a8c2fc57deea9b627d89b7f76ed7                      # LRANGE after Redis restarted
+  ```
+  Server log for the failed request, after 1.74 s of retries:
+  ```text
+  level=ERROR msg="internal error" err="queue: enqueue 7a7a19b4304aae6b6f01468fa8d46b4a: dial tcp 127.0.0.1:6379: connect: connection refused"
+  ```
+- **Why it matters:** the client was told the job failed, but it exists. A retry would create a second copy. The saved one is never queued, and nothing in the system notices: it stays `pending` forever, like the two jobs created before the queue existed. Two writes to two systems can't succeed or fail together. Task 23 writes the job and an outbox row in one PostgreSQL transaction and lets a relay deliver the ID to Redis later.
+- **Also seen:** go-redis logged its retries with its own logger (`redis: 2026/11/02 22:19:03 pool.go:770: ... failed to dial after 5 attempts`), outside GoFlow's structured logs and without a request ID.
 ---
 
 ## What tests did not catch
