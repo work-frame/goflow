@@ -411,6 +411,18 @@ Each case was reproduced on a real machine (Arch Linux, Go 1.27, PostgreSQL 17) 
   ```
 - **Why:** every pass is a database query, and nothing else catches this: jobs still arrive, every other test passes, and the cost shows up only on the bill. Neon's free compute suspends after 5 idle minutes and has 100 compute-hours a month. Even Task 23's 30-second tick never lets it reach 5 idle minutes: at the smallest size that is about 180 compute-hours a month, so the database would be suspended for the rest of the month after about 2.5 weeks. Work that only matters after a failure belongs on a retry timer; work that covers lost data (the reconciler) can run hourly.
 
+## 31. The API starts when Redis is down
+
+- **Safeguard:** the API creates its Redis client with `queue.New`, which doesn't connect, and treats a failed startup ping as a warning (`queue not reachable yet`). The relay, the reconciler and the worker pool all retry on their own.
+- **Removed:** returning the ping error from `run`, so the API exits when Redis doesn't answer at startup, as it did before Task 28.
+- **Caught by:** `TestAPIStartsWhenRedisIsDown`, which starts the API with `GOFLOW_REDIS_URL` pointing at a port where nothing listens.
+- **Observed:**
+  ```text
+  --- FAIL: TestAPIStartsWhenRedisIsDown (1.74s)
+      queue_test.go:113: server failed to start: queue: ping: dial tcp 127.0.0.1:1: connect: connection refused
+  ```
+- **Why:** this is the failed Render deploy of 3 November, reproduced on a laptop. A Blueprint sync created the Key Value and redeployed the API at the same moment; the new API pinged Redis before it accepted connections and exited, so the deploy failed. Exiting protected nothing: job creation never needed Redis (the outbox), and every Redis user already retried. A dependency the program can work without shouldn't be able to stop it from starting. The database is different: without it the API can't serve anything, so it still exits.
+
 ## Experiment: the naive dual write loses a job
 
 Not a removed safeguard but the design of Task 22, run live on 2 November 2026 to see the failure Task 23 fixes. `POST /api/v1/jobs` saved the job in PostgreSQL, then pushed its ID to Redis, with nothing tying the two together.
