@@ -14,6 +14,7 @@ goflow CLI ──HTTPS──► Render edge ──► goflow-api (Render, Frankf
 |---|---|---|
 | API | Render web service `goflow-api`, free plan, region `frankfurt` | 0.1 CPU, 512 MB. Built and started from [`render.yaml`](render.yaml) |
 | Database | Neon project `goflow`, branch `production`, AWS Europe Central 1 (Frankfurt) | Postgres 17, free plan, no IP restrictions |
+| Queue and worker | Not deployed yet | `GOFLOW_REDIS_URL` is unset, so the API logs `queue disabled` and new jobs stay `pending` with a row in `job_outbox`. When Redis and a worker are hosted (Phase 6), the relay sends every waiting job on its first run |
 | Public URL | `https://goflow-api-hewh.onrender.com` | Plain `http://` answers `301` to `https://` (Render does this) |
 
 The API and the database sit in the same region, so a query between them takes milliseconds. Your distance to Frankfurt is what you notice.
