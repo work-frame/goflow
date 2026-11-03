@@ -32,6 +32,7 @@ reconciler, start + hourly    re-sends from PostgreSQL whatever Redis lost      
 - **`internal/job`** is the domain: what a job is and the rules for listing jobs. It imports no HTTP or SQL packages.
 - **`internal/auth`** is the account domain: users, email normalization, password hashing with bcrypt, and session tokens. Like `job`, it imports no HTTP or SQL packages.
 - **`internal/queue`** owns Redis: a list of job IDs waiting for a worker (`goflow:jobs:pending`). Only IDs go through Redis; PostgreSQL stays the source of truth.
+- **`internal/events`** carries job changes to the browsers watching them (see [Live updates](#live-updates)).
 - **`internal/relay`** moves IDs from the outbox table to the queue in the background (see [The outbox](#the-outbox)).
 - **`internal/worker`** and **`cmd/worker`** take IDs off the queue and run the jobs (see [The worker pool](#the-worker-pool)). **`internal/urlcheck`** holds the TLS rules both programs apply to their URLs.
 - **`internal/database`** owns PostgreSQL: connecting, migrating, and storing jobs, users and sessions.
@@ -160,6 +161,27 @@ Checking "does this key exist?" in Go before inserting would let two concurrent 
 
 **A replay returns the job as it is now, not a copy of the first response.** Live on Render, the first answer said `pending, 0 attempts` and the replay 18 ms later said `processing, 1 attempt`. Stripe-style APIs store the first response and send it again byte for byte; GoFlow reads the job instead. It's simpler (no response storage) and the client gets fresher data. The cost: a client must compare IDs, not whole bodies, to recognise a replay, or read the `Idempotent-Replayed` header.
 
+### Live updates
+
+`GET /api/v1/events` is a Server-Sent Events stream of the caller's job changes. The path a change takes:
+
+```text
+store commits a change ─► Notifier (events.Publisher): buffer of 256, never blocks
+                          └─► one goroutine: PUBLISH goflow:events {"user_id", "message"}
+every API instance: SUBSCRIBE goflow:events ─► events.Hub ─► only the owner's open streams (buffer 64 each)
+                                                                └─► data: {"type":"changed","job":{...}}
+```
+
+- **PostgreSQL stays the truth; events are hints.** Stores call the `Notifier` only after `COMMIT`, with the row as committed (`RETURNING`), so a listener never hears about a change that was rolled back. Redis Pub/Sub delivers at most once and keeps nothing. A missed event costs a client a reload, never a job. Every status change goes through a store method (`Add`, `Rerun`, `Delete`, `Relay`, `Claim`, `Complete`, `Retry`, `Bury`, `ResetProcessing`), so none can be forgotten in a handler.
+- **Publishing never slows the real work.** `events.Publisher` encodes the event, puts it in a buffer and returns. One goroutine sends to Redis, in order, with a 2-second limit per message. When Redis hangs, the buffer fills and new events are dropped and counted. A Redis outage can't delay a job's creation or a worker's result.
+- **Routing by owner, in the hub.** Every API instance subscribes once to one channel. The `Hub` hands each message only to the streams of the job's owner (`user_id` from the Redis envelope, which never reaches the client). This is the same rule as `WHERE user_id = $n` in SQL, applied to events (FAILURES.md, case 35).
+- **A slow client is dropped, not waited for.** Delivery never blocks. A stream more than 64 messages behind is closed; its client reconnects and reloads.
+- **No gap between the snapshot and the stream.** The handler subscribes to the hub, waits until the API's Redis subscription is live, and only then sends `ready`. The client loads its jobs after `ready`, so any change committed after that read arrives as an event. When the Redis subscription drops and comes back, every stream gets `resync`, because messages published in between are gone.
+- **Order isn't guaranteed; `updated_at` decides.** The relay and a worker announce from different goroutines (or processes), so `processing` can arrive before `queued`. A client keeps an event only if its `updated_at` isn't older than its copy. `queued` is often skipped altogether: the relay pushes the ID before it marks the job queued, and a fast worker claims it first.
+- **Tickets, not tokens, in the URL.** `EventSource` can't send an `Authorization` header. `POST /api/v1/events/ticket` (with the session) returns `gft_` + 32 random bytes; Redis stores its SHA-256 hash for 30 seconds (`SET NX EX`), and the stream redeems it with `GETDEL`, so it works exactly once, even with two requests racing. A ticket in a proxy log is already spent. Our own request log never records query strings.
+- **Long-lived responses.** The server's 10-second read and write timeouts are lifted for each stream with `http.ResponseController`, which reaches the connection through the middleware's `Unwrap` methods. A heartbeat comment every 25 seconds keeps proxies from closing a quiet stream; it's outbound, so it doesn't keep a free Render instance awake. `Shutdown` waits for open connections, so `RegisterOnShutdown(hub.Close)` ends every stream the moment shutdown starts.
+- **Without Redis,** the ticket and stream endpoints answer `503` and nothing else changes.
+
 ### Errors
 
 All errors are `{"error": "..."}`.
@@ -278,6 +300,7 @@ These are a contract, not something the pool enforces. Tests for each job type s
 | `internal/api` | Handlers with fakes: an adapter over `MemoryStore`, an always-failing store, and a spy that records the context it was given |
 | `internal/cli` | A fake API with 2 jobs per page, plus failure and deadline doubles |
 | `internal/client` | **Contract tests** against the real `api.NewRouter`, served by `httptest.NewServer` |
+| `internal/events` | The hub and the publisher with fakes for Redis: owner-only delivery, slow clients dropped, publishing that never blocks, tickets working once and stored as hashes |
 | `internal/database` | Real PostgreSQL. `TestMain` migrates one template database per run, and each test copies it |
 | `cmd/api` | End to end: the real server on `127.0.0.1:0`, including jobs surviving a restart, sign-up, sessions, and settings validation |
 
@@ -304,6 +327,10 @@ Everything runs with the race detector (`./scripts/check.sh`). [FAILURES.md](FAI
 | **Lost Redis data is recovered from PostgreSQL by a reconciler that runs at startup and then hourly, for jobs more than 10 minutes overdue** | A retry or queued job whose ID Redis lost comes back 10–70 minutes late. Running it more often would keep Neon's free compute awake (100 CU-hours a month, Phase 6), and the 10-minute margin stops it re-sending IDs that are only waiting in a busy queue. Late is accepted; lost is not |
 | The dead-letter queue is a status (`dead`), not a Redis list | One place to look (`?status=dead`), owner-scoped like every job, and a re-run is one transaction with the outbox |
 | Idempotency enforced by a unique index; a replay returns the current job | Only the database sees concurrent requests. Reading the job avoids storing responses |
+| Server-Sent Events, not WebSocket | Updates only flow from server to browser. SSE is a plain HTTP response (`net/http` only), and browsers reconnect on their own. WebSocket would add a dependency and two-way features nobody uses |
+| Redis Pub/Sub for events, not PostgreSQL `LISTEN/NOTIFY` | Neon drops `LISTEN` registrations whenever the database sleeps (every 5 idle minutes on the free plan). Pub/Sub works whether workers run in the API or in `cmd/worker` |
+| Events are published after commit, in the background, and may be lost | They are hints. The client's snapshot after `ready`, `resync`, and reloading after a reconnect cover every loss; PostgreSQL never depends on them |
+| Single-use 30-second tickets for streams | Keeps the 24-hour session token out of URLs, which end up in logs and history |
 | CLI goes through the API | One set of rules; no back door around authentication |
 | Interfaces defined by the code that uses them, only once a second implementation exists | `JobStore` and `Pinger` each have a real and a test implementation |
 | Keyset pagination with opaque cursors | Fast at any depth; correct when jobs are added or removed between pages |
@@ -321,6 +348,8 @@ Everything runs with the race detector (`./scripts/check.sh`). [FAILURES.md](FAI
 - When Key Value loses its data, retries and queued jobs come back through the hourly reconciler: up to about 70 minutes late.
 - `last_error` is stored but not shown to users yet: `goflow job get` on a dead job doesn't say why it died.
 - Idempotency keys never expire on their own; they're deleted with their job.
+- A session ending (logout, password change) doesn't close streams it opened: they run until they drop or the server restarts. A ticket can't be issued without a live session, and a stream only carries its owner's job changes.
+- No dashboard yet: live updates can be watched with `curl -N` (Task 34 adds the page).
 - Plain `redis://` is accepted for single-label private-network names (Render's internal Key Value host): that traffic is unencrypted inside the provider's network.
 - No rate limit on login or password change (Phase 9). Closed registration limits who has an account meanwhile.
 - After the bcrypt cost changes, response time can tell old accounts from unknown emails until each user logs in once.

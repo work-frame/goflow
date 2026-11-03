@@ -15,6 +15,7 @@ import (
 	"github.com/work-frame/goflow/internal/api"
 	"github.com/work-frame/goflow/internal/auth"
 	"github.com/work-frame/goflow/internal/database"
+	"github.com/work-frame/goflow/internal/events"
 	"github.com/work-frame/goflow/internal/queue"
 	"github.com/work-frame/goflow/internal/relay"
 	"github.com/work-frame/goflow/internal/worker"
@@ -90,6 +91,11 @@ func run(ctx context.Context, logger *slog.Logger, cfg config, ready func(addr s
 	// and their outbox rows are saved and wait until a relay runs.
 	// rl stays a nil *relay.Relay when GOFLOW_REDIS_URL is unset.
 	var rl *relay.Relay
+	// Without Redis there are no live updates: notifier stays a nil
+	// interface and live a nil pointer, never assigned a nil value of
+	// another type (case 25).
+	var notifier database.Notifier
+	var live *events.Live
 	if cfg.RedisURL != "" {
 		queue.UseLogger(logger)
 		// New doesn't connect. An unreachable Redis must not stop the API:
@@ -110,7 +116,22 @@ func run(ctx context.Context, logger *slog.Logger, cfg config, ready func(addr s
 		}
 		cancelPing()
 
-		outbox := database.NewOutboxStore(db)
+		// Live updates. Stores publish each committed status change; the
+		// publisher sends them to Redis in the background, so a Redis outage
+		// never slows a request or a worker. It keeps running after SIGTERM
+		// (WithoutCancel) until its deferred stop, so jobs finishing during
+		// the drain still announce it. Deferred before the relay and the
+		// pool, so it stops after both.
+		pub := events.NewPublisher(q, logger)
+		stopPublisher := pub.Start(context.WithoutCancel(ctx))
+		defer stopPublisher()
+		notifier = pub
+		hub := events.NewHub()
+		stopListening := events.Listen(ctx, q, hub, logger)
+		defer stopListening()
+		live = &events.Live{Tickets: events.NewTickets(q), Hub: hub}
+
+		outbox := database.NewOutboxStore(db).WithNotifier(notifier)
 		rl = relay.New(outbox, q, logger, relayRetry)
 		// Deferred after q.Close and db.Close, so these run first: the relay
 		// and the reconciler stop, then the queue and the database close.
@@ -128,7 +149,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg config, ready func(addr s
 			// ONLY ONE API INSTANCE may run workers (see worker.Pool.Run).
 			pool := &worker.Pool{
 				Queue:        q,
-				Store:        database.NewWorkStore(db),
+				Store:        database.NewWorkStore(db).WithNotifier(notifier),
 				Handle:       worker.Demo(cfg.SimulatedWork),
 				JobTimeout:   jobTimeout,
 				Logger:       logger,
@@ -168,7 +189,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg config, ready func(addr s
 	}
 
 	deps := api.Deps{
-		Jobs:     database.NewJobStore(db),
+		Jobs:     database.NewJobStore(db).WithNotifier(notifier),
 		Users:    database.NewUserStore(db),
 		Sessions: sessions,
 		Hasher:   auth.Hasher{Cost: cfg.BcryptCost},
@@ -183,6 +204,9 @@ func run(ctx context.Context, logger *slog.Logger, cfg config, ready func(addr s
 	if rl != nil {
 		deps.Relay = rl
 	}
+	if live != nil {
+		deps.Live = live
+	}
 
 	srv := &http.Server{
 		Handler:           api.NewRouter(deps),
@@ -191,6 +215,12 @@ func run(ctx context.Context, logger *slog.Logger, cfg config, ready func(addr s
 		WriteTimeout:      10 * time.Second,
 		IdleTimeout:       60 * time.Second,
 		ErrorLog:          slog.NewLogLogger(logger.Handler(), slog.LevelError),
+	}
+
+	// Event streams never end on their own. Shutdown waits for every
+	// connection to go idle, so close the streams the moment it starts.
+	if live != nil {
+		srv.RegisterOnShutdown(live.Hub.Close)
 	}
 
 	errCh := make(chan error, 1)

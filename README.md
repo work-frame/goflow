@@ -13,6 +13,7 @@ I'm building it to learn production Go: the standard library first, then HTTP, P
 - **Phase 5 (done):** Redis job queue. A new job and an outbox row are saved in one transaction; with `GOFLOW_REDIS_URL` set, a background relay moves the ID to a Redis list and marks the job `queued`. A single worker (`cmd/worker`) takes IDs off the queue and runs jobs to `completed`; the work itself is a placeholder until real job types arrive. Runs locally; not deployed yet.
 - **Phase 6 (done):** a pool of concurrent workers (`GOFLOW_WORKERS`) with graceful shutdown. On Render, the API runs the pool itself against a free Key Value queue ([DEPLOYMENT.md](DEPLOYMENT.md)). Jobs are created, queued and completed end to end in production; the work is still a 5-second placeholder.
 - **Phase 7 (done):** failed jobs retry with exponential backoff and jitter, up to 3 attempts, then become `dead`; permanent errors skip the retries. Each attempt has a 15-second limit. A dead job can be re-run with fresh attempts (`goflow job retry <id>`), and an `Idempotency-Key` header makes a repeated create return the first job instead of a second one.
+- **Phase 8 (in progress):** live job status. Every status change is announced over Server-Sent Events (`GET /api/v1/events`) to the job's owner, opened with a 30-second single-use ticket. Next: a dashboard page that uses it.
 
 ## Requirements
 
@@ -65,6 +66,8 @@ The server stops on `Ctrl+C` or `SIGTERM`, finishing in-flight requests first (u
 | `GET` | `/api/v1/jobs/{id}` | `200` + job (needs token) | `401`, `404` |
 | `DELETE` | `/api/v1/jobs/{id}` | `204`, no body (needs token) | `401`, `404` |
 | `POST` | `/api/v1/jobs/{id}/retry` | `200` + job, back to `pending` with 0 attempts (needs token) | `401`, `404`, `409` job isn't `dead` or `failed` |
+| `POST` | `/api/v1/events/ticket` | `201 {"ticket","expires_in":30}`: opens one event stream, once, within 30 s (needs token) | `401`, `503` no Redis |
+| `GET` | `/api/v1/events?ticket=…` | `200`, a Server-Sent Events stream of your jobs' changes (see below) | `401` missing, unknown, expired or used ticket, `503` no Redis |
 
 `GET /api/v1/jobs` returns jobs oldest first, one page at a time:
 
@@ -120,6 +123,31 @@ K=$(uuidgen)
 gf -X POST $API/jobs -H 'Content-Type: application/json' -H "Idempotency-Key: $K" -d '{"title":"send invoice 42"}'
 gf -X POST $API/auth/logout     # ends the session at once
 ```
+
+### Live updates
+
+`GET /api/v1/events` streams your jobs' changes as [Server-Sent Events](https://html.spec.whatwg.org/multipage/server-sent-events.html): one JSON object per `data:` line.
+
+| `type` | Fields | Meaning |
+|---|---|---|
+| `ready` | | The server is listening. Load your jobs now (`GET /api/v1/jobs`), not before, or you can miss a change |
+| `changed` | `job` | A job was created or its status or attempts changed. Keep it only if its `updated_at` is not older than the copy you have: events can arrive out of order |
+| `deleted` | `id` | A job was deleted |
+| `resync` | | Events may have been lost (the server's Redis connection came back). Load your jobs again |
+
+Lines starting with `:` are heartbeats, sent every 25 s; ignore them. A job can go from `pending` straight to `processing` without a `queued` event: a fast worker can claim it before the relay marks it queued. When the stream ends (a restart, or you fell more than 64 events behind), get a new ticket, reconnect, and load your jobs again after `ready`.
+
+Browsers can't send an `Authorization` header with `EventSource`, so the stream takes a ticket in the URL instead of your token. A ticket works once, for 30 seconds, and only opens a stream, so a copy in a log or in your shell history is useless. To watch from a terminal (each block on its own):
+
+```bash
+T=$(gf -X POST $API/events/ticket | jq -r .ticket)
+```
+
+```bash
+curl -N "$API/events?ticket=$T"
+```
+
+Then create a job in a second terminal and watch it go by. Ctrl+C ends the stream.
 
 ### Request rules
 
@@ -203,6 +231,7 @@ internal/cli/          CLI commands, login prompt, output
 internal/client/       Go client for the HTTP API
 internal/credentials/  the saved login file (~/.config/goflow/credentials)
 internal/database/     PostgreSQL: connection, migrations, stores
+internal/events/       live updates: publishing job changes, routing them to their owner, stream tickets
 internal/job/          Job type, validation, pagination rules
 internal/queue/        Redis list of job IDs waiting for a worker
 internal/relay/        background loop: outbox (PostgreSQL) to queue (Redis)
