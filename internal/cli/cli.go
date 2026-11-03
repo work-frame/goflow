@@ -126,7 +126,7 @@ func runList(ctx context.Context, jobs Jobs, args []string, stdout io.Writer) er
 	}
 
 	tw := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "ID\tSTATUS\tCREATED\tTITLE")
+	fmt.Fprintln(tw, "ID\tSTATUS\tTRIES\tCREATED\tTITLE")
 
 	// The API returns one page at a time. Follow next cursors until the last page.
 	cursor := ""
@@ -137,7 +137,7 @@ func runList(ctx context.Context, jobs Jobs, args []string, stdout io.Writer) er
 		}
 		for _, j := range page {
 			created := j.CreatedAt.Local().Format(time.DateTime)
-			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", j.ID, j.Status, created, j.Title)
+			fmt.Fprintf(tw, "%s\t%s\t%d/%d\t%s\t%s\n", j.ID, j.Status, j.Attempts, j.MaxAttempts, created, j.Title)
 		}
 		if next == "" {
 			break

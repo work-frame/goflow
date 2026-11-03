@@ -187,7 +187,7 @@ Take      BLMOVE goflow:jobs:pending → goflow:jobs:processing   (atomic; waits
 Claim     UPDATE ... status = 'processing', attempts = attempts + 1
             WHERE id = $1 AND status IN ('pending','queued','retrying') RETURNING attempts, max_attempts
             0 rows (already processing, finished, dead or deleted) → skip, Ack
-Handle    the work (a 5-second placeholder for now)
+Handle    the work, under a 15 s deadline (worker.Demo: test behaviours picked by title)
 Outcome   success                          → status = 'completed'
           Permanent(err), or last attempt  → status = 'dead', last_error
           any other error                  → status = 'retrying', next_attempt_at, last_error (COMMIT)
@@ -209,6 +209,7 @@ Ack       LREM goflow:jobs:processing
 - **Permanent errors skip retries.** A handler wraps an error with `worker.Permanent(err)` when trying again can't help (an invalid address). Unwrapped errors are retried: the safer default.
 - **Attempts are counted at claim time,** so a job that crashes its worker also uses up attempts and can't loop forever. After `max_attempts` the job is `dead`.
 - **The promoter** moves due IDs from the delayed set to `pending` every second, with a Lua script so the read, remove and push happen as one step and two promoters never deliver an ID twice. It only talks to Redis, so it doesn't wake the database.
+- **Each attempt has a deadline** (`Pool.JobTimeout`, 15 s, below the 20 s drain). The handler's context ends then; the attempt fails with `timed out after 15s` and is retried like any failure. Two endings are kept apart: the pool's context ending (shutdown) records nothing, the job's own deadline is a failure. A handler that ignores its context can't be stopped: Go has no way to kill a goroutine, so the worker waits for it, and a handler that then *succeeds* late counts as completed, because retrying it would repeat work that was done. Handlers must pass `ctx` to everything that can block.
 - **A retry may be claimed a moment early.** `Claim` accepts `retrying` without checking `next_attempt_at`: Redis decides when the ID arrives, and refusing it over a second of clock difference would drop it.
 
 ## CLI: `internal/cli`, `internal/client`, `cmd/goflow`

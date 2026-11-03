@@ -24,8 +24,8 @@ func NewWorkStore(db *sql.DB) *WorkStore {
 }
 
 // Claim marks a pending, queued or retrying job processing, counts the
-// attempt, and returns its number (1 for the first run) and the job's
-// max_attempts. attempt 0 means this caller didn't win the job and must not
+// attempt, and returns its number (1 for the first run), the job's
+// max_attempts and its title. attempt 0 means this caller didn't win the job and must not
 // run it.
 //
 // Two workers claiming the same job (a duplicate ID in the queue) can't both
@@ -40,19 +40,19 @@ func NewWorkStore(db *sql.DB) *WorkStore {
 //
 // Finished, dead, deleted and already-processing jobs return attempt 0 with
 // no error: there is nothing for this caller to do.
-func (s *WorkStore) Claim(ctx context.Context, id string) (attempt, maxAttempts int, err error) {
+func (s *WorkStore) Claim(ctx context.Context, id string) (attempt, maxAttempts int, title string, err error) {
 	err = s.db.QueryRowContext(ctx,
 		`UPDATE jobs SET status = 'processing', attempts = attempts + 1, next_attempt_at = NULL,
 		        updated_at = GREATEST(now(), created_at)
 		 WHERE id = $1 AND status IN ('pending', 'queued', 'retrying')
-		 RETURNING attempts, max_attempts`, id).Scan(&attempt, &maxAttempts)
+		 RETURNING attempts, max_attempts, title`, id).Scan(&attempt, &maxAttempts, &title)
 	if errors.Is(err, sql.ErrNoRows) {
-		return 0, 0, nil
+		return 0, 0, "", nil
 	}
 	if err != nil {
-		return 0, 0, fmt.Errorf("database: claim job %s: %w", id, err)
+		return 0, 0, "", fmt.Errorf("database: claim job %s: %w", id, err)
 	}
-	return attempt, maxAttempts, nil
+	return attempt, maxAttempts, title, nil
 }
 
 // ResetProcessing puts every processing job back to queued and returns how
