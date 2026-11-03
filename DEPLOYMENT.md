@@ -14,7 +14,8 @@ goflow CLI ──HTTPS──► Render edge ──► goflow-api (Render, Frankf
 |---|---|---|
 | API | Render web service `goflow-api`, free plan, region `frankfurt` | 0.1 CPU, 512 MB. Built and started from [`render.yaml`](render.yaml) |
 | Database | Neon project `goflow`, branch `production`, AWS Europe Central 1 (Frankfurt) | Postgres 17, free plan, no IP restrictions |
-| Queue and worker | Not deployed yet | `GOFLOW_REDIS_URL` is unset, so the API logs `queue disabled` and new jobs stay `pending` with a row in `job_outbox`. When Redis and a worker are hosted (Phase 6), the relay sends every waiting job on its first run |
+| Queue | Render Key Value `goflow-queue`, free plan, `frankfurt` | Valkey 8. `ipAllowList: []`: reachable only over Render's private network, at `redis://red-...:6379`. `maxmemoryPolicy: noeviction`. No persistence |
+| Workers | Inside `goflow-api` (`GOFLOW_WORKERS=2`) | Render's free plan has no background workers ($7/month). The workers sleep when the API sleeps; jobs wait in Redis meanwhile |
 | Public URL | `https://goflow-api-hewh.onrender.com` | Plain `http://` answers `301` to `https://` (Render does this) |
 
 The API and the database sit in the same region, so a query between them takes milliseconds. Your distance to Frankfurt is what you notice.
@@ -108,7 +109,18 @@ Almost all of the 0.6–0.8 s is distance: each CLI command opens a new TLS conn
 | 0.1 CPU | bcrypt cost 10 instead of 12 | Raise `GOFLOW_BCRYPT_COST` on a bigger instance; users are re-hashed at their next login |
 | One instance; no backups beyond Neon's 6-hour history | A bad deploy or a deleted row has no easy undo | Phase 14 (CI/CD) and a backup plan before real users |
 | No rate limit on login | Passwords can be guessed as fast as bcrypt allows | Phase 9. Closed registration limits who has an account meanwhile |
+| Free Key Value has no persistence | A restart empties both lists; queued jobs lose their IDs | The reconciler re-sends jobs `queued` for over 10 minutes, at start and hourly |
+| Neon free: 100 compute-hours a month; can't stay awake for free | A query every few seconds would use the month up in about 2.5 weeks, then suspend the database | The relay never polls while healthy; the reconciler runs hourly. Watch Neon's usage page |
+| Workers inside the API | One API instance only (startup recovery resets `processing` jobs); jobs run on the API's tenth of a CPU | A paid background worker and leases (Phase 12) before more instances |
 | Render health checks every 5 s are logged | About 17,000 log lines a day of `/healthz` | Phase 10: skip request logs for `/healthz` |
+
+## Queue and workers (Task 27)
+
+Merging a change to `render.yaml` updates the Blueprint: Render creates `goflow-queue` and sets `GOFLOW_REDIS_URL` and `GOFLOW_WORKERS` on the API by itself. Check after the deploy:
+
+1. **Dashboard:** `goflow-queue` exists, plan **Free**, region **Frankfurt**, status **Available**.
+2. **API logs:** `queue_enabled=true workers=2`, `queue connected`, `worker pool started workers=2`, and `relay: jobs queued` for jobs that were waiting in the outbox.
+3. **End to end:** `goflow job create hosted queue test`, then after about 5 s `goflow job list` shows it `completed`.
 
 ## Rolling back
 

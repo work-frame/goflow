@@ -240,3 +240,24 @@ func sleep(ctx context.Context, d time.Duration) {
 	case <-t.C:
 	}
 }
+
+// Placeholder returns a Handler that stands in for real work: it waits d,
+// and gives up early if its context is cancelled. Real job types replace it
+// later.
+func Placeholder(d time.Duration) Handler {
+	return func(ctx context.Context, _ string) error {
+		return sleepOrCancel(ctx, d)
+	}
+}
+
+// sleepOrCancel waits d, or returns ctx's error if ctx ends first.
+func sleepOrCancel(ctx context.Context, d time.Duration) error {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
+}

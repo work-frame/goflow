@@ -104,7 +104,7 @@ func run(ctx context.Context, logger *slog.Logger, dbURL, redisURL string, worke
 	p := &worker.Pool{
 		Queue:        q,
 		Store:        database.NewWorkStore(db),
-		Handle:       placeholder,
+		Handle:       worker.Placeholder(simulatedWork),
 		Logger:       logger,
 		Workers:      workers,
 		DrainTimeout: drainTimeout,
@@ -112,17 +112,4 @@ func run(ctx context.Context, logger *slog.Logger, dbURL, redisURL string, worke
 	err = p.Run(ctx)
 	logger.Info("worker stopped")
 	return err
-}
-
-// placeholder stands in for real work: it waits, and gives up early if the
-// worker is told to stop.
-func placeholder(ctx context.Context, jobID string) error {
-	t := time.NewTimer(simulatedWork)
-	defer t.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-t.C:
-		return nil
-	}
 }

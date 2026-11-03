@@ -32,6 +32,12 @@ func (o *memOutbox) waiting() int {
 	return len(o.ids)
 }
 
+func (o *memOutbox) passCount() int {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.passes
+}
+
 func (o *memOutbox) Relay(ctx context.Context, limit int, send func(context.Context, []string) error) (int, error) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -157,22 +163,89 @@ func TestRelayDrainsMoreThanOneBatch(t *testing.T) {
 }
 
 func TestStopEndsTheLoop(t *testing.T) {
+	r := New(&memOutbox{}, &memQueue{}, discardLogger(), time.Millisecond)
+	stop := r.Start(context.Background())
+
+	finished := make(chan struct{})
+	go func() { stop(); close(finished) }()
+	select {
+	case <-finished:
+	case <-time.After(5 * time.Second):
+		t.Fatal("stop did not return within 5s")
+	}
+}
+
+// While everything works, the relay must not query the database between
+// wake-ups: on a free database that sleeps when idle, a timer here would
+// keep it awake around the clock and use up its monthly compute.
+func TestRelayDoesNotPollWhileHealthy(t *testing.T) {
 	o := &memOutbox{}
 	stop := New(o, &memQueue{}, discardLogger(), time.Millisecond).Start(context.Background())
-	eventually(t, "first pass", func() bool {
-		o.mu.Lock()
-		defer o.mu.Unlock()
-		return o.passes >= 1
-	})
+	defer stop()
 
-	stop() // returns only after the goroutine has exited
-	o.mu.Lock()
-	after := o.passes
-	o.mu.Unlock()
-	time.Sleep(20 * time.Millisecond)
-	o.mu.Lock()
-	defer o.mu.Unlock()
-	if o.passes != after {
-		t.Errorf("relay ran %d more passes after stop", o.passes-after)
+	eventually(t, "the pass at start", func() bool { return o.passCount() >= 1 })
+	time.Sleep(100 * time.Millisecond) // a polling relay would make dozens of passes here
+	if got := o.passCount(); got != 1 {
+		t.Fatalf("relay made %d passes with nothing to do, want 1 (the one at start)", got)
 	}
+}
+
+func TestRetryWaitDoublesUpToTheCap(t *testing.T) {
+	var got []time.Duration
+	var d time.Duration
+	for range 12 {
+		d = nextRetry(d, time.Second)
+		got = append(got, d)
+	}
+	want := []time.Duration{1, 2, 4, 8, 16, 32, 64, 128, 256, 300, 300, 300}
+	for i := range want {
+		if got[i] != want[i]*time.Second {
+			t.Fatalf("waits = %v, want %v seconds", got, want)
+		}
+	}
+}
+
+// memStale hands out stale IDs like RequeueStale: oldest first, up to limit,
+// and only marks them re-sent when send succeeds.
+type memStale struct {
+	mu    sync.Mutex
+	stale []string
+	runs  int
+}
+
+func (s *memStale) RequeueStale(ctx context.Context, _ time.Duration, limit int, send func(context.Context, []string) error) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.runs++
+	batch := slices.Clone(s.stale[:min(limit, len(s.stale))])
+	if len(batch) == 0 {
+		return 0, nil
+	}
+	if err := send(ctx, batch); err != nil {
+		return 0, err
+	}
+	s.stale = s.stale[len(batch):]
+	return len(batch), nil
+}
+
+func (s *memStale) runCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.runs
+}
+
+func TestReconcilerResendsStaleJobsAtStart(t *testing.T) {
+	s, q := &memStale{stale: []string{"lost1", "lost2"}}, &memQueue{}
+	stop := NewReconciler(s, q, discardLogger(), time.Hour, 10*time.Minute).Start(context.Background())
+	defer stop()
+
+	eventually(t, "both lost IDs re-sent", func() bool { return slices.Equal(q.queued(), []string{"lost1", "lost2"}) })
+}
+
+func TestReconcilerRunsAgainOnItsInterval(t *testing.T) {
+	s := &memStale{}
+	stop := NewReconciler(s, &memQueue{}, discardLogger(), 5*time.Millisecond, time.Minute).Start(context.Background())
+	defer stop()
+
+	eventually(t, "three runs", func() bool { return s.runCount() >= 3 })
 }

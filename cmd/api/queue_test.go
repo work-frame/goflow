@@ -66,3 +66,37 @@ func TestCreatedJobsReachTheQueue(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 }
+
+// With GOFLOW_WORKERS set, the API runs the job itself: outbox → relay →
+// Redis → worker pool → completed, all in one process.
+func TestAPIWorkersRunJobs(t *testing.T) {
+	dbURL := testDatabaseURL(t)
+	redisURL := testRedisURL(t)
+
+	cfg := testConfig("127.0.0.1:0", dbURL) // placeholder work: 10 ms
+	cfg.RedisURL = redisURL
+	cfg.Workers = 2
+	base, _ := startServerWith(t, cfg)
+	client := &http.Client{Timeout: 5 * time.Second}
+
+	token := signUp(t, client, base, dbURL)
+	id := createJob(t, client, base, token, "run me in the API")
+
+	var got struct {
+		Status string `json:"status"`
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for got.Status != "completed" {
+		if time.Now().After(deadline) {
+			t.Fatalf("job %s status = %q after 10s, want completed", id, got.Status)
+		}
+		time.Sleep(20 * time.Millisecond)
+		status, _, body := requestAs(t, client, http.MethodGet, base+"/api/v1/jobs/"+id, token, "")
+		if status != http.StatusOK {
+			t.Fatalf("get: status %d, body %s", status, body)
+		}
+		if err := json.Unmarshal(body, &got); err != nil {
+			t.Fatal(err)
+		}
+	}
+}

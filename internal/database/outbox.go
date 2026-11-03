@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"time"
 )
 
 // OutboxStore reads and clears job_outbox, the list of jobs whose IDs still
@@ -83,6 +84,61 @@ func (s *OutboxStore) Relay(ctx context.Context, limit int, send func(ctx contex
 		return 0, fmt.Errorf("database: relay: commit: %w", err)
 	}
 	return len(jobIDs), nil
+}
+
+// RequeueStale finds up to limit jobs that have been 'queued' longer than
+// olderThan, oldest first, and calls send with their IDs. If send succeeds,
+// their updated_at is moved to now, so the next run doesn't send them again
+// unless they stay stuck for another olderThan. It returns how many it sent.
+//
+// A job is 'queued' once the relay has put its ID in Redis. Staying queued
+// for long means no worker has claimed it: either the queue is backed up, or
+// Redis lost the ID (a free Key Value restart empties it). Sending it again
+// costs at most a duplicate, which Claim makes harmless.
+func (s *OutboxStore) RequeueStale(ctx context.Context, olderThan time.Duration, limit int, send func(ctx context.Context, jobIDs []string) error) (int, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("database: requeue stale: begin: %w", err)
+	}
+	defer tx.Rollback() // does nothing once Commit has succeeded
+
+	// make_interval takes seconds as a double; olderThan never comes from users.
+	rows, err := tx.QueryContext(ctx,
+		`SELECT id FROM jobs
+		 WHERE status = 'queued' AND updated_at < now() - make_interval(secs => $1)
+		 ORDER BY updated_at, id LIMIT $2 FOR UPDATE SKIP LOCKED`,
+		olderThan.Seconds(), limit)
+	if err != nil {
+		return 0, fmt.Errorf("database: requeue stale: select: %w", err)
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return 0, fmt.Errorf("database: requeue stale: scan: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("database: requeue stale: rows: %w", err)
+	}
+	if len(ids) == 0 {
+		return 0, nil
+	}
+
+	if err := send(ctx, ids); err != nil {
+		return 0, err
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE jobs SET updated_at = GREATEST(now(), created_at) WHERE id = ANY($1) AND status = 'queued'`, ids); err != nil {
+		return 0, fmt.Errorf("database: requeue stale: touch: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("database: requeue stale: commit: %w", err)
+	}
+	return len(ids), nil
 }
 
 // Waiting reports how many jobs are waiting in the outbox.

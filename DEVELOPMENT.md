@@ -64,7 +64,7 @@ export GOFLOW_TEST_REDIS_URL='redis://127.0.0.1:6379/1'
 | `PORT` | API, when `GOFLOW_ADDR` is unset (hosting platforms) | none |
 | `GOFLOW_REDIS_URL` | API; optional, remote hosts need `rediss://` | none (queue off) |
 | `GOFLOW_TEST_REDIS_URL` | tests; Redis tests skip without it | none |
-| `GOFLOW_WORKERS` | worker; jobs that run at once, 1 to 32 | `4` |
+| `GOFLOW_WORKERS` | worker: jobs that run at once, 1 to 32 (default 4). API: workers it runs itself, 0 to 32 (default 0; needs `GOFLOW_REDIS_URL`) | see left |
 | `GOFLOW_TEST_DATABASE_URL` | tests; database tests skip without it | none |
 | `GOFLOW_API_URL` | CLI | `http://localhost:8080` |
 | `GOFLOW_TOKEN` | CLI; overrides the saved login from `goflow login` (scripts, CI) | none |

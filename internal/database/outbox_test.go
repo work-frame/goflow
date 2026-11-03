@@ -250,3 +250,67 @@ func TestMigration6QueuesExistingPendingJobs(t *testing.T) {
 		t.Fatalf("outbox after migration 6 = %v, want only the pending job", got)
 	}
 }
+
+// relayAll moves every outbox row to "queued", as the relay does.
+func relayAll(t *testing.T, o *OutboxStore) {
+	t.Helper()
+	if _, err := o.Relay(context.Background(), 100, func(context.Context, []string) error { return nil }); err != nil {
+		t.Fatalf("Relay: %v", err)
+	}
+}
+
+func TestRequeueStaleResendsOnlyOldQueuedJobs(t *testing.T) {
+	f := newJobsFixture(t)
+	o := NewOutboxStore(f.db)
+	ctx := context.Background()
+	ids := addJobs(t, f, "stuck", "fresh", "still pending")
+	relayAll(t, o) // all three queued
+	if _, err := f.db.ExecContext(ctx, `UPDATE jobs SET status = 'pending' WHERE id = $1`, ids[2]); err != nil {
+		t.Fatal(err)
+	}
+	// "stuck" was queued an hour ago; the others just now.
+	if _, err := f.db.ExecContext(ctx,
+		`UPDATE jobs SET created_at = now() - interval '2 hours', updated_at = now() - interval '1 hour' WHERE id = $1`, ids[0]); err != nil {
+		t.Fatal(err)
+	}
+
+	var sent []string
+	send := func(_ context.Context, b []string) error { sent = append(sent, b...); return nil }
+	n, err := o.RequeueStale(ctx, 10*time.Minute, 100, send)
+	if err != nil {
+		t.Fatalf("RequeueStale: %v", err)
+	}
+	if n != 1 || !slices.Equal(sent, ids[:1]) {
+		t.Fatalf("RequeueStale sent %d: %v, want only %v", n, sent, ids[:1])
+	}
+
+	// Its updated_at moved forward, so it isn't sent again right away.
+	sent = nil
+	if n, err := o.RequeueStale(ctx, 10*time.Minute, 100, send); err != nil || n != 0 {
+		t.Fatalf("second RequeueStale = %d (%v), %v; want 0: a re-sent job must wait another 10 minutes", n, sent, err)
+	}
+	if s := statusOf(t, f, ids[0]); s != job.StatusQueued {
+		t.Errorf("status after re-send = %s, want still queued", s)
+	}
+}
+
+func TestRequeueStaleKeepsJobsStaleWhenSendFails(t *testing.T) {
+	f := newJobsFixture(t)
+	o := NewOutboxStore(f.db)
+	ctx := context.Background()
+	id := addJobs(t, f, "stuck")[0]
+	relayAll(t, o)
+	if _, err := f.db.ExecContext(ctx,
+		`UPDATE jobs SET created_at = now() - interval '2 hours', updated_at = now() - interval '1 hour' WHERE id = $1`, id); err != nil {
+		t.Fatal(err)
+	}
+
+	down := errors.New("redis: connection refused")
+	if _, err := o.RequeueStale(ctx, 10*time.Minute, 100, func(context.Context, []string) error { return down }); !errors.Is(err, down) {
+		t.Fatalf("RequeueStale err = %v, want the send error", err)
+	}
+	n, err := o.RequeueStale(ctx, 10*time.Minute, 100, func(context.Context, []string) error { return nil })
+	if err != nil || n != 1 {
+		t.Fatalf("after a failed send, RequeueStale = %d, %v; want 1: the job must still count as stale", n, err)
+	}
+}

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"strings"
 )
 
 // DatabaseTLS refuses a database on another machine unless the URL asks
@@ -42,7 +43,7 @@ func RedisTLS(raw string) error {
 	case "rediss":
 		return nil
 	case "redis":
-		if isThisMachine(u.Hostname()) {
+		if isThisMachine(u.Hostname()) || isPrivateNetworkName(u.Hostname()) {
 			return nil
 		}
 		return fmt.Errorf("GOFLOW_REDIS_URL points at %s, a remote Redis, so it must start with rediss:// (TLS)", u.Hostname())
@@ -59,4 +60,18 @@ func isThisMachine(host string) bool {
 	}
 	ip := net.ParseIP(host)
 	return ip != nil && ip.IsLoopback()
+}
+
+// isPrivateNetworkName reports whether host is a single-label name, such as
+// Render's internal Key Value host "red-abc123" or a Docker Compose service
+// name. A name without a dot has no top-level domain, so public DNS can't
+// resolve it: it only exists inside a private network, which is the only
+// place the connection can go.
+//
+// Plain redis:// is accepted there because that is what Render's private
+// network offers (its Key Value TLS is for external connections only). The
+// traffic stays inside the provider's network; it is still unencrypted, so
+// this trusts the provider's network isolation.
+func isPrivateNetworkName(host string) bool {
+	return host != "" && !strings.Contains(host, ".") && !strings.Contains(host, ":") && net.ParseIP(host) == nil
 }

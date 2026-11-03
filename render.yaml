@@ -1,4 +1,4 @@
-# Render Blueprint for the GoFlow API (Phase 4, Task 21).
+# Render Blueprint for GoFlow (Phase 4, Task 21; queue and workers: Phase 6, Task 27).
 #
 # This file is public on GitHub, so it holds no secrets. Values marked
 # "sync: false" are typed into the Render dashboard when the Blueprint is
@@ -15,6 +15,9 @@ services:
     # free Neon database could make a fresh deploy look unhealthy.
     healthCheckPath: /healthz
     autoDeployTrigger: commit
+    # Render's default, written down because the worker pool depends on it:
+    # after SIGTERM the API has 30 s; jobs get 20 s of that to finish.
+    maxShutdownDelaySeconds: 30
     envVars:
       - key: GOFLOW_DATABASE_URL # from Neon, with sslmode=verify-full
         sync: false
@@ -24,3 +27,27 @@ services:
       # take seconds there; 10 is the lowest the server accepts.
       - key: GOFLOW_BCRYPT_COST
         value: "10"
+      # The queue below, over Render's private network: redis://red-...:6379.
+      - key: GOFLOW_REDIS_URL
+        fromService:
+          type: keyvalue
+          name: goflow-queue
+          property: connectionString
+      # The API runs the worker pool itself (background workers aren't free).
+      # Two jobs at a time on a tenth of a CPU. ONE instance only: the pool
+      # resets 'processing' jobs at startup.
+      - key: GOFLOW_WORKERS
+        value: "2"
+
+  # Redis-compatible queue (Valkey). Free: no persistence, so a restart
+  # empties the lists; the API's reconciler re-sends stuck jobs.
+  - type: keyvalue
+    name: goflow-queue
+    region: frankfurt
+    plan: free
+    # Never drop keys to free memory: a dropped list is a set of lost jobs.
+    # When memory is full, writes fail instead, and the outbox keeps the jobs.
+    maxmemoryPolicy: noeviction
+    # Empty list: no connections from the internet at all, only from
+    # services in this workspace and region.
+    ipAllowList: []

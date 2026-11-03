@@ -1,8 +1,15 @@
-// Package relay moves job IDs from the PostgreSQL outbox to the Redis queue.
+// Package relay moves job IDs from the PostgreSQL outbox to the Redis queue,
+// and puts back IDs Redis has lost.
 //
 // The API never talks to Redis while handling a request. It writes the job
 // and an outbox row in one transaction, then wakes the relay. The relay
 // sends whatever is waiting, and tries again later if Redis is down.
+//
+// Neither loop polls the database while all is well. On a free database
+// that sleeps when idle (Neon suspends after 5 quiet minutes and has a
+// monthly compute budget), a query every few seconds would keep it awake
+// around the clock. So the relay runs at start, when woken, and after a
+// failure; the reconciler runs at start and then once an hour.
 package relay
 
 import (
@@ -12,8 +19,12 @@ import (
 	"time"
 )
 
-// BatchSize is how many IDs one transaction sends at most.
-const BatchSize = 100
+const (
+	// BatchSize is how many IDs one transaction sends at most.
+	BatchSize = 100
+	// maxRetry caps the wait between attempts while Redis is unreachable.
+	maxRetry = 5 * time.Minute
+)
 
 // Outbox is what the relay needs from the database. *database.OutboxStore
 // satisfies it.
@@ -31,18 +42,17 @@ type Relay struct {
 	outbox   Outbox
 	queue    Queue
 	logger   *slog.Logger
-	interval time.Duration
+	minRetry time.Duration
 	// wake has room for one signal. Wake never blocks: if a signal is already
 	// waiting, another one adds nothing, because the next pass sends
 	// everything that is waiting anyway.
 	wake chan struct{}
 }
 
-// New returns a relay that checks the outbox when woken, and at least once
-// every interval. The interval is the backstop for wake-ups that never
-// came: a send that failed, another instance's jobs, a restart.
-func New(outbox Outbox, queue Queue, logger *slog.Logger, interval time.Duration) *Relay {
-	return &Relay{outbox: outbox, queue: queue, logger: logger, interval: interval, wake: make(chan struct{}, 1)}
+// New returns a relay. After a failed pass it waits minRetry, then twice as
+// long after each further failure, up to 5 minutes.
+func New(outbox Outbox, queue Queue, logger *slog.Logger, minRetry time.Duration) *Relay {
+	return &Relay{outbox: outbox, queue: queue, logger: logger, minRetry: minRetry, wake: make(chan struct{}, 1)}
 }
 
 // Wake asks the relay to check the outbox now. It never blocks, so the API
@@ -57,21 +67,37 @@ func (r *Relay) Wake() {
 // Start runs the loop in a goroutine until ctx ends or stop is called.
 // stop waits for a pass that is running to finish, so the database and
 // the queue can be closed safely afterwards.
+//
+// The loop checks the outbox once at start, then only when woken, or on a
+// retry timer after a failed pass. While everything works it doesn't touch
+// the database at all between jobs.
 func (r *Relay) Start(ctx context.Context) (stop func()) {
 	ctx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
 
 	go func() {
 		defer close(done)
-		ticker := time.NewTicker(r.interval)
-		defer ticker.Stop()
+		var retry time.Duration // 0 while healthy
 		for {
-			r.drain(ctx)
+			var timer *time.Timer
+			var retryAfter <-chan time.Time // nil while healthy: never fires
+			if r.drain(ctx) {
+				retry = 0
+			} else {
+				retry = nextRetry(retry, r.minRetry)
+				timer = time.NewTimer(retry)
+				retryAfter = timer.C
+			}
 			select {
 			case <-ctx.Done():
-				return
-			case <-ticker.C:
+			case <-retryAfter:
 			case <-r.wake:
+			}
+			if timer != nil {
+				timer.Stop()
+			}
+			if ctx.Err() != nil {
+				return
 			}
 		}
 	}()
@@ -82,22 +108,31 @@ func (r *Relay) Start(ctx context.Context) (stop func()) {
 	}
 }
 
-// drain sends batches until the outbox is empty or a send fails.
-func (r *Relay) drain(ctx context.Context) {
+// nextRetry doubles the wait, starting at first, capped at maxRetry.
+func nextRetry(current, first time.Duration) time.Duration {
+	if current == 0 {
+		return first
+	}
+	return min(current*2, maxRetry)
+}
+
+// drain sends batches until the outbox is empty. It reports false if a pass
+// failed and the outbox should be tried again later.
+func (r *Relay) drain(ctx context.Context) bool {
 	for {
 		n, err := r.pass(ctx)
 		switch {
 		case errors.Is(err, context.Canceled):
-			return // shutting down: not a failure
+			return true // shutting down: not a failure
 		case err != nil:
-			// The rows stay in the outbox; the next tick tries again.
+			// The rows stay in the outbox; the retry timer tries again.
 			r.logger.Warn("relay: jobs not queued yet, will retry", "err", err)
-			return
+			return false
 		case n > 0:
 			r.logger.Info("relay: jobs queued", "count", n)
 		}
 		if n < BatchSize {
-			return
+			return true
 		}
 	}
 }
