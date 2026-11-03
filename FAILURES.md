@@ -399,6 +399,18 @@ Each case was reproduced on a real machine (Arch Linux, Go 1.27, PostgreSQL 17) 
   ```
 - **Why:** every deploy sends `SIGTERM`. With one context, every running job would be cut off the moment a deploy started, even one a second from finishing, and then run again from the start after the restart: wasted work, and twice the side effects for anything not idempotent. The drain timeout never applied: `Run` returned 68 µs after the stop. Stopping new work and stopping current work are different decisions, so they need different contexts.
 
+## 30. The relay doesn't poll while healthy
+
+- **Safeguard:** the relay checks the outbox at start, when woken by a new job, and on a retry timer only after a failed pass (1 s, doubling to 5 minutes). While all is well it sets no timer, so it doesn't query the database between jobs.
+- **Removed:** a timer in the healthy branch too, so the relay checks the outbox again after every pass, as the 30-second ticker of Task 23 did, only faster.
+- **Caught by:** `TestRelayDoesNotPollWhileHealthy`, which counts outbox passes over 100 ms with nothing to do.
+- **Observed:**
+  ```text
+  --- FAIL: TestRelayDoesNotPollWhileHealthy (0.10s)
+      relay_test.go:189: relay made 84 passes with nothing to do, want 1 (the one at start)
+  ```
+- **Why:** every pass is a database query, and nothing else catches this: jobs still arrive, every other test passes, and the cost shows up only on the bill. Neon's free compute suspends after 5 idle minutes and has 100 compute-hours a month. Even Task 23's 30-second tick never lets it reach 5 idle minutes: at the smallest size that is about 180 compute-hours a month, so the database would be suspended for the rest of the month after about 2.5 weeks. Work that only matters after a failure belongs on a retry timer; work that covers lost data (the reconciler) can run hourly.
+
 ## Experiment: the naive dual write loses a job
 
 Not a removed safeguard but the design of Task 22, run live on 2 November 2026 to see the failure Task 23 fixes. `POST /api/v1/jobs` saved the job in PostgreSQL, then pushed its ID to Redis, with nothing tying the two together.
