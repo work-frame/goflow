@@ -29,7 +29,7 @@ internal/credentials                                                     ├─�
 | Item | Purpose |
 |---|---|
 | `Job` | `id` (32 hex, `crypto/rand`), `title` (1–200 characters), `status`, `created_at`, `updated_at` (UTC, microsecond precision) |
-| `Status` | `pending`, `queued`, `processing`, `completed`, `failed` |
+| `Status` | `pending`, `queued`, `processing`, `retrying`, `completed`, `dead`; `failed` only on jobs from before retries |
 | `New(title)` | The only way to create a valid job |
 | `ListParams`, `Page`, `Cursor` | One page of jobs, oldest first by `(created_at, id)` |
 | `NewPage`, `Paginate` | The pagination rules, shared by the database store and in-memory fakes |
@@ -76,12 +76,17 @@ jobs (
   id         TEXT        PRIMARY KEY  -- 32 lowercase hex characters
   user_id    TEXT        NOT NULL REFERENCES users ON DELETE CASCADE
   title      TEXT        NOT NULL     -- 1 to 200 characters
-  status     TEXT        NOT NULL     -- one of the 5 statuses
+  status     TEXT        NOT NULL     -- one of the 7 statuses
   created_at TIMESTAMPTZ NOT NULL
   updated_at TIMESTAMPTZ NOT NULL     -- never before created_at
+  attempts        INT         NOT NULL DEFAULT 0   -- counted at every claim
+  max_attempts    INT         NOT NULL DEFAULT 3   -- 1 to 10
+  next_attempt_at TIMESTAMPTZ                      -- required while 'retrying'
+  last_error      TEXT                             -- up to 1000 characters; not shown to users yet
 )
 INDEX (user_id, created_at, id)  -- one user's jobs, oldest first, paginated
 INDEX (status, created_at)       -- status filter; workers in Phase 6
+INDEX (next_attempt_at) WHERE status = 'retrying'  -- the reconciler's overdue retries
 
 job_outbox (
   id         BIGINT      GENERATED ALWAYS AS IDENTITY PRIMARY KEY  -- delivery order
@@ -179,10 +184,14 @@ relay (at start, when woken, and on a retry timer after a failure):
 
 ```text
 Take      BLMOVE goflow:jobs:pending → goflow:jobs:processing   (atomic; waits up to 2 s)
-Claim     UPDATE jobs SET status = 'processing' WHERE id = $1 AND status IN ('pending','queued')
-            0 rows (already processing, finished or deleted) → skip, Ack
+Claim     UPDATE ... status = 'processing', attempts = attempts + 1
+            WHERE id = $1 AND status IN ('pending','queued','retrying') RETURNING attempts, max_attempts
+            0 rows (already processing, finished, dead or deleted) → skip, Ack
 Handle    the work (a 5-second placeholder for now)
-Complete  status = 'completed'   (or Fail → 'failed')
+Outcome   success                          → status = 'completed'
+          Permanent(err), or last attempt  → status = 'dead', last_error
+          any other error                  → status = 'retrying', next_attempt_at, last_error (COMMIT)
+                                             then ZADD goflow:jobs:delayed <due ms> <id>
 Ack       LREM goflow:jobs:processing
 ```
 
@@ -192,6 +201,15 @@ Ack       LREM goflow:jobs:processing
 - **Recovery happens at the next start, not at shutdown.** A host may `SIGKILL` the process after its grace period, and no code runs then. So before any worker starts, `Pool.Run` resets jobs still `processing` to `queued` (`ResetProcessing`) and moves IDs left in the `processing` list back to the front of `pending` (`Recover`).
 - **Single process only.** That startup recovery assumes every `processing` job belongs to a process that has stopped. **It is not safe with more than one worker process or API instance:** a second process starting would reset jobs the first is still running, and they would run twice at the same time. Running several processes needs leases (who holds a job, until when) so only expired claims are taken over (Phase 12). Goroutines inside one process are fine: they share one recovery, done before any of them start.
 - **The worker doesn't migrate.** The API owns the schema.
+
+### Retries
+
+- **PostgreSQL is the truth, Redis only schedules.** A failed attempt is recorded first (`retrying`, `next_attempt_at`, `last_error`, in one statement); only after that commit is the ID added to the delayed set. If Redis then fails, or later loses the set (Key Value restart), the job is still `retrying` with a due time, and the reconciler re-sends it once it is 10 minutes overdue. The other order could leave a retry in Redis that PostgreSQL never recorded (`TestRetryIsRecordedBeforeItIsScheduled`).
+- **Backoff with equal jitter.** After attempt *n* fails, the wait is between half and all of 2 s × 2^(n−1), capped at 5 minutes: 1–2 s, 2–4 s, 4–8 s... The random half spreads out jobs that failed together; the fixed half stops a retry coming straight back.
+- **Permanent errors skip retries.** A handler wraps an error with `worker.Permanent(err)` when trying again can't help (an invalid address). Unwrapped errors are retried: the safer default.
+- **Attempts are counted at claim time,** so a job that crashes its worker also uses up attempts and can't loop forever. After `max_attempts` the job is `dead`.
+- **The promoter** moves due IDs from the delayed set to `pending` every second, with a Lua script so the read, remove and push happen as one step and two promoters never deliver an ID twice. It only talks to Redis, so it doesn't wake the database.
+- **A retry may be claimed a moment early.** `Claim` accepts `retrying` without checking `next_attempt_at`: Redis decides when the ID arrives, and refusing it over a second of clock difference would drop it.
 
 ## CLI: `internal/cli`, `internal/client`, `cmd/goflow`
 

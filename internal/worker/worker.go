@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/rand/v2"
 	"sync"
 	"time"
 
@@ -44,13 +45,18 @@ type Queue interface {
 	Take(ctx context.Context, timeout time.Duration) (string, error)
 	Ack(ctx context.Context, jobID string) error
 	Recover(ctx context.Context) (int, error)
+	Schedule(ctx context.Context, jobID string, at time.Time) error
 }
 
 // Store is what the pool needs from PostgreSQL. *database.WorkStore satisfies it.
 type Store interface {
-	Claim(ctx context.Context, id string) (bool, error)
+	// Claim returns the attempt number (0: not won, don't run) and the limit.
+	Claim(ctx context.Context, id string) (attempt, maxAttempts int, err error)
 	Complete(ctx context.Context, id string) error
-	Fail(ctx context.Context, id string) error
+	// Retry records a retry due after delay and returns when it is due.
+	Retry(ctx context.Context, id string, delay time.Duration, lastError string) (time.Time, error)
+	// Bury marks the job dead.
+	Bury(ctx context.Context, id string, lastError string) error
 	ResetProcessing(ctx context.Context) (int64, error)
 }
 
@@ -73,6 +79,9 @@ type Pool struct {
 	// RetryWait is the first wait after a failed startup recovery (Redis or
 	// the database not reachable yet). It doubles up to 30 s. Zero means 1 s.
 	RetryWait time.Duration
+	// Backoff returns how long a job waits before its next attempt, after
+	// attempt n failed. Nil means the default, Backoff.
+	Backoff func(attempt int) time.Duration
 }
 
 // Run recovers what a previous run left behind, starts the workers, and
@@ -206,16 +215,17 @@ func (p *Pool) work(stop, jobsCtx context.Context, log *slog.Logger) {
 // process runs one job. Errors are logged, never fatal: unless the outcome
 // was saved, the ID stays in the processing list for the next start.
 func (p *Pool) process(ctx context.Context, log *slog.Logger, id string) {
-	won, err := p.Store.Claim(ctx, id)
+	attempt, maxAttempts, err := p.Store.Claim(ctx, id)
 	if err != nil {
 		log.Warn("worker: claim failed; the ID stays in processing", "err", err)
 		return
 	}
-	if !won {
+	if attempt == 0 {
 		log.Info("worker: skipping, already taken, finished or deleted")
 		p.ack(ctx, log, id)
 		return
 	}
+	log = log.With("attempt", attempt, "max_attempts", maxAttempts)
 
 	start := time.Now()
 	err = p.Handle(ctx, id)
@@ -228,20 +238,55 @@ func (p *Pool) process(ctx context.Context, log *slog.Logger, id string) {
 
 	saveCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	if err != nil {
-		log.Warn("worker: job failed", "err", err)
-		if err := p.Store.Fail(saveCtx, id); err != nil {
-			log.Warn("worker: couldn't record the failure; the ID stays in processing", "err", err)
-			return
-		}
-	} else {
+	switch {
+	case err == nil:
 		if err := p.Store.Complete(saveCtx, id); err != nil {
 			log.Warn("worker: couldn't record completion; the ID stays in processing", "err", err)
 			return
 		}
 		log.Info("worker: job completed", "duration", time.Since(start).Round(time.Millisecond))
+
+	case IsPermanent(err) || attempt >= maxAttempts:
+		reason := "out of attempts"
+		if IsPermanent(err) {
+			reason = "permanent error"
+		}
+		if err := p.Store.Bury(saveCtx, id, err.Error()); err != nil {
+			log.Warn("worker: couldn't record the dead job; the ID stays in processing", "err", err)
+			return
+		}
+		log.Warn("worker: job dead", "reason", reason, "err", err)
+
+	default:
+		if !p.retry(saveCtx, log, id, attempt, err) {
+			return // nothing recorded: keep the ID in processing
+		}
 	}
 	p.ack(saveCtx, log, id)
+}
+
+// retry records a failed attempt that will run again, then schedules it.
+// The order is the point: PostgreSQL first, because it is the source of
+// truth; Redis only after that commit. If Redis then fails, the job is still
+// 'retrying' with a due time in PostgreSQL, and the reconciler re-sends it
+// once overdue. The other order could leave a retry scheduled in Redis that
+// PostgreSQL never recorded. It reports whether the retry was recorded.
+func (p *Pool) retry(ctx context.Context, log *slog.Logger, id string, attempt int, jobErr error) bool {
+	backoff := p.Backoff
+	if backoff == nil {
+		backoff = Backoff
+	}
+	delay := backoff(attempt)
+	due, err := p.Store.Retry(ctx, id, delay, jobErr.Error())
+	if err != nil {
+		log.Warn("worker: couldn't record the retry; the ID stays in processing", "err", err)
+		return false
+	}
+	if err := p.Queue.Schedule(ctx, id, due); err != nil {
+		log.Warn("worker: retry recorded but not scheduled; the reconciler will re-send it", "err", err)
+	}
+	log.Warn("worker: job failed, will retry", "err", jobErr, "retry_in", delay.Round(time.Millisecond))
+	return true
 }
 
 func (p *Pool) ack(ctx context.Context, log *slog.Logger, id string) {
@@ -280,4 +325,43 @@ func sleepOrCancel(ctx context.Context, d time.Duration) error {
 	case <-t.C:
 		return nil
 	}
+}
+
+// Backoff is the default wait before the next attempt, after attempt n
+// failed: 2 s, 4 s, 8 s, ... doubling up to 5 minutes, with "equal jitter":
+// half of that is fixed and the other half random. The random half spreads
+// out jobs that failed together, so they don't all retry in the same second;
+// the fixed half keeps a retry from coming back immediately.
+func Backoff(attempt int) time.Duration {
+	const base, ceiling = 2 * time.Second, 5 * time.Minute
+	d := base
+	for i := 1; i < attempt && d < ceiling; i++ {
+		d *= 2
+	}
+	d = min(d, ceiling)
+	half := d / 2
+	return half + time.Duration(rand.Int64N(int64(half)+1))
+}
+
+// permanentError marks a failure that retrying can't fix.
+type permanentError struct{ err error }
+
+func (e permanentError) Error() string { return e.err.Error() }
+func (e permanentError) Unwrap() error { return e.err }
+
+// Permanent wraps err so the worker marks the job dead at once instead of
+// retrying it: an invalid email address will be just as invalid next time.
+// Errors not wrapped are retried, the safer default: a needless retry costs
+// a little, while calling a temporary failure permanent loses the job.
+func Permanent(err error) error {
+	if err == nil {
+		return nil
+	}
+	return permanentError{err: err}
+}
+
+// IsPermanent reports whether err, or any error it wraps, came from Permanent.
+func IsPermanent(err error) bool {
+	var p permanentError
+	return errors.As(err, &p)
 }

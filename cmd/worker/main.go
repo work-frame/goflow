@@ -22,6 +22,7 @@ import (
 
 	"github.com/work-frame/goflow/internal/database"
 	"github.com/work-frame/goflow/internal/queue"
+	"github.com/work-frame/goflow/internal/relay"
 	"github.com/work-frame/goflow/internal/urlcheck"
 	"github.com/work-frame/goflow/internal/worker"
 )
@@ -99,6 +100,10 @@ func run(ctx context.Context, logger *slog.Logger, dbURL, redisURL string, worke
 		return err
 	}
 	defer q.Close()
+
+	// Due retries move from Redis's delayed set to the queue.
+	stopPromoter := relay.NewPromoter(q, logger, time.Second).Start(ctx)
+	defer stopPromoter()
 
 	logger.Info("worker starting", "workers", workers, "simulated_work", simulatedWork, "drain_timeout", drainTimeout)
 	p := &worker.Pool{

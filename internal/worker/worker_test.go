@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"slices"
 	"sync"
@@ -20,6 +21,42 @@ type memQueue struct {
 	mu         sync.Mutex
 	pending    []string // index 0 is taken first
 	processing []string
+	delayed    map[string]time.Time
+	calls      *callLog // shared with a memStore to check call order
+}
+
+// Schedule records the retry. Tests promote it by hand with promote.
+func (q *memQueue) Schedule(_ context.Context, id string, at time.Time) error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if q.calls != nil {
+		q.calls.add("redis:schedule " + id)
+	}
+	if q.delayed == nil {
+		q.delayed = map[string]time.Time{}
+	}
+	q.delayed[id] = at
+	return nil
+}
+
+// promote moves every scheduled ID to pending, like the promoter once due.
+func (q *memQueue) promote() {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	for id := range q.delayed {
+		q.pending = append(q.pending, id)
+		delete(q.delayed, id)
+	}
+}
+
+func (q *memQueue) scheduled() []string {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	var ids []string
+	for id := range q.delayed {
+		ids = append(ids, id)
+	}
+	return ids
 }
 
 func (q *memQueue) Take(ctx context.Context, timeout time.Duration) (string, error) {
@@ -70,30 +107,36 @@ func (q *memQueue) lists() (pending, processing []string) {
 	return slices.Clone(q.pending), slices.Clone(q.processing)
 }
 
-// memStore tracks statuses like WorkStore: Claim wins only from pending or
-// queued, under a mutex, so exactly one caller wins.
+// memStore tracks statuses like WorkStore: Claim wins only from pending,
+// queued or retrying, under a mutex, so exactly one caller wins. It records
+// the order of Retry calls in calls, shared with memQueue's Schedule.
 type memStore struct {
-	mu     sync.Mutex
-	status map[string]string
+	mu       sync.Mutex
+	status   map[string]string
+	attempts map[string]int
+	max      int
+	retryErr error // when set, Retry fails (the "commit" fails)
+	calls    *callLog
 }
 
 func newMemStore(ids ...string) *memStore {
-	s := &memStore{status: map[string]string{}}
+	s := &memStore{status: map[string]string{}, attempts: map[string]int{}, max: 3, calls: &callLog{}}
 	for _, id := range ids {
 		s.status[id] = "queued"
 	}
 	return s
 }
 
-func (s *memStore) Claim(_ context.Context, id string) (bool, error) {
+func (s *memStore) Claim(_ context.Context, id string) (int, int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	switch s.status[id] {
-	case "pending", "queued":
+	case "pending", "queued", "retrying":
 		s.status[id] = "processing"
-		return true, nil
+		s.attempts[id]++
+		return s.attempts[id], s.max, nil
 	}
-	return false, nil
+	return 0, 0, nil
 }
 
 func (s *memStore) ResetProcessing(context.Context) (int64, error) {
@@ -122,8 +165,21 @@ func (s *memStore) Complete(_ context.Context, id string) error {
 	return nil
 }
 
-func (s *memStore) Fail(_ context.Context, id string) error {
-	s.setIf(id, "processing", "failed")
+func (s *memStore) Retry(_ context.Context, id string, delay time.Duration, _ string) (time.Time, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.calls.add("postgres:retry " + id)
+	if s.retryErr != nil {
+		return time.Time{}, s.retryErr
+	}
+	if s.status[id] == "processing" {
+		s.status[id] = "retrying"
+	}
+	return time.Now().Add(delay), nil
+}
+
+func (s *memStore) Bury(_ context.Context, id string, _ string) error {
+	s.setIf(id, "processing", "dead")
 	return nil
 }
 
@@ -131,6 +187,30 @@ func (s *memStore) get(id string) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.status[id]
+}
+
+func (s *memStore) attemptsOf(id string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.attempts[id]
+}
+
+// callLog records calls across fakes, in order.
+type callLog struct {
+	mu    sync.Mutex
+	calls []string
+}
+
+func (l *callLog) add(c string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.calls = append(l.calls, c)
+}
+
+func (l *callLog) all() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return slices.Clone(l.calls)
 }
 
 // counter counts handler calls per job ID.
@@ -254,14 +334,134 @@ func TestPoolRunsADuplicateIDOnce(t *testing.T) {
 	}
 }
 
-func TestPoolMarksAFailingJobFailed(t *testing.T) {
+// A permanent error buries the job at once: no retry is scheduled.
+func TestPermanentErrorBuriesTheJob(t *testing.T) {
 	q, s := &memQueue{pending: []string{"bad"}}, newMemStore("bad")
-	start(t, newPool(q, s, 1, func(context.Context, string) error { return errors.New("boom") }))
+	start(t, newPool(q, s, 1, func(context.Context, string) error {
+		return Permanent(errors.New("invalid email address"))
+	}))
 
-	eventually(t, "bad marked failed and acknowledged", func() bool {
+	eventually(t, "bad marked dead and acknowledged", func() bool {
 		_, processing := q.lists()
-		return s.get("bad") == "failed" && len(processing) == 0
+		return s.get("bad") == "dead" && len(processing) == 0
 	})
+	if len(q.scheduled()) != 0 {
+		t.Errorf("a permanent failure was scheduled for retry: %v", q.scheduled())
+	}
+}
+
+// A retryable error records the retry, schedules it, and the job runs again
+// once due; it succeeds on the second attempt.
+func TestRetryableErrorRunsAgain(t *testing.T) {
+	q, s := &memQueue{pending: []string{"flaky"}}, newMemStore("flaky")
+	var mu sync.Mutex
+	runs := 0
+	p := newPool(q, s, 1, func(context.Context, string) error {
+		mu.Lock()
+		defer mu.Unlock()
+		runs++
+		if runs == 1 {
+			return errors.New("smtp: connection refused")
+		}
+		return nil
+	})
+	var gotDelayFor []int
+	p.Backoff = func(attempt int) time.Duration {
+		mu.Lock()
+		defer mu.Unlock()
+		gotDelayFor = append(gotDelayFor, attempt)
+		return time.Minute
+	}
+	start(t, p)
+
+	eventually(t, "the retry recorded and scheduled", func() bool {
+		return s.get("flaky") == "retrying" && slices.Equal(q.scheduled(), []string{"flaky"})
+	})
+	q.promote() // the promoter, once the retry is due
+	eventually(t, "flaky completed on attempt 2", func() bool { return s.get("flaky") == "completed" })
+	if s.attemptsOf("flaky") != 2 {
+		t.Errorf("attempts = %d, want 2", s.attemptsOf("flaky"))
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if !slices.Equal(gotDelayFor, []int{1}) {
+		t.Errorf("Backoff called for attempts %v, want [1]", gotDelayFor)
+	}
+}
+
+// After max attempts the job is dead, not retried again.
+func TestOutOfAttemptsBuriesTheJob(t *testing.T) {
+	q, s := &memQueue{pending: []string{"doomed"}}, newMemStore("doomed")
+	p := newPool(q, s, 1, func(context.Context, string) error { return errors.New("still down") })
+	p.Backoff = func(int) time.Duration { return time.Millisecond }
+	start(t, p)
+
+	for range s.max - 1 {
+		eventually(t, "a retry scheduled", func() bool { return len(q.scheduled()) == 1 })
+		q.promote()
+	}
+	eventually(t, "doomed dead after 3 attempts", func() bool { return s.get("doomed") == "dead" })
+	if s.attemptsOf("doomed") != 3 {
+		t.Errorf("attempts = %d, want 3", s.attemptsOf("doomed"))
+	}
+	if len(q.scheduled()) != 0 {
+		t.Errorf("a dead job still has a retry scheduled")
+	}
+}
+
+// PostgreSQL records the retry before Redis schedules it. If PostgreSQL
+// fails, nothing is scheduled and the ID stays in processing: Redis must
+// never hold a retry the source of truth doesn't know about.
+func TestRetryIsRecordedBeforeItIsScheduled(t *testing.T) {
+	q, s := &memQueue{pending: []string{"ok"}}, newMemStore("ok", "commit-fails")
+	q.calls = s.calls
+	p := newPool(q, s, 1, func(context.Context, string) error { return errors.New("boom") })
+	p.Backoff = func(int) time.Duration { return time.Minute }
+	start(t, p)
+
+	eventually(t, "ok retried", func() bool { return s.get("ok") == "retrying" })
+	if got, want := s.calls.all(), []string{"postgres:retry ok", "redis:schedule ok"}; !slices.Equal(got, want) {
+		t.Fatalf("calls = %v, want %v: PostgreSQL first, then Redis", got, want)
+	}
+
+	s.mu.Lock()
+	s.retryErr = errors.New("commit failed")
+	s.mu.Unlock()
+	q.add("commit-fails")
+	eventually(t, "commit-fails attempted", func() bool { return slices.Contains(s.calls.all(), "postgres:retry commit-fails") })
+	time.Sleep(20 * time.Millisecond)
+	if slices.Contains(s.calls.all(), "redis:schedule commit-fails") {
+		t.Fatal("the retry was scheduled in Redis although PostgreSQL didn't record it")
+	}
+	if _, processing := q.lists(); !slices.Contains(processing, "commit-fails") {
+		t.Errorf("processing list = %v, want commit-fails kept for recovery", processing)
+	}
+}
+
+func TestBackoffGrowsWithJitterAndACap(t *testing.T) {
+	for attempt, full := range map[int]time.Duration{1: 2 * time.Second, 2: 4 * time.Second, 5: 32 * time.Second, 9: 5 * time.Minute, 30: 5 * time.Minute} {
+		seen := map[time.Duration]bool{}
+		for range 200 {
+			d := Backoff(attempt)
+			if d < full/2 || d > full {
+				t.Fatalf("Backoff(%d) = %v, want between %v and %v", attempt, d, full/2, full)
+			}
+			seen[d] = true
+		}
+		if len(seen) < 50 {
+			t.Errorf("Backoff(%d) gave only %d different values in 200 calls: no jitter", attempt, len(seen))
+		}
+	}
+}
+
+func TestIsPermanentSeesThroughWrapping(t *testing.T) {
+	err := fmt.Errorf("send welcome email: %w", Permanent(errors.New("invalid address")))
+	if !IsPermanent(err) {
+		t.Error("IsPermanent missed a wrapped permanent error")
+	}
+	if IsPermanent(errors.New("timeout")) || IsPermanent(nil) || Permanent(nil) != nil {
+		t.Error("plain errors and nil must not be permanent")
+	}
 }
 
 // SIGTERM stops new claims but lets an active job finish. The active job's

@@ -15,7 +15,7 @@ import (
 // uniqueViolation is PostgreSQL's SQLSTATE code for a duplicate key.
 const uniqueViolation = "23505"
 
-const selectJobColumns = `SELECT id, user_id, title, status, created_at, updated_at FROM jobs`
+const selectJobColumns = `SELECT id, user_id, title, status, created_at, updated_at, attempts, max_attempts, next_attempt_at FROM jobs`
 
 // JobStore keeps jobs in PostgreSQL. It is safe for concurrent use because *sql.DB is.
 // Callers only ever see job package errors, never SQL or driver errors.
@@ -51,8 +51,8 @@ func (s *JobStore) Add(ctx context.Context, j *job.Job) error {
 	defer tx.Rollback() // does nothing once Commit has succeeded
 
 	_, err = tx.ExecContext(ctx,
-		`INSERT INTO jobs (id, user_id, title, status, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6)`,
-		j.ID, j.UserID, j.Title, string(j.Status), j.CreatedAt, j.UpdatedAt,
+		`INSERT INTO jobs (id, user_id, title, status, created_at, updated_at, max_attempts) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+		j.ID, j.UserID, j.Title, string(j.Status), j.CreatedAt, j.UpdatedAt, maxAttempts(j),
 	)
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == uniqueViolation {
@@ -159,10 +159,23 @@ type scanner interface {
 
 func scanJob(s scanner) (*job.Job, error) {
 	var j job.Job
-	if err := s.Scan(&j.ID, &j.UserID, &j.Title, &j.Status, &j.CreatedAt, &j.UpdatedAt); err != nil {
+	var next sql.NullTime
+	if err := s.Scan(&j.ID, &j.UserID, &j.Title, &j.Status, &j.CreatedAt, &j.UpdatedAt, &j.Attempts, &j.MaxAttempts, &next); err != nil {
 		return nil, err
 	}
 	j.CreatedAt = j.CreatedAt.UTC()
 	j.UpdatedAt = j.UpdatedAt.UTC()
+	if next.Valid {
+		t := next.Time.UTC()
+		j.NextAttemptAt = &t
+	}
 	return &j, nil
+}
+
+// maxAttempts is j's limit, or the default for a job built without job.New.
+func maxAttempts(j *job.Job) int {
+	if j.MaxAttempts > 0 {
+		return j.MaxAttempts
+	}
+	return job.DefaultMaxAttempts
 }

@@ -19,14 +19,23 @@ const (
 	StatusPending    Status = "pending"
 	StatusQueued     Status = "queued"
 	StatusProcessing Status = "processing"
-	StatusCompleted  Status = "completed"
-	StatusFailed     Status = "failed"
+	// StatusRetrying: failed, waiting for its next attempt (NextAttemptAt).
+	StatusRetrying  Status = "retrying"
+	StatusCompleted Status = "completed"
+	// StatusFailed is kept for jobs that failed before retries existed.
+	// New failures become StatusRetrying or StatusDead.
+	StatusFailed Status = "failed"
+	// StatusDead: a permanent error, or every attempt used up.
+	StatusDead Status = "dead"
 )
+
+// DefaultMaxAttempts is how many times a job runs before it is dead.
+const DefaultMaxAttempts = 3
 
 // Valid reports whether s is one of the known statuses.
 func (s Status) Valid() bool {
 	switch s {
-	case StatusPending, StatusQueued, StatusProcessing, StatusCompleted, StatusFailed:
+	case StatusPending, StatusQueued, StatusProcessing, StatusRetrying, StatusCompleted, StatusFailed, StatusDead:
 		return true
 	default:
 		return false
@@ -47,6 +56,12 @@ type Job struct {
 	Status    Status    `json:"status"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
+
+	// Attempts counts the runs so far; MaxAttempts is the limit.
+	Attempts    int `json:"attempts"`
+	MaxAttempts int `json:"max_attempts"`
+	// NextAttemptAt is set while the job is retrying.
+	NextAttemptAt *time.Time `json:"next_attempt_at,omitempty"`
 }
 
 // New validates the title and returns a pending job.
@@ -61,11 +76,12 @@ func New(title string) (*Job, error) {
 
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	return &Job{
-		ID:        newID(),
-		Title:     title,
-		Status:    StatusPending,
-		CreatedAt: now,
-		UpdatedAt: now,
+		ID:          newID(),
+		Title:       title,
+		Status:      StatusPending,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+		MaxAttempts: DefaultMaxAttempts,
 	}, nil
 }
 
