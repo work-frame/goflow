@@ -164,6 +164,17 @@ goflow job retry <id of a completed job>     # refused: only a dead or failed jo
 
 The idempotency key needs `curl` with the `gf` function from the [README](README.md#examples): send the same create twice with one key, and the second answer is `200` with the same ID.
 
+Result on 3 November 2026, about 23:40 WAT (deploy `2ecafb2` built in 34.9 s; the CLI built locally with `go build -o bin/goflow ./cmd/goflow`):
+
+| Check | Result |
+|---|---|
+| `goflow job retry` on `fail:permanent` (dead 1/3) | `pending again (attempts reset to 0 of 3)`; 15 s later `dead 1/3` again, `updated_at` 22:41:31 UTC against `created_at` 22:12:55: a worker ran it a second time |
+| `goflow job retry` on the completed `flaky:2` | `only a dead or failed job can be retried (HTTP 409)` |
+| Same create twice with one `Idempotency-Key` | One ID both times: `201`, then `200`. One job in the list |
+| Create to claim | The replayed job was already `processing` 18 ms after its `created_at`: outbox, relay, Key Value and a worker's claim, with no polling delay |
+
+The replay showed `processing, 1 attempt` while the first answer had said `pending, 0 attempts`: GoFlow replays the job's current state, not the first response ([ARCHITECTURE.md](ARCHITECTURE.md#idempotent-creation)).
+
 ## Rolling back
 
 Render keeps previous deploys. In the dashboard: `goflow-api` → **Deploys** → pick the last good one → **Rollback**. A rollback doesn't undo migrations, so a migration must keep working with the code before it (add columns before using them, drop them a release later).
