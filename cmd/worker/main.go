@@ -1,16 +1,22 @@
-// Command worker takes job IDs off the Redis queue and runs the jobs.
+// Command worker runs a pool of workers that take job IDs off the Redis
+// queue and run the jobs.
 //
 // It needs the same database as the API and the Redis the API's relay
 // pushes to. It doesn't run migrations: the API owns the schema, so start
 // the API (or run it once) before the worker.
+//
+// Run ONE worker process at a time: at startup it resets every job left
+// 'processing', which is only safe when no other worker process is running.
 package main
 
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -20,21 +26,30 @@ import (
 	"github.com/work-frame/goflow/internal/worker"
 )
 
-// simulatedWork is how long the placeholder handler takes. Long enough to
-// stop the worker mid-job by hand; real job types replace it later.
-const simulatedWork = 5 * time.Second
+const (
+	// simulatedWork is how long the placeholder handler takes. Long enough to
+	// stop the worker mid-job by hand; real job types replace it later.
+	simulatedWork = 5 * time.Second
+	// drainTimeout is how long running jobs may finish after SIGTERM.
+	drainTimeout = 20 * time.Second
+	// Allowed range for GOFLOW_WORKERS.
+	defaultWorkers, maxWorkers = 4, 32
+)
 
 func main() {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 
 	dbURL, redisURL := os.Getenv("GOFLOW_DATABASE_URL"), os.Getenv("GOFLOW_REDIS_URL")
-	if err := checkSettings(dbURL, redisURL); err != nil {
+	workers, err := workerCount(os.Getenv("GOFLOW_WORKERS"))
+	if err = errors.Join(err, checkSettings(dbURL, redisURL)); err != nil {
 		logger.Error("invalid configuration", "err", err)
 		os.Exit(1)
 	}
 
+	// ctx is cancelled on Ctrl+C or SIGTERM. For the pool that means "take no
+	// new jobs"; running jobs keep their own context (see worker.Pool.Run).
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	err := run(ctx, logger, dbURL, redisURL)
+	err = run(ctx, logger, dbURL, redisURL, workers)
 	stop()
 	if err != nil {
 		logger.Error("worker stopped with error", "err", err)
@@ -59,7 +74,19 @@ func checkSettings(dbURL, redisURL string) error {
 	return errors.Join(errs...)
 }
 
-func run(ctx context.Context, logger *slog.Logger, dbURL, redisURL string) error {
+// workerCount reads GOFLOW_WORKERS: empty means the default.
+func workerCount(raw string) (int, error) {
+	if raw == "" {
+		return defaultWorkers, nil
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 1 || n > maxWorkers {
+		return 0, fmt.Errorf("GOFLOW_WORKERS must be a whole number from 1 to %d, got %q", maxWorkers, raw)
+	}
+	return n, nil
+}
+
+func run(ctx context.Context, logger *slog.Logger, dbURL, redisURL string, workers int) error {
 	db, err := database.Open(ctx, dbURL)
 	if err != nil {
 		return err
@@ -73,14 +100,16 @@ func run(ctx context.Context, logger *slog.Logger, dbURL, redisURL string) error
 	}
 	defer q.Close()
 
-	logger.Info("worker started", "simulated_work", simulatedWork)
-	w := &worker.Worker{
-		Queue:  q,
-		Store:  database.NewWorkStore(db),
-		Handle: placeholder,
-		Logger: logger,
+	logger.Info("worker starting", "workers", workers, "simulated_work", simulatedWork, "drain_timeout", drainTimeout)
+	p := &worker.Pool{
+		Queue:        q,
+		Store:        database.NewWorkStore(db),
+		Handle:       placeholder,
+		Logger:       logger,
+		Workers:      workers,
+		DrainTimeout: drainTimeout,
 	}
-	err = w.Run(ctx)
+	err = p.Run(ctx)
 	logger.Info("worker stopped")
 	return err
 }

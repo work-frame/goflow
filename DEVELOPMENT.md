@@ -64,6 +64,7 @@ export GOFLOW_TEST_REDIS_URL='redis://127.0.0.1:6379/1'
 | `PORT` | API, when `GOFLOW_ADDR` is unset (hosting platforms) | none |
 | `GOFLOW_REDIS_URL` | API; optional, remote hosts need `rediss://` | none (queue off) |
 | `GOFLOW_TEST_REDIS_URL` | tests; Redis tests skip without it | none |
+| `GOFLOW_WORKERS` | worker; jobs that run at once, 1 to 32 | `4` |
 | `GOFLOW_TEST_DATABASE_URL` | tests; database tests skip without it | none |
 | `GOFLOW_API_URL` | CLI | `http://localhost:8080` |
 | `GOFLOW_TOKEN` | CLI; overrides the saved login from `goflow login` (scripts, CI) | none |
@@ -128,7 +129,9 @@ In a third terminal, run the worker. It needs the same database and Redis as the
 go build -o bin/worker ./cmd/worker && GOFLOW_REDIS_URL='redis://127.0.0.1:6379/0' ./bin/worker
 ```
 
-Each job takes 5 seconds of placeholder work and ends `completed`. Stop the worker mid-job with `Ctrl+C`: the next start logs `unfinished jobs put back in the queue` and runs it again.
+`GOFLOW_WORKERS` sets how many jobs run at once (default 4, up to 32). Each job takes 5 seconds of placeholder work and ends `completed`. `Ctrl+C` stops taking new jobs and gives running ones 20 seconds to finish; a job still running after that is left for the next start, which logs `recovered unfinished jobs` and runs it again.
+
+Run **one** worker process at a time. Its startup recovery resets every `processing` job, which would break jobs another worker process is still running.
 
 `goflow login` saves one API at a time. Logging in locally replaces a saved login to the hosted API, and the other way round.
 

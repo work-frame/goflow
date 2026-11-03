@@ -18,7 +18,7 @@ internal/credentials                                                     ├─�
 - **`internal/auth`** is the account domain: users, email normalization, password hashing with bcrypt, and session tokens. Like `job`, it imports no HTTP or SQL packages.
 - **`internal/queue`** owns Redis: a list of job IDs waiting for a worker (`goflow:jobs:pending`). Only IDs go through Redis; PostgreSQL stays the source of truth.
 - **`internal/relay`** moves IDs from the outbox table to the queue in the background (see [The outbox](#the-outbox)).
-- **`internal/worker`** and **`cmd/worker`** take IDs off the queue and run the jobs (see [The worker](#the-worker)). **`internal/urlcheck`** holds the TLS rules both programs apply to their URLs.
+- **`internal/worker`** and **`cmd/worker`** take IDs off the queue and run the jobs (see [The worker pool](#the-worker-pool)). **`internal/urlcheck`** holds the TLS rules both programs apply to their URLs.
 - **`internal/database`** owns PostgreSQL: connecting, migrating, and storing jobs, users and sessions.
 - **`internal/api`** owns HTTP: routes, middleware, handlers.
 - **`internal/client`** is a Go client for the API. **`internal/cli`** uses it. **`internal/credentials`** saves the login on disk.
@@ -171,22 +171,24 @@ relay (every 30 s, and when woken):
 - **Several instances are safe.** `FOR UPDATE SKIP LOCKED` gives each relay different rows.
 - **`Wake` never blocks.** It's a send on a channel with room for one signal; extra wake-ups are dropped because the next pass sends everything anyway. The 30 s tick covers wake-ups that never came.
 
-### The worker
+### The worker pool
+
+`cmd/worker` runs `GOFLOW_WORKERS` goroutines (default 4). Each one loops:
 
 ```text
-Take      BLMOVE goflow:jobs:pending → goflow:jobs:processing   (atomic; waits up to 5 s)
-Claim     UPDATE jobs SET status = 'processing' WHERE status IN ('pending','queued','processing')
-            no row (completed, failed, deleted) → skip, Ack
+Take      BLMOVE goflow:jobs:pending → goflow:jobs:processing   (atomic; waits up to 2 s)
+Claim     UPDATE jobs SET status = 'processing' WHERE id = $1 AND status IN ('pending','queued')
+            0 rows (already processing, finished or deleted) → skip, Ack
 Handle    the work (a 5-second placeholder for now)
 Complete  status = 'completed'   (or Fail → 'failed')
 Ack       LREM goflow:jobs:processing
 ```
 
-- **An ID is never only in memory.** `BLMOVE` moves it between lists in one step, so a worker that dies mid-job leaves it in `processing`. On start, `Recover` moves those IDs back to the front of `pending`.
-- **Duplicates are harmless.** Delivery is at least once. The second copy of an ID finds the job `completed` and is skipped: the job runs once, the ID is acknowledged twice.
-- **Saved before acknowledged.** The outcome is written to PostgreSQL before the `Ack`. A crash in between leaves the ID in `processing`; after recovery `Claim` sees the job finished and skips it.
-- **Stopping mid-job records nothing.** On `Ctrl+C` the job stays `processing` and its ID stays in `processing`; it runs again after the next start.
-- **One worker only, for now.** `Recover` can't tell a dead worker's IDs from a live one's, and `Claim` lets a `processing` job be claimed again. Both are safe with one worker; several workers need leases and heartbeats (Phases 6 and 12).
+- **Exactly one claim wins, enforced by PostgreSQL.** When two workers claim the same job (a duplicate ID), the first `UPDATE` locks the row; the second waits for that commit, re-checks `status IN ('pending','queued')`, finds `processing` and changes 0 rows. This holds across processes, which a Go mutex can't. `TestClaimHasExactlyOneWinner` races two claims on real PostgreSQL 50 times.
+- **An ID is never only in memory.** `BLMOVE` moves it between lists in one step, and only `Ack`, after the outcome is saved, removes it.
+- **Shutdown has two signals.** `SIGTERM` cancels the pool's context, which stops workers from *taking* new jobs. Running jobs use a separate context (`context.WithoutCancel`) that `SIGTERM` doesn't reach; they get `DrainTimeout` (20 s) to finish, tracked with a `sync.WaitGroup`. Only after that are they cancelled: they record nothing, so the job stays `processing` and its ID stays in the `processing` list. An idle worker can delay shutdown by up to one `Take` (2 s): go-redis doesn't interrupt a blocking `BLMOVE` when its context is cancelled.
+- **Recovery happens at the next start, not at shutdown.** A host may `SIGKILL` the process after its grace period, and no code runs then. So before any worker starts, `Pool.Run` resets jobs still `processing` to `queued` (`ResetProcessing`) and moves IDs left in the `processing` list back to the front of `pending` (`Recover`).
+- **Single process only.** That startup recovery assumes every `processing` job belongs to a process that has stopped. **It is not safe with more than one worker process or API instance:** a second process starting would reset jobs the first is still running, and they would run twice at the same time. Running several processes needs leases (who holds a job, until when) so only expired claims are taken over (Phase 12). Goroutines inside one process are fine: they share one recovery, done before any of them start.
 - **The worker doesn't migrate.** The API owns the schema.
 
 ## CLI: `internal/cli`, `internal/client`, `cmd/goflow`
@@ -237,7 +239,7 @@ Everything runs with the race detector (`./scripts/check.sh`). [FAILURES.md](FAI
 ## Known limitations
 
 - The work itself is a placeholder; real job types, retries and timeouts come in Phases 6–7.
-- One worker process at a time (see [The worker](#the-worker)). It isn't deployed on Render yet.
+- One worker process at a time (see [The worker pool](#the-worker-pool)); not safe with several. It isn't deployed on Render yet.
 - Jobs reach Redis at least once; a duplicate ID is possible after a failed commit. Workers must be idempotent (Phase 6–7).
 - Every API instance with Redis polls the outbox every 30 s. On a database that sleeps when idle (Neon free), that keeps it awake: decide in Phase 6, when Redis is hosted.
 - No rate limit on login or password change (Phase 9). Closed registration limits who has an account meanwhile.

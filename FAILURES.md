@@ -371,6 +371,34 @@ Each case was reproduced on a real machine (Arch Linux, Go 1.27, PostgreSQL 17) 
   ```
 - **Why:** with `BRPOP`, between taking an ID and finishing the job the ID exists only in the worker's memory. A crash, a deploy or Ctrl+C in that window loses it: the job stays `processing` in PostgreSQL forever and no list holds its ID, so nothing will ever run or retry it. It's the dual-write problem again, on the consumer side. Moving the ID keeps it in exactly one Redis list at every moment.
 
+## 28. Only one worker can claim a job
+
+- **Safeguard:** `WorkStore.Claim` changes a job to `processing` only from `pending` or `queued`: `WHERE id = $1 AND status IN ('pending', 'queued')`.
+- **Removed:** `'processing'` added back to that list, as it was in Task 24, where it let a single worker resume a job after a crash.
+- **Caught by:** `TestClaimRefusesAProcessingJob`, and `TestClaimHasExactlyOneWinner`, which releases two goroutines at the same moment against real PostgreSQL, 50 rounds.
+- **Observed:**
+  ```text
+  --- FAIL: TestClaimRefusesAProcessingJob (0.11s)
+      work_test.go:71: second Claim of a processing job = true, want false: the job would run twice
+  --- FAIL: TestClaimHasExactlyOneWinner (0.25s)
+      work_test.go:121: round 0: 2 goroutines won the claim, want exactly 1
+  ```
+- **Why:** with a pool, a duplicate ID (at-least-once delivery) can be taken by two workers at once. PostgreSQL locks the row for the first `UPDATE`; the second waits, then re-checks the `WHERE` clause against the committed row. If `processing` still matches, the second claim also wins, and the job runs twice at the same time. The race failed in the very first round. A Go mutex couldn't prevent this across processes; the condition in the `UPDATE` does. Resuming a crashed job now happens once, at startup (`ResetProcessing`), instead of in every claim.
+
+## 29. SIGTERM stops new claims, not running jobs
+
+- **Safeguard:** `Pool.Run` gives running jobs their own context, `context.WithCancel(context.WithoutCancel(ctx))`. `SIGTERM` cancels only `ctx`, which stops workers from taking new jobs; running jobs are cancelled only after `DrainTimeout`.
+- **Removed:** jobs run under the stop context (`p.process(stop, ...)`), so `SIGTERM` reaches them directly.
+- **Caught by:** `TestStopLetsTheActiveJobFinish` and `TestDrainTimeoutCancelsAndKeepsTheJob`.
+- **Observed:**
+  ```text
+  --- FAIL: TestStopLetsTheActiveJobFinish (0.02s)
+      worker_test.go:293: the active job's context was cancelled (context canceled): SIGTERM must not cancel running jobs
+  --- FAIL: TestDrainTimeoutCancelsAndKeepsTheJob (0.00s)
+      worker_test.go:320: Run returned after 68.307µs, before the 50ms drain timeout
+  ```
+- **Why:** every deploy sends `SIGTERM`. With one context, every running job would be cut off the moment a deploy started, even one a second from finishing, and then run again from the start after the restart: wasted work, and twice the side effects for anything not idempotent. The drain timeout never applied: `Run` returned 68 µs after the stop. Stopping new work and stopping current work are different decisions, so they need different contexts.
+
 ## Experiment: the naive dual write loses a job
 
 Not a removed safeguard but the design of Task 22, run live on 2 November 2026 to see the failure Task 23 fixes. `POST /api/v1/jobs` saved the job in PostgreSQL, then pushed its ID to Redis, with nothing tying the two together.
