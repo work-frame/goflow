@@ -52,7 +52,7 @@ func (s *WorkStore) WithNotifier(n Notifier) *WorkStore {
 // no error: there is nothing for this caller to do.
 func (s *WorkStore) Claim(ctx context.Context, id string) (attempt, maxAttempts int, title string, err error) {
 	j, err := scanJob(s.db.QueryRowContext(ctx,
-		`UPDATE jobs SET status = 'processing', attempts = attempts + 1, next_attempt_at = NULL,
+		`UPDATE jobs SET version = version + 1, status = 'processing', attempts = attempts + 1, next_attempt_at = NULL,
 		        updated_at = GREATEST(now(), created_at)
 		 WHERE id = $1 AND status IN ('pending', 'queued', 'retrying')
 		 RETURNING `+jobColumns, id))
@@ -78,7 +78,7 @@ func (s *WorkStore) Claim(ctx context.Context, id string) (attempt, maxAttempts 
 // when), so only expired claims are taken over. See ARCHITECTURE.md.
 func (s *WorkStore) ResetProcessing(ctx context.Context) (int64, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`UPDATE jobs SET status = 'queued', updated_at = GREATEST(now(), created_at) WHERE status = 'processing'
+		`UPDATE jobs SET version = version + 1, status = 'queued', updated_at = GREATEST(now(), created_at) WHERE status = 'processing'
 		 RETURNING `+jobColumns)
 	if err != nil {
 		return 0, fmt.Errorf("database: reset processing jobs: %w", err)
@@ -103,7 +103,7 @@ func (s *WorkStore) Complete(ctx context.Context, id string) error {
 // committed. The job must be 'processing'.
 func (s *WorkStore) Retry(ctx context.Context, id string, delay time.Duration, lastError string) (time.Time, error) {
 	j, err := scanJob(s.db.QueryRowContext(ctx,
-		`UPDATE jobs SET status = 'retrying', last_error = $3,
+		`UPDATE jobs SET version = version + 1, status = 'retrying', last_error = $3,
 		        next_attempt_at = now() + make_interval(secs => $2),
 		        updated_at = GREATEST(now(), created_at)
 		 WHERE id = $1 AND status = 'processing'
@@ -121,7 +121,7 @@ func (s *WorkStore) Retry(ctx context.Context, id string, delay time.Duration, l
 // Bury marks a processing job dead: a permanent error, or out of attempts.
 func (s *WorkStore) Bury(ctx context.Context, id string, lastError string) error {
 	j, err := scanJob(s.db.QueryRowContext(ctx,
-		`UPDATE jobs SET status = 'dead', last_error = $2, next_attempt_at = NULL,
+		`UPDATE jobs SET version = version + 1, status = 'dead', last_error = $2, next_attempt_at = NULL,
 		        updated_at = GREATEST(now(), created_at)
 		 WHERE id = $1 AND status = 'processing'
 		 RETURNING `+jobColumns, id, truncateError(lastError)))
@@ -153,7 +153,7 @@ func truncateError(msg string) string {
 
 func (s *WorkStore) finish(ctx context.Context, id string, status job.Status) error {
 	j, err := scanJob(s.db.QueryRowContext(ctx,
-		`UPDATE jobs SET status = $2, updated_at = GREATEST(now(), created_at)
+		`UPDATE jobs SET version = version + 1, status = $2, updated_at = GREATEST(now(), created_at)
 		 WHERE id = $1 AND status = 'processing'
 		 RETURNING `+jobColumns, id, string(status)))
 	if errors.Is(err, sql.ErrNoRows) {

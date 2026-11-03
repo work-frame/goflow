@@ -146,7 +146,7 @@ func (s *JobStore) Rerun(ctx context.Context, userID, id string) (*job.Job, erro
 	defer tx.Rollback() // does nothing once Commit has succeeded
 
 	row := tx.QueryRowContext(ctx,
-		`UPDATE jobs SET status = 'pending', attempts = 0, next_attempt_at = NULL, last_error = NULL,
+		`UPDATE jobs SET version = version + 1, status = 'pending', attempts = 0, next_attempt_at = NULL, last_error = NULL,
 		        updated_at = GREATEST(now(), created_at)
 		 WHERE id = $1 AND user_id = $2 AND status IN ('dead', 'failed')
 		 RETURNING `+jobColumns, id, userID)
@@ -255,7 +255,7 @@ type scanner interface {
 func scanJob(s scanner) (*job.Job, error) {
 	var j job.Job
 	var next sql.NullTime
-	if err := s.Scan(&j.ID, &j.UserID, &j.Title, &j.Status, &j.CreatedAt, &j.UpdatedAt, &j.Attempts, &j.MaxAttempts, &next); err != nil {
+	if err := s.Scan(&j.ID, &j.UserID, &j.Title, &j.Status, &j.CreatedAt, &j.UpdatedAt, &j.Attempts, &j.MaxAttempts, &next, &j.Version); err != nil {
 		return nil, err
 	}
 	j.CreatedAt = j.CreatedAt.UTC()

@@ -1,0 +1,13 @@
+-- A version number per job, for live updates (Task 34). Every UPDATE of a
+-- job adds 1 in the same statement. PostgreSQL's row lock makes updates of
+-- one row take turns, so a job's versions follow the order its changes
+-- were committed: 1, 2, 3, ... A client keeps an event only if its version
+-- is higher than the one it has.
+--
+-- updated_at can't do this. now() is when the TRANSACTION started, not when
+-- it committed: a transaction that starts first, waits for the row lock and
+-- commits second writes the older time on the newer state. Two changes can
+-- also get the same time.
+--
+-- Existing jobs start at 1; that's fine, since no client has seen a version yet.
+ALTER TABLE jobs ADD COLUMN version BIGINT NOT NULL DEFAULT 1 CHECK (version >= 1);

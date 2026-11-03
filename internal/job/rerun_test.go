@@ -38,8 +38,8 @@ func TestMemoryStoreRerun(t *testing.T) {
 		t.Fatal(err)
 	}
 	got, err := s.Rerun(j.ID)
-	if err != nil || got.Status != StatusPending || got.Attempts != 0 {
-		t.Fatalf("Rerun = %+v, %v; want pending with 0 attempts", got, err)
+	if err != nil || got.Status != StatusPending || got.Attempts != 0 || got.Version != 2 {
+		t.Fatalf("Rerun = %+v, %v; want pending with 0 attempts, version 2", got, err)
 	}
 	if _, err := s.Rerun(j.ID); !errors.Is(err, ErrNotRerunnable) {
 		t.Errorf("second Rerun = %v, want ErrNotRerunnable", err)
@@ -70,5 +70,12 @@ func TestMemoryStoreIdempotencyKeys(t *testing.T) {
 	}
 	if err := add("alice", ""); err != nil {
 		t.Errorf("two jobs without a key: %v, want nil", err)
+	}
+}
+
+func TestNewJobsStartAtVersion1(t *testing.T) {
+	j, err := New("x")
+	if err != nil || j.Version != 1 {
+		t.Fatalf("New = version %v, %v; want 1", j, err)
 	}
 }

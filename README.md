@@ -131,7 +131,7 @@ gf -X POST $API/auth/logout     # ends the session at once
 | `type` | Fields | Meaning |
 |---|---|---|
 | `ready` | | The server is listening. Load your jobs now (`GET /api/v1/jobs`), not before, or you can miss a change |
-| `changed` | `job` | A job was created or its status or attempts changed. Keep it only if its `updated_at` is not older than the copy you have: events can arrive out of order |
+| `changed` | `job` | A job was created or its status or attempts changed. Keep it only if its `version` is higher than the copy you have: events can arrive out of order |
 | `deleted` | `id` | A job was deleted |
 | `resync` | | Events may have been lost (the server's Redis connection came back). Load your jobs again |
 

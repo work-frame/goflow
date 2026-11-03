@@ -138,6 +138,7 @@ func (s *MemoryStore) Rerun(id string) (*Job, error) {
 	j.Status = StatusPending
 	j.Attempts = 0
 	j.NextAttemptAt = nil
+	j.Version++
 	j.UpdatedAt = time.Now().UTC().Truncate(time.Microsecond)
 	c := *j
 	return &c, nil
