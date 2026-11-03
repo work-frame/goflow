@@ -123,6 +123,13 @@ Merging a change to `render.yaml` updates the Blueprint: Render creates `goflow-
 2. **API logs:** `queue_enabled=true workers=2`, `queue connected`, `worker pool started workers=2`, and `relay: jobs queued` for jobs that were waiting in the outbox.
 3. **End to end:** `goflow job create hosted queue test`, then after about 5 s `goflow job list` shows it `completed`.
 
+What happened on 3 November 2026:
+
+- The first sync failed: `services[0].maxShutdownDelaySeconds: max shutdown delay is not supported for free tier services`. The API's code still deployed (code deploys don't wait for the Blueprint) and ran with the queue off.
+- After that was removed (`42fde11`), the sync created `goflow-queue` and redeployed the API with the new settings, and that deploy **failed**: the new instance logged `starting ... queue_enabled=true workers=2` twice, then exited. The old instance kept serving, so nothing was down. Render hides the logs of a failed deploy, so the error was never read; most likely the API started before the new Key Value accepted connections, and the API then exited when its first Redis ping failed.
+- A manual **Deploy latest commit** a few minutes later went live. Both waiting jobs (one created on 2 November, one minutes earlier) completed within 30 s of the start, on two workers at once.
+- Since Task 28, the API starts even when Redis is unreachable, so a sync that creates a Key Value and redeploys the API at the same time can't fail this way.
+
 ## Rolling back
 
 Render keeps previous deploys. In the dashboard: `goflow-api` → **Deploys** → pick the last good one → **Rollback**. A rollback doesn't undo migrations, so a migration must keep working with the code before it (add columns before using them, drop them a release later).

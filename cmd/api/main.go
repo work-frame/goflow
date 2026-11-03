@@ -88,12 +88,23 @@ func run(ctx context.Context, logger *slog.Logger, cfg config, ready func(addr s
 	var rl *relay.Relay
 	if cfg.RedisURL != "" {
 		queue.UseLogger(logger)
-		q, err := queue.Open(ctx, cfg.RedisURL)
+		// New doesn't connect. An unreachable Redis must not stop the API:
+		// jobs are saved to the outbox either way, and the relay, the
+		// reconciler and the worker pool all retry until Redis answers. On
+		// Render, a Blueprint sync that creates the Key Value and redeploys
+		// the API at once can start the API first (Task 27's failed deploy).
+		q, err := queue.New(cfg.RedisURL)
 		if err != nil {
 			return err
 		}
 		defer q.Close()
-		logger.Info("queue connected")
+		pingCtx, cancelPing := context.WithTimeout(ctx, 3*time.Second)
+		if err := q.PingContext(pingCtx); err != nil {
+			logger.Warn("queue not reachable yet; jobs wait in the outbox and the relay and workers keep retrying", "err", err)
+		} else {
+			logger.Info("queue connected")
+		}
+		cancelPing()
 
 		outbox := database.NewOutboxStore(db)
 		rl = relay.New(outbox, q, logger, relayRetry)

@@ -100,3 +100,36 @@ func TestAPIWorkersRunJobs(t *testing.T) {
 		}
 	}
 }
+
+// The API starts even when Redis isn't reachable: it serves requests, saves
+// jobs to the outbox, and its relay and workers keep retrying in the
+// background. Nothing listens on port 1.
+func TestAPIStartsWhenRedisIsDown(t *testing.T) {
+	dbURL := testDatabaseURL(t)
+
+	cfg := testConfig("127.0.0.1:0", dbURL)
+	cfg.RedisURL = "redis://127.0.0.1:1/0"
+	cfg.Workers = 1
+	base, _ := startServerWith(t, cfg)
+	client := &http.Client{Timeout: 10 * time.Second}
+
+	if status, _, body := request(t, client, http.MethodGet, base+"/readyz", ""); status != http.StatusOK {
+		t.Fatalf("readyz with Redis down: status %d, body %s; readiness depends on the database only", status, body)
+	}
+	token := signUp(t, client, base, dbURL)
+	id := createJob(t, client, base, token, "waits for redis")
+
+	status, _, body := requestAs(t, client, http.MethodGet, base+"/api/v1/jobs/"+id, token, "")
+	if status != http.StatusOK {
+		t.Fatalf("get: status %d, body %s", status, body)
+	}
+	var got struct {
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != "pending" {
+		t.Errorf("status = %q, want pending: with Redis down the job waits in the outbox", got.Status)
+	}
+}

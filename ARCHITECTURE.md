@@ -147,7 +147,7 @@ All errors are `{"error": "..."}`.
 
 1. Read every setting with `loadConfig` and report all problems at once (`errors.Join`): a missing or non-TLS remote `GOFLOW_DATABASE_URL`, a bcrypt cost outside 10–14, a `GOFLOW_REGISTRATION` other than `open` or `closed`. Errors never include the URL, which holds the password.
 2. Connect (5 s ping), run migrations. No port is opened if this fails.
-3. If `GOFLOW_REDIS_URL` is set, connect to Redis (5 s ping) and start the relay and the reconciler, and, with `GOFLOW_WORKERS` above 0, the worker pool. Otherwise log a warning: new jobs wait in the outbox.
+3. If `GOFLOW_REDIS_URL` is set, create the Redis client and start the relay and the reconciler, and, with `GOFLOW_WORKERS` above 0, the worker pool. An unreachable Redis is logged (`queue not reachable yet`), not fatal: jobs still go to the outbox, the relay retries with backoff, and the pool retries its startup recovery until Redis answers (`TestAPIStartsWhenRedisIsDown`). Without `GOFLOW_REDIS_URL`, log a warning: new jobs wait in the outbox. `cmd/worker` still exits if Redis is down at start: it has nothing else to do.
 4. Start the hourly expired-session cleanup, and build the dummy bcrypt hash used for unknown emails in the background.
 5. Bind the port (`GOFLOW_ADDR`, else `PORT`, else `:8080`), log `listening`, serve.
 6. On `SIGINT`/`SIGTERM`: stop accepting connections, finish in-flight requests (up to 10 s), stop the cleanup and the relay, then close Redis and the database pool.

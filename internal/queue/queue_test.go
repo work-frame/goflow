@@ -177,3 +177,19 @@ func TestRecoverPutsUnfinishedIDsFirst(t *testing.T) {
 		t.Fatalf("order after Recover = %v, want %v", order, want)
 	}
 }
+
+// New doesn't connect, so it succeeds with nothing listening; the first
+// command is what fails.
+func TestNewDoesNotConnect(t *testing.T) {
+	q, err := New("redis://127.0.0.1:1/0")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer q.Close()
+	if err := q.PingContext(context.Background()); err == nil {
+		t.Fatal("Ping succeeded with nothing listening on port 1")
+	}
+	if _, err := New("http://localhost:6379"); err == nil {
+		t.Fatal("New accepted an http:// URL")
+	}
+}

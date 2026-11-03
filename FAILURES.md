@@ -411,6 +411,18 @@ Each case was reproduced on a real machine (Arch Linux, Go 1.27, PostgreSQL 17) 
   ```
 - **Why:** every pass is a database query, and nothing else catches this: jobs still arrive, every other test passes, and the cost shows up only on the bill. Neon's free compute suspends after 5 idle minutes and has 100 compute-hours a month. Even Task 23's 30-second tick never lets it reach 5 idle minutes: at the smallest size that is about 180 compute-hours a month, so the database would be suspended for the rest of the month after about 2.5 weeks. Work that only matters after a failure belongs on a retry timer; work that covers lost data (the reconciler) can run hourly.
 
+## 31. The API starts when Redis is down
+
+- **Safeguard:** the API creates its Redis client with `queue.New`, which doesn't connect, and treats a failed startup ping as a warning (`queue not reachable yet`). The relay, the reconciler and the worker pool all retry on their own.
+- **Removed:** returning the ping error from `run`, so the API exits when Redis doesn't answer at startup, as it did before Task 28.
+- **Caught by:** `TestAPIStartsWhenRedisIsDown`, which starts the API with `GOFLOW_REDIS_URL` pointing at a port where nothing listens.
+- **Observed:**
+  ```text
+  --- FAIL: TestAPIStartsWhenRedisIsDown (1.74s)
+      queue_test.go:113: server failed to start: queue: ping: dial tcp 127.0.0.1:1: connect: connection refused
+  ```
+- **Why:** this is the failed Render deploy of 3 November, reproduced on a laptop. A Blueprint sync created the Key Value and redeployed the API at the same moment; the new API pinged Redis before it accepted connections and exited, so the deploy failed. Exiting protected nothing: job creation never needed Redis (the outbox), and every Redis user already retried. A dependency the program can work without shouldn't be able to stop it from starting. The database is different: without it the API can't serve anything, so it still exits.
+
 ## Experiment: the naive dual write loses a job
 
 Not a removed safeguard but the design of Task 22, run live on 2 November 2026 to see the failure Task 23 fixes. `POST /api/v1/jobs` saved the job in PostgreSQL, then pushed its ID to Redis, with nothing tying the two together.
@@ -480,6 +492,8 @@ Task 24, run live on 3 November 2026 with the API and one worker.
 
 - **Tests migrated the development database.** `schema_migrations.applied_at` showed migration 1 applied 13 seconds before the API first started, matching the time `./scripts/check.sh` ran. The end-to-end test was using the development database URL. Fixed by giving tests their own database (`goflow_test`).
 - **DNS timeouts on a phone hotspot stopped the API from starting.** Against Neon from a laptop on a phone's mobile hotspot, startup failed with `hostname resolving error: ... i/o timeout`. `getent ahosts` for the same host took 5.06 s once and 0.01 s later: most likely the hotspot dropped the first DNS query, and the API's 5-second startup ping ran out first. Worked around with `ipv4.dns-options "single-request-reopen,timeout:2,attempts:3"` on that connection only (Go reads these options from `/etc/resolv.conf`). The same hotspot makes the first request after a few idle minutes take 2–5 s ([DEPLOYMENT.md](DEPLOYMENT.md#measured-2-november-2026)).
+
+- **A deploy failed because the API started before its queue.** On Render, one Blueprint sync created the Key Value instance and redeployed the API with its URL. The new instance logged `starting ... queue_enabled=true workers=2` twice and exited; the old one kept serving. A manual redeploy minutes later worked. The API exited when its startup Redis ping failed, even though everything that uses Redis retries on its own. Fixed in Task 28: an unreachable Redis is a warning at startup, not a fatal error ([DEPLOYMENT.md](DEPLOYMENT.md#queue-and-workers-task-27)).
 
 ## Not yet reproduced
 
