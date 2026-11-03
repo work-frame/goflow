@@ -498,6 +498,24 @@ Each case was reproduced on a real machine (Arch Linux, Go 1.27, PostgreSQL 17) 
   ```
 - **Why:** the end-to-end line is what a user would see. The `processing` event carried the same version as the event before it, so the client took it for a late copy and dropped it: the job seemed to jump from waiting to done. (Which events arrive changes from run to run: another run read `pending → completed`. `processing` is the one that's always lost.) Nothing crashed and the database was right, but the screen lied. A version only orders events if every change raises it, which is why one test reads the source: it fails for a statement written next year, not just the eight that exist today. Timestamps can't replace it: `now()` is when a transaction started, so the transaction that commits second can carry the earlier time.
 
+## 37. Job titles are shown as text, never as HTML
+
+- **Safeguard:** the dashboard builds every element with `createElement` and puts server text in with `textContent`, so a job title is only ever characters. The page is also served with `script-src 'self'`, which refuses inline code.
+- **Removed:** the title cell set with `innerHTML: job.title` instead of `textContent`.
+- **Caught by:** `TestScriptNeverTurnsTextIntoHTML`, which reads `app.js` and fails on `innerHTML`, `outerHTML`, `insertAdjacentHTML`, `document.write`, `eval` and `new Function`.
+- **Observed:**
+  ```text
+  --- FAIL: TestScriptNeverTurnsTextIntoHTML (0.00s)
+      web_test.go:108: app.js uses innerHTML
+  ```
+  Then in a headless Chromium, with the broken page and a job titled `<img src=x onerror=alert(1)>`:
+  ```text
+  img elements in table: 1
+  error: Failed to load resource: the server responded with a status of 404 (Not Found)
+  error: Executing inline event handler violates the following Content Security Policy directive 'script-src 'self''. ... The action has been blocked.
+  ```
+- **Why:** a job title is user input, and here it became markup: the browser created a real `<img>` and requested `/x` from our server. The attacker's code in `onerror` didn't run only because the second layer, the Content-Security-Policy, refused it. With `'unsafe-inline'` in the policy, it would have run with full access to `sessionStorage` and the 24-hour token. One layer failed and the other held; neither should be the only one. Escaping is the fix, the policy is the seatbelt. The test runs without a browser, so `check.sh` catches the mistake before anyone deploys it.
+
 ## Experiment: the naive dual write loses a job
 
 Not a removed safeguard but the design of Task 22, run live on 2 November 2026 to see the failure Task 23 fixes. `POST /api/v1/jobs` saved the job in PostgreSQL, then pushed its ID to Redis, with nothing tying the two together.
