@@ -12,7 +12,7 @@ I'm building it to learn production Go: the standard library first, then HTTP, P
 - **Phase 4 (done):** accounts, login sessions, per-user jobs, `goflow login`, and a first deployment on Render and Neon ([DEPLOYMENT.md](DEPLOYMENT.md))
 - **Phase 5 (done):** Redis job queue. A new job and an outbox row are saved in one transaction; with `GOFLOW_REDIS_URL` set, a background relay moves the ID to a Redis list and marks the job `queued`. A single worker (`cmd/worker`) takes IDs off the queue and runs jobs to `completed`; the work itself is a placeholder until real job types arrive. Runs locally; not deployed yet.
 - **Phase 6 (done):** a pool of concurrent workers (`GOFLOW_WORKERS`) with graceful shutdown. On Render, the API runs the pool itself against a free Key Value queue ([DEPLOYMENT.md](DEPLOYMENT.md)). Jobs are created, queued and completed end to end in production; the work is still a 5-second placeholder.
-- **Phase 7 (in progress):** failed jobs retry with exponential backoff and jitter, up to 3 attempts, then become `dead`; permanent errors skip the retries. Each attempt has a 15-second limit. A dead job can be re-run with fresh attempts (`goflow job retry <id>`), and an `Idempotency-Key` header makes a repeated create return the first job instead of a second one.
+- **Phase 7 (done):** failed jobs retry with exponential backoff and jitter, up to 3 attempts, then become `dead`; permanent errors skip the retries. Each attempt has a 15-second limit. A dead job can be re-run with fresh attempts (`goflow job retry <id>`), and an `Idempotency-Key` header makes a repeated create return the first job instead of a second one.
 
 ## Requirements
 
@@ -221,7 +221,7 @@ render.yaml            Render deployment (see DEPLOYMENT.md)
 4. Authentication and first deployment (done)
 5. Redis job queue (done)
 6. Worker pool (done)
-7. Retries, backoff, dead letter queue
+7. Retries, backoff, dead letter queue (done)
 8. WebSocket status updates
 9. Rate limiting
 10. Metrics and dashboards
