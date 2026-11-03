@@ -465,6 +465,22 @@ Each case was reproduced on a real machine (Arch Linux, Go 1.27, PostgreSQL 17) 
   ```
 - **Why:** the data stayed correct even when broken: one job, because the unique index on `(user_id, idempotency_key)` refused the other 19 `INSERT`s. That is the half that must live in the database: a "look the key up first, insert if missing" check in Go lets concurrent requests all see "missing". The other half is the answer. A client sends the same key again exactly because it doesn't know what happened; a `500` tells it "something broke, try again", and a client that keeps trying gets `500` forever while its job runs. The loser of the race has to get the winner's job, the same answer as if it had been first.
 
+## 35. An event reaches only the job's owner
+
+- **Safeguard:** `Hub.Deliver(userID, msg)` hands a message only to `h.streams[userID]`, the open streams of the user in the event's envelope. The envelope's `user_id` comes from the job row as committed (`RETURNING`), never from a client.
+- **Removed:** the lookup by owner. `Deliver` looped over every stream of every user.
+- **Caught by:** `TestHubDeliversOnlyToTheOwner`, `TestListenRoutesMessagesToTheOwner`, and `TestLiveEventsEndToEnd` (two users, real PostgreSQL and Redis, workers in the API).
+- **Observed:**
+  ```text
+  --- FAIL: TestHubDeliversOnlyToTheOwner (0.00s)
+      hub_test.go:60: bob received "alice's job", want nothing
+  --- FAIL: TestListenRoutesMessagesToTheOwner (0.00s)
+      listen_test.go:58: bob received "{\"type\":\"deleted\",\"id\":\"j1\"}", want nothing
+  --- FAIL: TestLiveEventsEndToEnd (2.09s)
+      live_test.go:166: bob received alice's job: {"type":"changed","job":{"id":"911484f2d69e2e6d276cb2ab9d3be8dd","title":"live e2e","status":"pending",...}}
+  ```
+- **Why:** case 21 again, on a new path. Every job query filters by owner in SQL, so the REST API can't leak another user's job. Live updates bypass those queries: one Redis channel carries every user's events to every API instance, and the hub is the only place that can tell them apart. Without the lookup, anyone with an account opens a stream and watches every other user's job titles and statuses as they happen. The e2e test is what makes this hold end to end: it checks the routing with two real users, not just the hub in isolation.
+
 ## Experiment: the naive dual write loses a job
 
 Not a removed safeguard but the design of Task 22, run live on 2 November 2026 to see the failure Task 23 fixes. `POST /api/v1/jobs` saved the job in PostgreSQL, then pushed its ID to Redis, with nothing tying the two together.
