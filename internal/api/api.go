@@ -10,6 +10,7 @@ import (
 
 	"github.com/work-frame/goflow/internal/auth"
 	"github.com/work-frame/goflow/internal/job"
+	"github.com/work-frame/goflow/internal/web"
 )
 
 const (
@@ -85,6 +86,9 @@ func NewRouter(d Deps) http.Handler {
 	h.prepareDummyHash()
 
 	mux := http.NewServeMux()
+	// The dashboard: "/", "/app.js" and "/style.css". Every other path
+	// still gets the API's JSON 404.
+	web.Register(mux)
 	mux.HandleFunc("GET /healthz", handleHealth)
 	mux.HandleFunc("GET /readyz", h.ready)
 	mux.HandleFunc("POST /api/v1/auth/register", h.register)

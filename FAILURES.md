@@ -494,9 +494,9 @@ Each case was reproduced on a real machine (Arch Linux, Go 1.27, PostgreSQL 17) 
       version_test.go:112: work.go: an UPDATE of jobs doesn't raise the version:
           UPDATE jobs SET status = 'processing', attempts = attempts + 1, next_attempt_at = NULL, ...
   --- FAIL: TestLiveEventsEndToEnd (2.16s)
-      live_test.go:157: alice's view went pending → completed
+      live_test.go:157: alice's view went pending → queued → completed
   ```
-- **Why:** the end-to-end line is what a user would see. The `processing` event carried the same version as `pending`, so the client took it for a late copy and dropped it: the job seemed to jump from waiting to done. Nothing crashed and the database was right, but the screen lied. A version only orders events if every change raises it, which is why one test reads the source: it fails for a statement written next year, not just the eight that exist today. Timestamps can't replace it: `now()` is when a transaction started, so the transaction that commits second can carry the earlier time.
+- **Why:** the end-to-end line is what a user would see. The `processing` event carried the same version as the event before it, so the client took it for a late copy and dropped it: the job seemed to jump from waiting to done. (Which events arrive changes from run to run: another run read `pending → completed`. `processing` is the one that's always lost.) Nothing crashed and the database was right, but the screen lied. A version only orders events if every change raises it, which is why one test reads the source: it fails for a statement written next year, not just the eight that exist today. Timestamps can't replace it: `now()` is when a transaction started, so the transaction that commits second can carry the earlier time.
 
 ## Experiment: the naive dual write loses a job
 

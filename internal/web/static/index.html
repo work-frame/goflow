@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GoFlow</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header>
+    <h1>GoFlow</h1>
+    <div id="session" hidden>
+      <span id="live" class="live off">offline</span>
+      <button id="logout" type="button">Log out</button>
+    </div>
+  </header>
+
+  <main>
+    <section id="login-view" hidden>
+      <h2>Log in</h2>
+      <form id="login-form">
+        <label>Email <input id="email" type="email" autocomplete="username" required></label>
+        <label>Password <input id="password" type="password" autocomplete="current-password" required></label>
+        <button type="submit">Log in</button>
+      </form>
+      <p id="login-error" class="error" hidden></p>
+    </section>
+
+    <section id="jobs-view" hidden>
+      <form id="create-form">
+        <input id="title" maxlength="200" placeholder="New job title, e.g. sleep:3s, flaky:2, fail" required>
+        <button type="submit">Create</button>
+      </form>
+      <p id="jobs-error" class="error" hidden></p>
+      <table>
+        <thead>
+          <tr><th>Status</th><th>Title</th><th>Tries</th><th>Created</th><th>ID</th><th></th></tr>
+        </thead>
+        <tbody id="jobs"></tbody>
+      </table>
+      <p id="empty" class="muted" hidden>No jobs yet.</p>
+    </section>
+  </main>
+</body>
+</html>

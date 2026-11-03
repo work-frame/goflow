@@ -13,7 +13,7 @@ I'm building it to learn production Go: the standard library first, then HTTP, P
 - **Phase 5 (done):** Redis job queue. A new job and an outbox row are saved in one transaction; with `GOFLOW_REDIS_URL` set, a background relay moves the ID to a Redis list and marks the job `queued`. A single worker (`cmd/worker`) takes IDs off the queue and runs jobs to `completed`; the work itself is a placeholder until real job types arrive. Runs locally; not deployed yet.
 - **Phase 6 (done):** a pool of concurrent workers (`GOFLOW_WORKERS`) with graceful shutdown. On Render, the API runs the pool itself against a free Key Value queue ([DEPLOYMENT.md](DEPLOYMENT.md)). Jobs are created, queued and completed end to end in production; the work is still a 5-second placeholder.
 - **Phase 7 (done):** failed jobs retry with exponential backoff and jitter, up to 3 attempts, then become `dead`; permanent errors skip the retries. Each attempt has a 15-second limit. A dead job can be re-run with fresh attempts (`goflow job retry <id>`), and an `Idempotency-Key` header makes a repeated create return the first job instead of a second one.
-- **Phase 8 (in progress):** live job status. Every status change is announced over Server-Sent Events (`GET /api/v1/events`) to the job's owner, opened with a 30-second single-use ticket. Next: a dashboard page that uses it.
+- **Phase 8 (in progress):** live job status. Every status change is announced over Server-Sent Events (`GET /api/v1/events`) to the job's owner, opened with a 30-second single-use ticket. A dashboard at `/` logs in, lists your jobs and updates them live, and creates, retries and deletes jobs.
 
 ## Requirements
 
@@ -175,6 +175,16 @@ Unexpected server errors return `500 {"error":"internal error"}`. The details ar
 
 Every response carries an `X-Request-ID` header, and the same ID appears in the server log line for that request. Send your own `X-Request-ID` (letters, digits, `-`, `_`, up to 64 characters) to trace a request through the logs. Anything else is replaced with a generated ID.
 
+## Dashboard
+
+Open the API's address in a browser: `http://localhost:8080/` locally, or https://goflow-api-hewh.onrender.com/ for the hosted one. Log in with the same email and password as `goflow login`. The page:
+
+- lists your jobs, newest first, and updates them as they change (the dot next to **Log out** says `live` while updates flow);
+- creates a job (each click sends its own `Idempotency-Key`), retries a dead one, and deletes one;
+- keeps working through restarts: when the connection drops it says so, reconnects with a new ticket and reloads the list.
+
+The session token stays in the tab's `sessionStorage`: a refresh keeps you logged in, closing the tab forgets it. **Log out** also ends the session on the server. The page is three files embedded in the API binary ([`internal/web`](internal/web)); there is no build step.
+
 ## CLI
 
 The CLI is a client for the HTTP API, so the API must be running, locally or hosted (`export GOFLOW_API_URL=https://goflow-api-hewh.onrender.com`).
@@ -232,6 +242,7 @@ internal/client/       Go client for the HTTP API
 internal/credentials/  the saved login file (~/.config/goflow/credentials)
 internal/database/     PostgreSQL: connection, migrations, stores
 internal/events/       live updates: publishing job changes, routing them to their owner, stream tickets
+internal/web/          the dashboard: index.html, app.js and style.css, embedded, with their security headers
 internal/job/          Job type, validation, pagination rules
 internal/queue/        Redis list of job IDs waiting for a worker
 internal/relay/        background loop: outbox (PostgreSQL) to queue (Redis)

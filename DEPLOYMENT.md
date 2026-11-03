@@ -189,6 +189,15 @@ On 4 November 2026 (deploy `d661403`), with a ticket from `POST /api/v1/events/t
 
 From create to `completed`: 3.2 s, every step pushed to the terminal without polling. The used ticket then got `401 {"error":"invalid or expired ticket"}`. Tickets and streams need Redis; nothing else changed in the Render setup.
 
+## Job versions and the dashboard (Tasks 34–35)
+
+After the deploys that bring migration 9 and the dashboard:
+
+1. **Logs:** `migrations applied versions=[9]` once, after the Task 34 deploy.
+2. **Browser:** open https://goflow-api-hewh.onrender.com/ and log in. The dot next to **Log out** should say `live`. If the instance was asleep, the first load waits for it to wake (up to a minute).
+3. **Live:** create `flaky:1` and `fail:permanent`. Without a refresh, `flaky:1` should go to `retrying` and then `completed`, and `fail:permanent` to `dead`. Click **Retry** on the dead one: it goes back to `pending` and ends `dead` again.
+4. **Headers:** `curl -sI https://goflow-api-hewh.onrender.com/` shows the `Content-Security-Policy` line.
+
 ## Rolling back
 
 Render keeps previous deploys. In the dashboard: `goflow-api` → **Deploys** → pick the last good one → **Rollback**. A rollback doesn't undo migrations, so a migration must keep working with the code before it (add columns before using them, drop them a release later).
