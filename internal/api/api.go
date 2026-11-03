@@ -63,6 +63,13 @@ type Deps struct {
 	// FAILURES.md, case 25).
 	Relay Waker
 
+	// Live is optional: nil means no Redis is configured, and the live
+	// update endpoints answer 503. Same rule as Relay: a true nil only.
+	Live LiveEvents
+	// StreamHeartbeat is how often an idle event stream sends a comment
+	// line. Zero means every 25 seconds; tests set it lower.
+	StreamHeartbeat time.Duration
+
 	// RegistrationClosed turns POST /api/v1/auth/register off. The zero value
 	// is open so tests stay short; production sets it from GOFLOW_REGISTRATION,
 	// which defaults to closed.
@@ -74,7 +81,7 @@ type Deps struct {
 // Request flow, outermost first:
 // withRequestID → logRequests → recoverPanics → jsonMuxErrors → mux → handler
 func NewRouter(d Deps) http.Handler {
-	h := &handler{store: d.Jobs, relay: d.Relay, users: d.Users, sessions: d.Sessions, hasher: d.Hasher, db: d.DB, logger: d.Logger, registrationClosed: d.RegistrationClosed}
+	h := &handler{store: d.Jobs, relay: d.Relay, live: d.Live, heartbeat: d.StreamHeartbeat, users: d.Users, sessions: d.Sessions, hasher: d.Hasher, db: d.DB, logger: d.Logger, registrationClosed: d.RegistrationClosed}
 	h.prepareDummyHash()
 
 	mux := http.NewServeMux()
@@ -91,6 +98,10 @@ func NewRouter(d Deps) http.Handler {
 	mux.HandleFunc("GET /api/v1/jobs/{id}", h.requireSession(h.getJob))
 	mux.HandleFunc("DELETE /api/v1/jobs/{id}", h.requireSession(h.deleteJob))
 	mux.HandleFunc("POST /api/v1/jobs/{id}/retry", h.requireSession(h.retryJob))
+	mux.HandleFunc("POST /api/v1/events/ticket", h.requireSession(h.createTicket))
+	// No requireSession: a browser's EventSource can't send the
+	// Authorization header, so the stream authenticates with a ticket.
+	mux.HandleFunc("GET /api/v1/events", h.streamEvents)
 
 	var handler http.Handler = mux
 	handler = jsonMuxErrors(handler)
@@ -102,14 +113,16 @@ func NewRouter(d Deps) http.Handler {
 
 // handler holds what the endpoints depend on.
 type handler struct {
-	store    JobStore
-	relay    Waker // nil when no queue is configured
-	users    UserStore
-	sessions SessionStore
-	dummy    dummyHash
-	hasher   auth.Hasher
-	db       Pinger
-	logger   *slog.Logger
+	store     JobStore
+	relay     Waker      // nil when no queue is configured
+	live      LiveEvents // nil when no queue is configured
+	heartbeat time.Duration
+	users     UserStore
+	sessions  SessionStore
+	dummy     dummyHash
+	hasher    auth.Hasher
+	db        Pinger
+	logger    *slog.Logger
 
 	registrationClosed bool
 }

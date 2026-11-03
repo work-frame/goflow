@@ -15,12 +15,22 @@ import (
 // it isn't scoped to a user. Workers run every user's jobs, and only ever by
 // an ID taken from the queue.
 type WorkStore struct {
-	db *sql.DB
+	db     *sql.DB
+	notify Notifier // nil: nobody is told about changes
 }
 
 // NewWorkStore returns a WorkStore that uses db.
 func NewWorkStore(db *sql.DB) *WorkStore {
 	return &WorkStore{db: db}
+}
+
+// WithNotifier returns a copy of s that tells n about every status change it
+// makes. Each change is a single statement, committed when it returns, so
+// n hears about it right after.
+func (s *WorkStore) WithNotifier(n Notifier) *WorkStore {
+	c := *s
+	c.notify = n
+	return &c
 }
 
 // Claim marks a pending, queued or retrying job processing, counts the
@@ -41,18 +51,19 @@ func NewWorkStore(db *sql.DB) *WorkStore {
 // Finished, dead, deleted and already-processing jobs return attempt 0 with
 // no error: there is nothing for this caller to do.
 func (s *WorkStore) Claim(ctx context.Context, id string) (attempt, maxAttempts int, title string, err error) {
-	err = s.db.QueryRowContext(ctx,
+	j, err := scanJob(s.db.QueryRowContext(ctx,
 		`UPDATE jobs SET status = 'processing', attempts = attempts + 1, next_attempt_at = NULL,
 		        updated_at = GREATEST(now(), created_at)
 		 WHERE id = $1 AND status IN ('pending', 'queued', 'retrying')
-		 RETURNING attempts, max_attempts, title`, id).Scan(&attempt, &maxAttempts, &title)
+		 RETURNING `+jobColumns, id))
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, 0, "", nil
 	}
 	if err != nil {
 		return 0, 0, "", fmt.Errorf("database: claim job %s: %w", id, err)
 	}
-	return attempt, maxAttempts, title, nil
+	notifyChanged(ctx, s.notify, j)
+	return j.Attempts, j.MaxAttempts, j.Title, nil
 }
 
 // ResetProcessing puts every processing job back to queued and returns how
@@ -66,16 +77,18 @@ func (s *WorkStore) Claim(ctx context.Context, id string) (attempt, maxAttempts 
 // same time. Several processes need leases instead (who holds a job, until
 // when), so only expired claims are taken over. See ARCHITECTURE.md.
 func (s *WorkStore) ResetProcessing(ctx context.Context) (int64, error) {
-	res, err := s.db.ExecContext(ctx,
-		`UPDATE jobs SET status = 'queued', updated_at = GREATEST(now(), created_at) WHERE status = 'processing'`)
+	rows, err := s.db.QueryContext(ctx,
+		`UPDATE jobs SET status = 'queued', updated_at = GREATEST(now(), created_at) WHERE status = 'processing'
+		 RETURNING `+jobColumns)
 	if err != nil {
 		return 0, fmt.Errorf("database: reset processing jobs: %w", err)
 	}
-	n, err := res.RowsAffected()
+	reset, err := scanJobs(rows)
 	if err != nil {
 		return 0, fmt.Errorf("database: reset processing jobs: %w", err)
 	}
-	return n, nil
+	notifyChanged(ctx, s.notify, reset...)
+	return int64(len(reset)), nil
 }
 
 // Complete marks a processing job completed.
@@ -89,30 +102,36 @@ func (s *WorkStore) Complete(ctx context.Context, id string) error {
 // caller to schedule in Redis, which it must do only after this has
 // committed. The job must be 'processing'.
 func (s *WorkStore) Retry(ctx context.Context, id string, delay time.Duration, lastError string) (time.Time, error) {
-	var due time.Time
-	err := s.db.QueryRowContext(ctx,
+	j, err := scanJob(s.db.QueryRowContext(ctx,
 		`UPDATE jobs SET status = 'retrying', last_error = $3,
 		        next_attempt_at = now() + make_interval(secs => $2),
 		        updated_at = GREATEST(now(), created_at)
 		 WHERE id = $1 AND status = 'processing'
-		 RETURNING next_attempt_at`, id, delay.Seconds(), truncateError(lastError)).Scan(&due)
+		 RETURNING `+jobColumns, id, delay.Seconds(), truncateError(lastError)))
 	if errors.Is(err, sql.ErrNoRows) {
 		return time.Time{}, fmt.Errorf("database: retry job %s: %w", id, ErrNotProcessing)
 	}
 	if err != nil {
 		return time.Time{}, fmt.Errorf("database: retry job %s: %w", id, err)
 	}
-	return due.UTC(), nil
+	notifyChanged(ctx, s.notify, j)
+	return *j.NextAttemptAt, nil
 }
 
 // Bury marks a processing job dead: a permanent error, or out of attempts.
 func (s *WorkStore) Bury(ctx context.Context, id string, lastError string) error {
-	if _, err := s.db.ExecContext(ctx,
+	j, err := scanJob(s.db.QueryRowContext(ctx,
 		`UPDATE jobs SET status = 'dead', last_error = $2, next_attempt_at = NULL,
 		        updated_at = GREATEST(now(), created_at)
-		 WHERE id = $1 AND status = 'processing'`, id, truncateError(lastError)); err != nil {
+		 WHERE id = $1 AND status = 'processing'
+		 RETURNING `+jobColumns, id, truncateError(lastError)))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil // not processing any more: nothing to record
+	}
+	if err != nil {
 		return fmt.Errorf("database: bury job %s: %w", id, err)
 	}
+	notifyChanged(ctx, s.notify, j)
 	return nil
 }
 
@@ -133,10 +152,16 @@ func truncateError(msg string) string {
 }
 
 func (s *WorkStore) finish(ctx context.Context, id string, status job.Status) error {
-	if _, err := s.db.ExecContext(ctx,
+	j, err := scanJob(s.db.QueryRowContext(ctx,
 		`UPDATE jobs SET status = $2, updated_at = GREATEST(now(), created_at)
-		 WHERE id = $1 AND status = 'processing'`, id, string(status)); err != nil {
+		 WHERE id = $1 AND status = 'processing'
+		 RETURNING `+jobColumns, id, string(status)))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil // not processing any more: nothing to record
+	}
+	if err != nil {
 		return fmt.Errorf("database: mark job %s %s: %w", id, status, err)
 	}
+	notifyChanged(ctx, s.notify, j)
 	return nil
 }

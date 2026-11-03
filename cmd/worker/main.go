@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/work-frame/goflow/internal/database"
+	"github.com/work-frame/goflow/internal/events"
 	"github.com/work-frame/goflow/internal/queue"
 	"github.com/work-frame/goflow/internal/relay"
 	"github.com/work-frame/goflow/internal/urlcheck"
@@ -103,6 +104,13 @@ func run(ctx context.Context, logger *slog.Logger, dbURL, redisURL string, worke
 	}
 	defer q.Close()
 
+	// Each status change is published for live updates. The publisher runs
+	// past SIGTERM (WithoutCancel) until its deferred stop, after the pool
+	// has drained, so finishing jobs still announce it.
+	pub := events.NewPublisher(q, logger)
+	stopPublisher := pub.Start(context.WithoutCancel(ctx))
+	defer stopPublisher()
+
 	// Due retries move from Redis's delayed set to the queue.
 	stopPromoter := relay.NewPromoter(q, logger, time.Second).Start(ctx)
 	defer stopPromoter()
@@ -110,7 +118,7 @@ func run(ctx context.Context, logger *slog.Logger, dbURL, redisURL string, worke
 	logger.Info("worker starting", "workers", workers, "simulated_work", simulatedWork, "drain_timeout", drainTimeout)
 	p := &worker.Pool{
 		Queue:        q,
-		Store:        database.NewWorkStore(db),
+		Store:        database.NewWorkStore(db).WithNotifier(pub),
 		Handle:       worker.Demo(simulatedWork),
 		JobTimeout:   jobTimeout,
 		Logger:       logger,

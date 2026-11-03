@@ -20,7 +20,7 @@ const uniqueViolation = "23505"
 // apart from a duplicate job ID (FAILURES.md, cases 18 and 34).
 const idempotencyKeyIndex = "jobs_user_idempotency_key"
 
-const selectJobColumns = `SELECT id, user_id, title, status, created_at, updated_at, attempts, max_attempts, next_attempt_at FROM jobs`
+const selectJobColumns = `SELECT ` + jobColumns + ` FROM jobs`
 
 // JobStore keeps jobs in PostgreSQL. It is safe for concurrent use because *sql.DB is.
 // Callers only ever see job package errors, never SQL or driver errors.
@@ -29,12 +29,21 @@ const selectJobColumns = `SELECT id, user_id, title, status, created_at, updated
 // clause. Another user's job is never fetched at all, so it can't leak through
 // a forgotten check in a handler: to the caller it simply does not exist.
 type JobStore struct {
-	db *sql.DB
+	db     *sql.DB
+	notify Notifier // nil: nobody is told about changes
 }
 
 // NewJobStore returns a JobStore that uses db.
 func NewJobStore(db *sql.DB) *JobStore {
 	return &JobStore{db: db}
+}
+
+// WithNotifier returns a copy of s that tells n about every job it creates,
+// re-runs or deletes, after the change is committed.
+func (s *JobStore) WithNotifier(n Notifier) *JobStore {
+	c := *s
+	c.notify = n
+	return &c
 }
 
 // Add inserts j together with its job_outbox row, in one transaction:
@@ -85,6 +94,7 @@ func (s *JobStore) Add(ctx context.Context, j *job.Job) error {
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("database: add job %s: commit: %w", j.ID, err)
 	}
+	notifyChanged(ctx, s.notify, j)
 	return nil
 }
 
@@ -139,8 +149,7 @@ func (s *JobStore) Rerun(ctx context.Context, userID, id string) (*job.Job, erro
 		`UPDATE jobs SET status = 'pending', attempts = 0, next_attempt_at = NULL, last_error = NULL,
 		        updated_at = GREATEST(now(), created_at)
 		 WHERE id = $1 AND user_id = $2 AND status IN ('dead', 'failed')
-		 RETURNING id, user_id, title, status, created_at, updated_at, attempts, max_attempts, next_attempt_at`,
-		id, userID)
+		 RETURNING `+jobColumns, id, userID)
 	j, err := scanJob(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		// Nothing changed. Missing (or someone else's), or the wrong status?
@@ -170,6 +179,7 @@ func (s *JobStore) Rerun(ctx context.Context, userID, id string) (*job.Job, erro
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("database: rerun job %s: commit: %w", id, err)
 	}
+	notifyChanged(ctx, s.notify, j)
 	return j, nil
 }
 
@@ -230,6 +240,9 @@ func (s *JobStore) Delete(ctx context.Context, userID, id string) error {
 	}
 	if n == 0 {
 		return job.ErrNotFound
+	}
+	if s.notify != nil {
+		s.notify.JobDeleted(ctx, userID, id)
 	}
 	return nil
 }

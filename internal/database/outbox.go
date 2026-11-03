@@ -10,12 +10,21 @@ import (
 // OutboxStore reads and clears job_outbox, the list of jobs whose IDs still
 // have to reach the queue. JobStore.Add fills it.
 type OutboxStore struct {
-	db *sql.DB
+	db     *sql.DB
+	notify Notifier // nil: nobody is told about changes
 }
 
 // NewOutboxStore returns an OutboxStore that uses db.
 func NewOutboxStore(db *sql.DB) *OutboxStore {
 	return &OutboxStore{db: db}
+}
+
+// WithNotifier returns a copy of s that tells n about every job Relay marks
+// queued, after the change is committed.
+func (s *OutboxStore) WithNotifier(n Notifier) *OutboxStore {
+	c := *s
+	c.notify = n
+	return &c
 }
 
 // Relay takes up to limit outbox rows, oldest first, and calls send with
@@ -75,14 +84,20 @@ func (s *OutboxStore) Relay(ctx context.Context, limit int, send func(ctx contex
 	// (Phase 6) must not go back. created_at comes from the API's clock and
 	// now() from the database's; GREATEST keeps updated_at >= created_at
 	// (a CHECK constraint) even if the two clocks disagree.
-	if _, err := tx.ExecContext(ctx,
-		`UPDATE jobs SET status = 'queued', updated_at = GREATEST(now(), created_at) WHERE id = ANY($1) AND status = 'pending'`,
-		jobIDs); err != nil {
+	rows, err = tx.QueryContext(ctx,
+		`UPDATE jobs SET status = 'queued', updated_at = GREATEST(now(), created_at) WHERE id = ANY($1) AND status = 'pending'
+		 RETURNING `+jobColumns, jobIDs)
+	if err != nil {
+		return 0, fmt.Errorf("database: relay: mark queued: %w", err)
+	}
+	queued, err := scanJobs(rows)
+	if err != nil {
 		return 0, fmt.Errorf("database: relay: mark queued: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
 		return 0, fmt.Errorf("database: relay: commit: %w", err)
 	}
+	notifyChanged(ctx, s.notify, queued...)
 	return len(jobIDs), nil
 }
 
