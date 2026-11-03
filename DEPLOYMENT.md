@@ -111,6 +111,7 @@ Almost all of the 0.6–0.8 s is distance: each CLI command opens a new TLS conn
 | No rate limit on login | Passwords can be guessed as fast as bcrypt allows | Phase 9. Closed registration limits who has an account meanwhile |
 | Free Key Value has no persistence | A restart empties both lists; queued jobs lose their IDs | The reconciler re-sends jobs `queued` for over 10 minutes, at start and hourly |
 | Neon free: 100 compute-hours a month; can't stay awake for free | A query every few seconds would use the month up in about 2.5 weeks, then suspend the database | The relay never polls while healthy; the reconciler runs hourly. Watch Neon's usage page |
+| Free services can't set a shutdown delay | Render rejects `maxShutdownDelaySeconds` on the free plan, so the time between `SIGTERM` and `SIGKILL` is Render's to choose. The pool drains for 20 s; a job cut off sooner records nothing | The next start resets it and runs it again. Set the delay on a paid instance |
 | Workers inside the API | One API instance only (startup recovery resets `processing` jobs); jobs run on the API's tenth of a CPU | A paid background worker and leases (Phase 12) before more instances |
 | Render health checks every 5 s are logged | About 17,000 log lines a day of `/healthz` | Phase 10: skip request logs for `/healthz` |
 

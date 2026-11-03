@@ -15,9 +15,10 @@ services:
     # free Neon database could make a fresh deploy look unhealthy.
     healthCheckPath: /healthz
     autoDeployTrigger: commit
-    # Render's default, written down because the worker pool depends on it:
-    # after SIGTERM the API has 30 s; jobs get 20 s of that to finish.
-    maxShutdownDelaySeconds: 30
+    # No maxShutdownDelaySeconds: Render refuses it on free services (the
+    # first sync of Task 27 failed on it). The worker pool drains for 20 s
+    # after SIGTERM; if Render kills the API sooner, unfinished jobs stay
+    # 'processing' and the next start puts them back (worker.Pool.Run).
     envVars:
       - key: GOFLOW_DATABASE_URL # from Neon, with sslmode=verify-full
         sync: false
