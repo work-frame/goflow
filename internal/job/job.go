@@ -92,6 +92,11 @@ type Job struct {
 	// NextAttemptAt is set while the job is retrying.
 	NextAttemptAt *time.Time `json:"next_attempt_at,omitempty"`
 
+	// Version starts at 1 and goes up by 1 with every change, in the order
+	// the changes were committed. Of two copies of a job, the one with the
+	// higher version is newer; updated_at can't promise that.
+	Version int64 `json:"version"`
+
 	// IdempotencyKey is the client's Idempotency-Key header, or "" if it
 	// sent none. Never returned: the client already knows it.
 	IdempotencyKey string `json:"-"`
@@ -115,6 +120,7 @@ func New(title string) (*Job, error) {
 		CreatedAt:   now,
 		UpdatedAt:   now,
 		MaxAttempts: DefaultMaxAttempts,
+		Version:     1,
 	}, nil
 }
 

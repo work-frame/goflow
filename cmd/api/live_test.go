@@ -82,10 +82,10 @@ type liveEvent struct {
 	Type string `json:"type"`
 	ID   string `json:"id"`
 	Job  *struct {
-		ID        string    `json:"id"`
-		Status    string    `json:"status"`
-		Attempts  int       `json:"attempts"`
-		UpdatedAt time.Time `json:"updated_at"`
+		ID       string `json:"id"`
+		Status   string `json:"status"`
+		Attempts int    `json:"attempts"`
+		Version  int64  `json:"version"`
 	} `json:"job"`
 }
 
@@ -96,8 +96,8 @@ type liveEvent struct {
 // Events from different goroutines can arrive out of order, and "queued"
 // is often skipped: the relay pushes the ID to Redis before it marks the
 // job queued, and a fast worker claims it in between. So the test does
-// what a client must do: keep an event only if its updated_at is not older
-// than the version it already has.
+// what a client must do: keep an event only if its version is higher than
+// the copy it already has.
 func TestLiveEventsEndToEnd(t *testing.T) {
 	dbURL := testDatabaseURL(t)
 	redisURL := testRedisURL(t)
@@ -127,7 +127,7 @@ func TestLiveEventsEndToEnd(t *testing.T) {
 	id := createJob(t, client, base, alice, "live e2e")
 
 	var statuses []string // as kept by the client's rule
-	var latest time.Time
+	var latest int64
 	for len(statuses) == 0 || statuses[len(statuses)-1] != "completed" {
 		raw := aliceEvents.next(t, 10*time.Second)
 		if raw == "EOF" {
@@ -146,10 +146,10 @@ func TestLiveEventsEndToEnd(t *testing.T) {
 		if e.Type != "changed" || e.Job == nil || e.Job.ID != id {
 			t.Fatalf("unexpected event %s", raw)
 		}
-		if e.Job.UpdatedAt.Before(latest) {
-			continue // older than what the client has: a late arrival
+		if e.Job.Version <= latest {
+			continue // not newer than what the client has: a late arrival
 		}
-		latest = e.Job.UpdatedAt
+		latest = e.Job.Version
 		statuses = append(statuses, e.Job.Status)
 	}
 	got := strings.Join(statuses, " → ")

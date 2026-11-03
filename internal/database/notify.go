@@ -25,7 +25,7 @@ type Notifier interface {
 // jobColumns is every column scanJob reads, in its order. Status-changing
 // statements return them (RETURNING), so the notification carries the job
 // exactly as committed without a second query.
-const jobColumns = `id, user_id, title, status, created_at, updated_at, attempts, max_attempts, next_attempt_at`
+const jobColumns = `id, user_id, title, status, created_at, updated_at, attempts, max_attempts, next_attempt_at, version`
 
 func notifyChanged(ctx context.Context, n Notifier, jobs ...*job.Job) {
 	if n == nil {

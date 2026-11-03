@@ -175,6 +175,20 @@ Result on 3 November 2026, about 23:40 WAT (deploy `2ecafb2` built in 34.9 s; th
 
 The replay showed `processing, 1 attempt` while the first answer had said `pending, 0 attempts`: GoFlow replays the job's current state, not the first response ([ARCHITECTURE.md](ARCHITECTURE.md#idempotent-creation)).
 
+## Live updates live (Task 33)
+
+On 4 November 2026 (deploy `d661403`), with a ticket from `POST /api/v1/events/ticket` and `curl -N` on the stream, `goflow job create flaky:1` from a second terminal produced:
+
+| Time (UTC) | Event | What it shows |
+|---|---|---|
+| 23:28:31.331 | `pending` | Announced by the API after the insert committed |
+| 31.363 | `processing`, attempt 1 | Claimed 32 ms later. No `queued`: the worker claimed it before the relay marked it |
+| 31.366 | `retrying`, next attempt 32.714 | A backoff of 1.35 s, inside the 1–2 s range for attempt 1 |
+| 33.501 | `processing`, attempt 2 | 0.79 s after it was due: the promoter checks every second |
+| 34.512 | `completed` | `flaky` works for 1 s when it succeeds |
+
+From create to `completed`: 3.2 s, every step pushed to the terminal without polling. The used ticket then got `401 {"error":"invalid or expired ticket"}`. Tickets and streams need Redis; nothing else changed in the Render setup.
+
 ## Rolling back
 
 Render keeps previous deploys. In the dashboard: `goflow-api` → **Deploys** → pick the last good one → **Rollback**. A rollback doesn't undo migrations, so a migration must keep working with the code before it (add columns before using them, drop them a release later).

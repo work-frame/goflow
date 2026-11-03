@@ -44,7 +44,7 @@ reconciler, start + hourly    re-sends from PostgreSQL whatever Redis lost      
 
 | Item | Purpose |
 |---|---|
-| `Job` | `id` (32 hex, `crypto/rand`), `title` (1–200 characters), `status`, `created_at`, `updated_at` (UTC, microsecond precision) |
+| `Job` | `id` (32 hex, `crypto/rand`), `title` (1–200 characters), `status`, `created_at`, `updated_at` (UTC, microsecond precision), `attempts`, `max_attempts`, `next_attempt_at`, `version` (1, then +1 per change) |
 | `Status` | `pending`, `queued`, `processing`, `retrying`, `completed`, `dead`; `failed` only on jobs from before retries |
 | `New(title)` | The only way to create a valid job |
 | `ListParams`, `Page`, `Cursor` | One page of jobs, oldest first by `(created_at, id)` |
@@ -99,7 +99,10 @@ jobs (
   max_attempts    INT         NOT NULL DEFAULT 3   -- 1 to 10
   next_attempt_at TIMESTAMPTZ                      -- required while 'retrying'
   last_error      TEXT                             -- up to 1000 characters; not shown to users yet
+  idempotency_key TEXT                             -- 1 to 255 characters; NULL without the header
+  version         BIGINT      NOT NULL DEFAULT 1   -- every UPDATE adds 1
 )
+UNIQUE INDEX (user_id, idempotency_key) WHERE idempotency_key IS NOT NULL
 INDEX (user_id, created_at, id)  -- one user's jobs, oldest first, paginated
 INDEX (status, created_at)       -- status filter; workers in Phase 6
 INDEX (next_attempt_at) WHERE status = 'retrying'  -- the reconciler's overdue retries
@@ -177,7 +180,8 @@ every API instance: SUBSCRIBE goflow:events ─► events.Hub ─► only the ow
 - **Routing by owner, in the hub.** Every API instance subscribes once to one channel. The `Hub` hands each message only to the streams of the job's owner (`user_id` from the Redis envelope, which never reaches the client). This is the same rule as `WHERE user_id = $n` in SQL, applied to events (FAILURES.md, case 35).
 - **A slow client is dropped, not waited for.** Delivery never blocks. A stream more than 64 messages behind is closed; its client reconnects and reloads.
 - **No gap between the snapshot and the stream.** The handler subscribes to the hub, waits until the API's Redis subscription is live, and only then sends `ready`. The client loads its jobs after `ready`, so any change committed after that read arrives as an event. When the Redis subscription drops and comes back, every stream gets `resync`, because messages published in between are gone.
-- **Order isn't guaranteed; `updated_at` decides.** The relay and a worker announce from different goroutines (or processes), so `processing` can arrive before `queued`. A client keeps an event only if its `updated_at` isn't older than its copy. `queued` is often skipped altogether: the relay pushes the ID before it marks the job queued, and a fast worker claims it first.
+- **Order isn't guaranteed; `version` decides.** The relay and a worker announce from different goroutines (or processes), so `processing` can arrive before `queued`. A client keeps an event only if its `version` is higher than its copy's. `queued` is often skipped altogether: the relay pushes the ID before it marks the job queued, and a fast worker claims it first.
+- **Why a version, not `updated_at`.** Every `UPDATE` of a job sets `version = version + 1` in the same statement (migration 0009). PostgreSQL's row lock makes updates of one row take turns, so versions follow commit order exactly. `updated_at` can't: `now()` is the time the transaction *started*, so a transaction that starts first, waits for the row lock and commits second writes the older time on the newer state, and two changes can get the same time. `TestEveryJobUpdateBumpsTheVersion` reads the package's source and fails if any `UPDATE jobs` forgets the version (FAILURES.md, case 36).
 - **Tickets, not tokens, in the URL.** `EventSource` can't send an `Authorization` header. `POST /api/v1/events/ticket` (with the session) returns `gft_` + 32 random bytes; Redis stores its SHA-256 hash for 30 seconds (`SET NX EX`), and the stream redeems it with `GETDEL`, so it works exactly once, even with two requests racing. A ticket in a proxy log is already spent. Our own request log never records query strings.
 - **Long-lived responses.** The server's 10-second read and write timeouts are lifted for each stream with `http.ResponseController`, which reaches the connection through the middleware's `Unwrap` methods. A heartbeat comment every 25 seconds keeps proxies from closing a quiet stream; it's outbound, so it doesn't keep a free Render instance awake. `Shutdown` waits for open connections, so `RegisterOnShutdown(hub.Close)` ends every stream the moment shutdown starts.
 - **Without Redis,** the ticket and stream endpoints answer `503` and nothing else changes.
@@ -330,6 +334,7 @@ Everything runs with the race detector (`./scripts/check.sh`). [FAILURES.md](FAI
 | Server-Sent Events, not WebSocket | Updates only flow from server to browser. SSE is a plain HTTP response (`net/http` only), and browsers reconnect on their own. WebSocket would add a dependency and two-way features nobody uses |
 | Redis Pub/Sub for events, not PostgreSQL `LISTEN/NOTIFY` | Neon drops `LISTEN` registrations whenever the database sleeps (every 5 idle minutes on the free plan). Pub/Sub works whether workers run in the API or in `cmd/worker` |
 | Events are published after commit, in the background, and may be lost | They are hints. The client's snapshot after `ready`, `resync`, and reloading after a reconnect cover every loss; PostgreSQL never depends on them |
+| A per-job `version`, raised by every `UPDATE`, orders a job's changes | Row locks make it follow commit order. Timestamps from `now()` follow transaction start, can tie, and depend on the database's clock |
 | Single-use 30-second tickets for streams | Keeps the 24-hour session token out of URLs, which end up in logs and history |
 | CLI goes through the API | One set of rules; no back door around authentication |
 | Interfaces defined by the code that uses them, only once a second implementation exists | `JobStore` and `Pinger` each have a real and a test implementation |

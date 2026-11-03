@@ -85,7 +85,7 @@ func (s *OutboxStore) Relay(ctx context.Context, limit int, send func(ctx contex
 	// now() from the database's; GREATEST keeps updated_at >= created_at
 	// (a CHECK constraint) even if the two clocks disagree.
 	rows, err = tx.QueryContext(ctx,
-		`UPDATE jobs SET status = 'queued', updated_at = GREATEST(now(), created_at) WHERE id = ANY($1) AND status = 'pending'
+		`UPDATE jobs SET version = version + 1, status = 'queued', updated_at = GREATEST(now(), created_at) WHERE id = ANY($1) AND status = 'pending'
 		 RETURNING `+jobColumns, jobIDs)
 	if err != nil {
 		return 0, fmt.Errorf("database: relay: mark queued: %w", err)
@@ -153,7 +153,7 @@ func (s *OutboxStore) RequeueStale(ctx context.Context, olderThan time.Duration,
 		return 0, err
 	}
 	if _, err := tx.ExecContext(ctx,
-		`UPDATE jobs SET updated_at = GREATEST(now(), created_at),
+		`UPDATE jobs SET version = version + 1, updated_at = GREATEST(now(), created_at),
 		        next_attempt_at = CASE WHEN status = 'retrying' THEN now() ELSE next_attempt_at END
 		 WHERE id = ANY($1) AND status IN ('queued', 'retrying')`, ids); err != nil {
 		return 0, fmt.Errorf("database: requeue stale: touch: %w", err)
