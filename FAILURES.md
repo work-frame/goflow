@@ -481,6 +481,23 @@ Each case was reproduced on a real machine (Arch Linux, Go 1.27, PostgreSQL 17) 
   ```
 - **Why:** case 21 again, on a new path. Every job query filters by owner in SQL, so the REST API can't leak another user's job. Live updates bypass those queries: one Redis channel carries every user's events to every API instance, and the hub is the only place that can tell them apart. Without the lookup, anyone with an account opens a stream and watches every other user's job titles and statuses as they happen. The e2e test is what makes this hold end to end: it checks the routing with two real users, not just the hub in isolation.
 
+## 36. Every change to a job raises its version
+
+- **Safeguard:** every `UPDATE jobs` sets `version = version + 1` in the same statement (migration 0009). Live-update clients keep an event only if its `version` is higher than their copy's.
+- **Removed:** `version = version + 1` from `Claim`'s `UPDATE` (the move to `processing`).
+- **Caught by:** `TestEveryChangeRaisesTheVersion` (the whole lifecycle, step by step), `TestEveryJobUpdateBumpsTheVersion` (reads the package's source: every `UPDATE jobs` must raise the version), `TestReadsReturnTheVersion`, and `TestLiveEventsEndToEnd`.
+- **Observed:**
+  ```text
+  --- FAIL: TestEveryChangeRaisesTheVersion (0.44s)
+      version_test.go:73: after Claim: version 3, want 4
+  --- FAIL: TestEveryJobUpdateBumpsTheVersion (0.00s)
+      version_test.go:112: work.go: an UPDATE of jobs doesn't raise the version:
+          UPDATE jobs SET status = 'processing', attempts = attempts + 1, next_attempt_at = NULL, ...
+  --- FAIL: TestLiveEventsEndToEnd (2.16s)
+      live_test.go:157: alice's view went pending → completed
+  ```
+- **Why:** the end-to-end line is what a user would see. The `processing` event carried the same version as `pending`, so the client took it for a late copy and dropped it: the job seemed to jump from waiting to done. Nothing crashed and the database was right, but the screen lied. A version only orders events if every change raises it, which is why one test reads the source: it fails for a statement written next year, not just the eight that exist today. Timestamps can't replace it: `now()` is when a transaction started, so the transaction that commits second can carry the earlier time.
+
 ## Experiment: the naive dual write loses a job
 
 Not a removed safeguard but the design of Task 22, run live on 2 November 2026 to see the failure Task 23 fixes. `POST /api/v1/jobs` saved the job in PostgreSQL, then pushed its ID to Redis, with nothing tying the two together.
