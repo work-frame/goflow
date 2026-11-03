@@ -287,6 +287,19 @@ A handler is the function that does a job's work (`worker.Handler`). The pool ca
 
 These are a contract, not something the pool enforces. Tests for each job type should check them: a cancelled context makes the handler return, a second run is harmless.
 
+## Dashboard: `internal/web`
+
+Three files embedded with `//go:embed` and served by the API at `/`, `/app.js` and `/style.css`; every other path is still the API's JSON 404. Plain JavaScript, no framework, no build step, nothing loaded from another site.
+
+- **Same origin as the API.** The page calls `/api/v1/...` on the server that served it, so there are no CORS rules to get wrong.
+- **The token lives in `sessionStorage`.** It survives a refresh and is gone when the tab closes. It goes only in the `Authorization` header; the event stream gets a 30-second ticket instead. A `401` from any call logs the page out.
+- **A strict Content-Security-Policy on every file:** `default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'`. Only `/app.js` runs: no inline scripts, no `onclick=` attributes, no `eval`. `fetch` and `EventSource` can reach only this origin, so even a script that got in couldn't send the token elsewhere. Plus `X-Content-Type-Options: nosniff` and `Referrer-Policy: no-referrer`.
+- **Server text is never HTML.** Every element is built with `createElement` and filled with `textContent`. A job titled `<img src=x onerror=alert(1)>` shows as those characters. `TestScriptNeverTurnsTextIntoHTML` fails if `app.js` ever uses `innerHTML` and its relatives, and `TestPageHasNoInlineCode` keeps the HTML free of anything the policy would have to allow (FAILURES.md, case 37).
+- **Keeping its copy right.** The page holds jobs in a `Map`. An event replaces a job only if its `version` is higher. After `ready`, `resync` or any reconnect it reloads every page of `GET /api/v1/jobs`: jobs it had before the reload that the database no longer has are removed, and jobs that arrived by event during the reload are kept. Deleted IDs are remembered, so a late `changed` event can't bring one back.
+- **Reconnecting.** `EventSource` retries on its own, but with the same, already used ticket, so the page closes it on any error, gets a new ticket and reconnects, waiting 1 s, then doubling to 30 s. Without Redis (`503` for the ticket) it shows the list from the database and says live updates are unavailable.
+
+Checked in a headless Chromium against a local API with PostgreSQL, Redis and 2 workers: login (and a wrong password), four jobs reaching `completed`/`dead` live, retry and delete, a refresh keeping the session, and an API restart (the page showed `offline`, came back `live`, and showed a job created while it was away). The policy reported no violations.
+
 ## CLI: `internal/cli`, `internal/client`, `cmd/goflow`
 
 - `goflow job create | list [--status] | get | delete | retry` sends HTTP requests to `GOFLOW_API_URL` (default `http://localhost:8080`).
@@ -335,6 +348,7 @@ Everything runs with the race detector (`./scripts/check.sh`). [FAILURES.md](FAI
 | Redis Pub/Sub for events, not PostgreSQL `LISTEN/NOTIFY` | Neon drops `LISTEN` registrations whenever the database sleeps (every 5 idle minutes on the free plan). Pub/Sub works whether workers run in the API or in `cmd/worker` |
 | Events are published after commit, in the background, and may be lost | They are hints. The client's snapshot after `ready`, `resync`, and reloading after a reconnect cover every loss; PostgreSQL never depends on them |
 | A per-job `version`, raised by every `UPDATE`, orders a job's changes | Row locks make it follow commit order. Timestamps from `now()` follow transaction start, can tie, and depend on the database's clock |
+| Dashboard: plain JavaScript embedded in the API, token in `sessionStorage`, strict CSP | No build step or third-party code to trust; same origin; the token survives a refresh but not the tab. The policy and text-only rendering stand between an injected title and the token |
 | Single-use 30-second tickets for streams | Keeps the 24-hour session token out of URLs, which end up in logs and history |
 | CLI goes through the API | One set of rules; no back door around authentication |
 | Interfaces defined by the code that uses them, only once a second implementation exists | `JobStore` and `Pinger` each have a real and a test implementation |
@@ -354,7 +368,8 @@ Everything runs with the race detector (`./scripts/check.sh`). [FAILURES.md](FAI
 - `last_error` is stored but not shown to users yet: `goflow job get` on a dead job doesn't say why it died.
 - Idempotency keys never expire on their own; they're deleted with their job.
 - A session ending (logout, password change) doesn't close streams it opened: they run until they drop or the server restarts. A ticket can't be issued without a live session, and a stream only carries its owner's job changes.
-- No dashboard yet: live updates can be watched with `curl -N` (Task 34 adds the page).
+- The dashboard keeps the session token where its own script can read it (`sessionStorage`). The policy and text-only rendering make injected script very unlikely to run, but if one ever did, it could act as the user in that tab until the token expires. An `HttpOnly` cookie would hide the token from scripts, at the cost of CSRF protection on every request (considered for a later phase).
+- The dashboard has no sign-up form: accounts are created with registration open, as in [DEPLOYMENT.md](DEPLOYMENT.md).
 - Plain `redis://` is accepted for single-label private-network names (Render's internal Key Value host): that traffic is unencrypted inside the provider's network.
 - No rate limit on login or password change (Phase 9). Closed registration limits who has an account meanwhile.
 - After the bcrypt cost changes, response time can tell old accounts from unknown emails until each user logs in once.

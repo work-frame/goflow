@@ -208,3 +208,17 @@ func TestDeleteJob(t *testing.T) {
 		t.Errorf("second delete: status = %d, want %d", rec.Code, http.StatusNotFound)
 	}
 }
+
+// The dashboard sits at "/" next to the API, with its security headers.
+func TestDashboardIsServedAtTheRoot(t *testing.T) {
+	rec := do(t, newRouter(), http.MethodGet, "/", "")
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "<title>GoFlow</title>") {
+		t.Fatalf("GET /: status %d, body starts %.60q", rec.Code, rec.Body.String())
+	}
+	if rec.Header().Get("Content-Security-Policy") == "" {
+		t.Error("GET /: no Content-Security-Policy")
+	}
+	if rec := do(t, newRouter(), http.MethodGet, "/app.js/x", ""); rec.Code != http.StatusNotFound || !strings.Contains(rec.Body.String(), `"error"`) {
+		t.Errorf("GET /app.js/x: status %d, body %s; want the API's JSON 404", rec.Code, rec.Body)
+	}
+}
