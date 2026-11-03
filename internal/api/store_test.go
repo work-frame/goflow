@@ -45,6 +45,17 @@ func (s memStore) List(_ context.Context, userID string, p job.ListParams) (job.
 	return job.Paginate(mine, p)
 }
 
+func (s memStore) GetByIdempotencyKey(_ context.Context, userID, key string) (*job.Job, error) {
+	return s.m.GetByIdempotencyKey(userID, key)
+}
+
+func (s memStore) Rerun(ctx context.Context, userID, id string) (*job.Job, error) {
+	if _, err := s.Get(ctx, userID, id); err != nil {
+		return nil, err
+	}
+	return s.m.Rerun(id)
+}
+
 // errStore fails every call with the same error.
 type errStore struct {
 	err error
@@ -56,6 +67,10 @@ func (s errStore) List(context.Context, string, job.ListParams) (job.Page, error
 	return job.Page{}, s.err
 }
 func (s errStore) Delete(context.Context, string, string) error { return s.err }
+func (s errStore) GetByIdempotencyKey(context.Context, string, string) (*job.Job, error) {
+	return nil, s.err
+}
+func (s errStore) Rerun(context.Context, string, string) (*job.Job, error) { return nil, s.err }
 
 // ctxSpyStore records what context the handler gave the store.
 // Embedding JobStore supplies the methods it doesn't override.

@@ -31,6 +31,8 @@ func (f *fakeJobs) Get(_ context.Context, id string) (*job.Job, error) { return 
 
 func (f *fakeJobs) Delete(_ context.Context, id string) error { return f.m.Delete(id) }
 
+func (f *fakeJobs) Retry(_ context.Context, id string) (*job.Job, error) { return f.m.Rerun(id) }
+
 func (f *fakeJobs) List(_ context.Context, status job.Status, cursor string) ([]*job.Job, string, error) {
 	p := job.ListParams{Status: status, Limit: f.pageSize}
 	if cursor != "" {
@@ -57,6 +59,7 @@ type errJobs struct{ err error }
 func (e errJobs) Create(context.Context, string) (*job.Job, error) { return nil, e.err }
 func (e errJobs) Get(context.Context, string) (*job.Job, error)    { return nil, e.err }
 func (e errJobs) Delete(context.Context, string) error             { return e.err }
+func (e errJobs) Retry(context.Context, string) (*job.Job, error)  { return nil, e.err }
 func (e errJobs) List(context.Context, job.Status, string) ([]*job.Job, string, error) {
 	return nil, "", e.err
 }
@@ -209,5 +212,30 @@ func TestUsageErrors(t *testing.T) {
 				t.Errorf("stderr missing usage text:\n%s", errOut)
 			}
 		})
+	}
+}
+
+func TestRetry(t *testing.T) {
+	f := newFake()
+	j, _ := job.New("fail")
+	j.Status, j.Attempts = job.StatusDead, 3
+	if err := f.m.Add(j); err != nil {
+		t.Fatal(err)
+	}
+
+	code, out, errOut := run(t, f, "job", "retry", j.ID)
+	if code != exitOK {
+		t.Fatalf("exit %d, stderr %q", code, errOut)
+	}
+	if want := j.ID + " is pending again (attempts reset to 0 of 3)\n"; out != want {
+		t.Errorf("stdout = %q, want %q", out, want)
+	}
+
+	code, _, errOut = run(t, f, "job", "retry", j.ID)
+	if code != exitError || !strings.Contains(errOut, "dead or failed") {
+		t.Errorf("second retry: exit %d, stderr %q; want an error about dead jobs", code, errOut)
+	}
+	if code, _, _ := run(t, f, "job", "retry"); code != exitUsage {
+		t.Errorf("retry without an ID: exit %d, want %d", code, exitUsage)
 	}
 }

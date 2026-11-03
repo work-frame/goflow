@@ -140,6 +140,30 @@ goflow job list     # run again every 10-20 s and watch STATUS and TRIES
 
 Expected within a few minutes: `flaky:2` → `retrying` 1/3, `retrying` 2/3, `completed` 3/3; `fail` → `dead` 3/3; `fail:permanent` → `dead` 1/3 at once; `hang` → `retrying` after 15 s each time, then `dead` 3/3. In the logs: `worker: job failed, will retry`, `promoter: retries due, queued again`, `worker: job dead`. A `promoter: can't reach Redis` with a script error would mean Key Value refuses Lua; overdue retries would then come back through the reconciler instead.
 
+Result on 3 November 2026 (checked at 23:12 WAT):
+
+| Job | Status | TRIES |
+|---|---|---|
+| `flaky:2` | `completed` | 3/3 |
+| `fail` | `dead` | 3/3 |
+| `fail:permanent` | `dead` | 1/3 |
+| `hang` | `dead` | 3/3 |
+
+Every job ended where it should. Two things this proved on the hosted setup: Render Key Value runs the promoter's Lua script (`flaky:2` and `fail` came back from the delayed set twice each), and the 15-second deadline stops a hung job on 0.1 CPU as it does locally (FAILURES.md, case 33).
+
+## Re-runs and idempotent create live (Task 31)
+
+After the deploy that applies migration 8 (`migrations applied versions=[8]` in the logs):
+
+```bash
+goflow job list --status dead                # the dead jobs from Task 30
+goflow job retry <id of fail:permanent>      # prints: <id> is pending again (attempts reset to 0 of 3)
+goflow job list --status dead                # it's back, dead 1/3: a worker ran it again
+goflow job retry <id of a completed job>     # refused: only a dead or failed job can be retried (HTTP 409)
+```
+
+The idempotency key needs `curl` with the `gf` function from the [README](README.md#examples): send the same create twice with one key, and the second answer is `200` with the same ID.
+
 ## Rolling back
 
 Render keeps previous deploys. In the dashboard: `goflow-api` → **Deploys** → pick the last good one → **Rollback**. A rollback doesn't undo migrations, so a migration must keep working with the code before it (add columns before using them, drop them a release later).

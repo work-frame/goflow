@@ -12,7 +12,7 @@ I'm building it to learn production Go: the standard library first, then HTTP, P
 - **Phase 4 (done):** accounts, login sessions, per-user jobs, `goflow login`, and a first deployment on Render and Neon ([DEPLOYMENT.md](DEPLOYMENT.md))
 - **Phase 5 (done):** Redis job queue. A new job and an outbox row are saved in one transaction; with `GOFLOW_REDIS_URL` set, a background relay moves the ID to a Redis list and marks the job `queued`. A single worker (`cmd/worker`) takes IDs off the queue and runs jobs to `completed`; the work itself is a placeholder until real job types arrive. Runs locally; not deployed yet.
 - **Phase 6 (done):** a pool of concurrent workers (`GOFLOW_WORKERS`) with graceful shutdown. On Render, the API runs the pool itself against a free Key Value queue ([DEPLOYMENT.md](DEPLOYMENT.md)). Jobs are created, queued and completed end to end in production; the work is still a 5-second placeholder.
-- **Phase 7 (in progress):** failed jobs retry with exponential backoff and jitter, up to 3 attempts, then become `dead`; permanent errors skip the retries. Each attempt has a 15-second limit. Next: a dead-letter queue and idempotent job creation.
+- **Phase 7 (in progress):** failed jobs retry with exponential backoff and jitter, up to 3 attempts, then become `dead`; permanent errors skip the retries. Each attempt has a 15-second limit. A dead job can be re-run with fresh attempts (`goflow job retry <id>`), and an `Idempotency-Key` header makes a repeated create return the first job instead of a second one.
 
 ## Requirements
 
@@ -60,10 +60,11 @@ The server stops on `Ctrl+C` or `SIGTERM`, finishing in-flight requests first (u
 | `POST` | `/api/v1/auth/logout-all` | `200 {"sessions_ended":n}`, every device including this one (needs token) | `401` |
 | `POST` | `/api/v1/auth/password` | `200 {"sessions_ended":n}`, ends your other sessions (needs token) | `400`, `401`, `403` wrong current password |
 | `GET` | `/api/v1/auth/me` | `200` + user (needs token) | `401` |
-| `POST` | `/api/v1/jobs` | `201` + job, `Location` header (needs token) | `400`, `401`, `413`, `415` |
+| `POST` | `/api/v1/jobs` | `201` + job, `Location` header (needs token). With a repeated `Idempotency-Key`: `200` + the first job and `Idempotent-Replayed: true` | `400`, `401`, `413`, `415`, `422` key reused with a different title |
 | `GET` | `/api/v1/jobs` | `200 {"jobs":[...]}`, your jobs only (needs token) | `400` invalid `status` filter, `401` |
 | `GET` | `/api/v1/jobs/{id}` | `200` + job (needs token) | `401`, `404` |
 | `DELETE` | `/api/v1/jobs/{id}` | `204`, no body (needs token) | `401`, `404` |
+| `POST` | `/api/v1/jobs/{id}/retry` | `200` + job, back to `pending` with 0 attempts (needs token) | `401`, `404`, `409` job isn't `dead` or `failed` |
 
 `GET /api/v1/jobs` returns jobs oldest first, one page at a time:
 
@@ -113,6 +114,10 @@ gf $API/jobs
 gf "$API/jobs?status=pending"
 gf $API/jobs/<id>
 gf -X DELETE $API/jobs/<id>
+gf -X POST $API/jobs/<id>/retry   # re-run a dead job
+# Safe to send twice: the second answer is the first job, not a new one.
+K=$(uuidgen)
+gf -X POST $API/jobs -H 'Content-Type: application/json' -H "Idempotency-Key: $K" -d '{"title":"send invoice 42"}'
 gf -X POST $API/auth/logout     # ends the session at once
 ```
 
@@ -122,6 +127,7 @@ gf -X POST $API/auth/logout     # ends the session at once
 - The body must be a single JSON object, at most 1 MiB.
 - Unknown fields are rejected, not ignored.
 - `title` is required, at most 200 characters.
+- `Idempotency-Key` (optional, on `POST /api/v1/jobs`) is 1 to 255 visible ASCII characters, sent once; a UUID works. Use a new key for each new job and the same key when you send the same request again after a timeout. A key belongs to your account and lasts as long as the job it created: after you delete that job, the key can create a new one.
 - `email` is required and stored lowercased, so `Dan@x.com` and `dan@x.com` are one account.
 - `password` must be at least 12 characters and at most 72 bytes. It is stored only as a bcrypt hash and never returned.
 - Send the login token as `Authorization: Bearer <token>`. It lasts 24 hours, and logout ends it immediately. The server stores only its SHA-256 hash.
@@ -152,6 +158,7 @@ goflow job list                          # every job, oldest first, with TRIES (
 goflow job list --status pending         # filter by status
 goflow job get <id>                      # one job as JSON
 goflow job delete <id>                   # remove a job
+goflow job retry <id>                    # re-run a dead job with fresh attempts
 goflow logout                            # ends the session on the server and deletes the saved login
 ```
 

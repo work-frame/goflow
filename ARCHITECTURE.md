@@ -49,7 +49,7 @@ internal/credentials                                                     ├─�
 
 - **`Open`** creates a `database/sql` pool using the `pgx` driver (10 open, 10 idle, 5-minute idle limit, 30-minute lifetime) and pings within 5 seconds.
 - **`Migrate`** applies the SQL files embedded from `migrations/`, each in its own transaction together with its row in `schema_migrations`, while holding a PostgreSQL advisory lock. Several API instances can start at once safely.
-- **`JobStore`** implements `Add`, `Get`, `List` and `Delete`, always for one owner: every query has `user_id = $n`. Callers only ever see `job` errors: a duplicate key becomes `ErrDuplicateID`, and a missing row (or someone else's) becomes `ErrNotFound`.
+- **`JobStore`** implements `Add`, `Get`, `GetByIdempotencyKey`, `List`, `Delete` and `Rerun`, always for one owner: every query has `user_id = $n`. Callers only ever see `job` errors: a unique violation becomes `ErrDuplicateKey` when it names the `jobs_user_idempotency_key` index and `ErrDuplicateID` otherwise, a missing row (or someone else's) becomes `ErrNotFound`, and a re-run of a job that isn't dead becomes `ErrNotRerunnable`.
 - **`UserStore`** creates users (a duplicate on `users_email_key` becomes `auth.ErrEmailTaken`), finds them by email, and changes a password hash. `ChangePassword` updates the hash and deletes the user's other sessions in one transaction.
 - **`SessionStore`** creates, looks up (joined with the user, `expires_at > now()` on the database clock), deletes one, deletes all for a user, and deletes expired sessions.
 
@@ -129,8 +129,19 @@ Every storage call gets `context.WithTimeout(r.Context(), 3s)`: it stops when th
 | `GET` | `/api/v1/jobs?status=&limit=&cursor=` | `200` + `{"jobs": [...], "next_cursor": "..."}` |
 | `GET` | `/api/v1/jobs/{id}` | `200` + job |
 | `DELETE` | `/api/v1/jobs/{id}` | `204` |
+| `POST` | `/api/v1/jobs/{id}/retry` | `200` + job (`pending`, 0 attempts); `409` unless `dead` or `failed` |
 
 Listing uses **keyset pagination**: `WHERE (created_at, id) > (cursor)`, `LIMIT limit + 1`. The extra row shows whether another page exists. Cursors are opaque base64url strings, validated on every request.
+
+### Idempotent creation
+
+A client that times out doesn't know whether its job was created. With an `Idempotency-Key` header it can simply send the request again:
+
+1. The handler validates the key (1–255 visible ASCII characters, one header) and stores it on the job in the same `INSERT`.
+2. A unique index on `(user_id, idempotency_key)` (partial: `WHERE idempotency_key IS NOT NULL`) lets only one job per key and owner exist. Two requests at the same moment both `INSERT`; the second waits for the first transaction and then fails with a unique violation naming that index. `JobStore.Add` turns that into `job.ErrDuplicateKey`.
+3. The handler then reads the existing job by key and answers `200` with it and `Idempotent-Replayed: true`. Nothing new is stored or queued. A different title with the same key is `422`.
+
+Checking "does this key exist?" in Go before inserting would let two concurrent requests both pass the check. The database is the only place that sees both requests (`TestIdempotentCreateUnderConcurrency`, 20 requests, one job). Names and status codes follow the IETF draft [`draft-ietf-httpapi-idempotency-key-header`](https://datatracker.ietf.org/doc/html/draft-ietf-httpapi-idempotency-key-header). Keys don't expire on their own; they go with their job.
 
 ### Errors
 
@@ -210,11 +221,12 @@ Ack       LREM goflow:jobs:processing
 - **Attempts are counted at claim time,** so a job that crashes its worker also uses up attempts and can't loop forever. After `max_attempts` the job is `dead`.
 - **The promoter** moves due IDs from the delayed set to `pending` every second, with a Lua script so the read, remove and push happen as one step and two promoters never deliver an ID twice. It only talks to Redis, so it doesn't wake the database.
 - **Each attempt has a deadline** (`Pool.JobTimeout`, 15 s, below the 20 s drain). The handler's context ends then; the attempt fails with `timed out after 15s` and is retried like any failure. Two endings are kept apart: the pool's context ending (shutdown) records nothing, the job's own deadline is a failure. A handler that ignores its context can't be stopped: Go has no way to kill a goroutine, so the worker waits for it, and a handler that then *succeeds* late counts as completed, because retrying it would repeat work that was done. Handlers must pass `ctx` to everything that can block.
+- **Dead jobs can be re-run by their owner.** `POST /api/v1/jobs/{id}/retry` (`goflow job retry`) runs one `UPDATE ... WHERE id AND user_id AND status IN ('dead','failed')` and inserts a new outbox row, in one transaction: the job is `pending` with 0 attempts and no `last_error`, and travels like a new job. The status in the `WHERE` clause makes a double click safe: the second request waits for the row lock, re-checks, finds `pending`, and gets `409`. There's no separate dead-letter list in Redis; `GET /api/v1/jobs?status=dead` is the dead-letter queue, kept in the system of record.
 - **A retry may be claimed a moment early.** `Claim` accepts `retrying` without checking `next_attempt_at`: Redis decides when the ID arrives, and refusing it over a second of clock difference would drop it.
 
 ## CLI: `internal/cli`, `internal/client`, `cmd/goflow`
 
-- `goflow job create | list [--status] | get | delete` sends HTTP requests to `GOFLOW_API_URL` (default `http://localhost:8080`).
+- `goflow job create | list [--status] | get | delete | retry` sends HTTP requests to `GOFLOW_API_URL` (default `http://localhost:8080`).
 - `goflow login` reads the password from the terminal without echo (`golang.org/x/term`) and saves `{api_url, token, expires_at}` in `~/.config/goflow/credentials`: written to a temporary file with mode `0600`, then renamed into place, inside a `0700` directory. The CLI refuses a file that group or others can read, and sends the token only to the API that issued it and only until it expires. `GOFLOW_TOKEN` overrides the file for scripts. `goflow logout` ends the session on the server, then deletes the file.
 - Each command has a 90-second deadline (long enough for a sleeping free server to wake), and `Ctrl+C` cancels the request in flight.
 - `list` follows `next_cursor` until the last page.
@@ -259,7 +271,7 @@ Everything runs with the race detector (`./scripts/check.sh`). [FAILURES.md](FAI
 
 ## Known limitations
 
-- The work itself is a placeholder; real job types, retries and timeouts come in Phases 6–7.
+- The work itself is a placeholder (`worker.Demo` picks a behaviour from the title); real job types with their own payloads come later.
 - One worker process at a time (see [The worker pool](#the-worker-pool)); not safe with several. It isn't deployed on Render yet.
 - Jobs reach Redis at least once; a duplicate ID is possible after a failed commit. Workers must be idempotent (Phase 6–7).
 - Plain `redis://` is accepted for single-label private-network names (Render's internal Key Value host): that traffic is unencrypted inside the provider's network.

@@ -34,6 +34,7 @@ const usage = `Usage:
   goflow job list [--status <status>]
   goflow job get <id>
   goflow job delete <id>
+  goflow job retry <id>      re-run a dead job with fresh attempts
 
 The CLI talks to a running GoFlow API. Set GOFLOW_API_URL (default http://localhost:8080).
 Log in once with "goflow login"; the session is saved in ~/.config/goflow/credentials.
@@ -46,6 +47,7 @@ type Jobs interface {
 	Get(ctx context.Context, id string) (*job.Job, error)
 	List(ctx context.Context, status job.Status, cursor string) ([]*job.Job, string, error)
 	Delete(ctx context.Context, id string) error
+	Retry(ctx context.Context, id string) (*job.Job, error)
 }
 
 // usageError marks a mistake in how the command was called,
@@ -76,6 +78,8 @@ func Run(ctx context.Context, args []string, jobs Jobs, stdout, stderr io.Writer
 		err = runGet(ctx, jobs, rest, stdout)
 	case "delete":
 		err = runDelete(ctx, jobs, rest, stdout)
+	case "retry":
+		err = runRetry(ctx, jobs, rest, stdout)
 	default:
 		err = usageError{fmt.Sprintf("unknown command %q", cmd)}
 	}
@@ -174,5 +178,18 @@ func runDelete(ctx context.Context, jobs Jobs, args []string, stdout io.Writer) 
 		return fmt.Errorf("delete %s: %w", id, err)
 	}
 	fmt.Fprintf(stdout, "deleted %s\n", id)
+	return nil
+}
+
+func runRetry(ctx context.Context, jobs Jobs, args []string, stdout io.Writer) error {
+	if len(args) != 1 {
+		return usageError{"retry: expected exactly one job ID"}
+	}
+
+	j, err := jobs.Retry(ctx, args[0])
+	if err != nil {
+		return fmt.Errorf("retry %s: %w", args[0], err)
+	}
+	fmt.Fprintf(stdout, "%s is %s again (attempts reset to %d of %d)\n", j.ID, j.Status, j.Attempts, j.MaxAttempts)
 	return nil
 }
