@@ -70,6 +70,9 @@ type Pool struct {
 	// is told to stop. Keep it below the host's shutdown grace period, or the
 	// host kills the process first and nothing gets recorded.
 	DrainTimeout time.Duration
+	// RetryWait is the first wait after a failed startup recovery (Redis or
+	// the database not reachable yet). It doubles up to 30 s. Zero means 1 s.
+	RetryWait time.Duration
 }
 
 // Run recovers what a previous run left behind, starts the workers, and
@@ -88,8 +91,25 @@ func (p *Pool) Run(ctx context.Context) error {
 	if p.Workers < 1 {
 		return fmt.Errorf("worker: pool needs at least 1 worker, got %d", p.Workers)
 	}
-	if err := p.recoverAtStartup(ctx); err != nil {
-		return err
+	// No worker starts before recovery has succeeded: ResetProcessing must
+	// finish before anyone claims. If Redis or the database isn't reachable
+	// yet (a fresh deploy can start before its Key Value is ready), keep
+	// trying instead of giving up; jobs wait safely meanwhile.
+	wait := p.RetryWait
+	if wait <= 0 {
+		wait = time.Second
+	}
+	for {
+		err := p.recoverAtStartup(ctx)
+		if err == nil {
+			break
+		}
+		if ctx.Err() != nil {
+			return nil // stopped before starting: nothing to drain
+		}
+		p.Logger.Warn("worker pool: startup recovery failed, retrying", "err", err, "retry_in", wait)
+		sleep(ctx, wait)
+		wait = min(wait*2, 30*time.Second)
 	}
 
 	// WithoutCancel keeps ctx's values but not its cancellation: SIGTERM

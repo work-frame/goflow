@@ -348,3 +348,66 @@ func TestPoolNeedsAWorker(t *testing.T) {
 		t.Fatal("Run with 0 workers succeeded, want an error")
 	}
 }
+
+// flakyQueue fails Recover until up is set, like a Redis that isn't
+// reachable yet when the process starts.
+type flakyQueue struct {
+	*memQueue
+	mu       sync.Mutex
+	up       bool
+	attempts int
+}
+
+func (q *flakyQueue) Recover(ctx context.Context) (int, error) {
+	q.mu.Lock()
+	q.attempts++
+	up := q.up
+	q.mu.Unlock()
+	if !up {
+		return 0, errors.New("dial tcp: lookup red-abc123: no such host")
+	}
+	return q.memQueue.Recover(ctx)
+}
+
+func (q *flakyQueue) state() (attempts int, up bool) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.attempts, q.up
+}
+
+// A pool that starts while Redis is unreachable keeps retrying its startup
+// recovery, runs nothing meanwhile, and starts working once Redis is back.
+func TestPoolWaitsForRedisAtStartup(t *testing.T) {
+	q := &flakyQueue{memQueue: &memQueue{pending: []string{"waiting"}}}
+	s, c := newMemStore("waiting"), &counter{}
+	p := newPool(nil, s, 2, c.handle)
+	p.Queue = q
+	p.RetryWait = time.Millisecond
+	start(t, p)
+
+	eventually(t, "a few failed recoveries", func() bool { n, _ := q.state(); return n >= 3 })
+	if c.count("waiting") != 0 {
+		t.Fatal("a job ran before startup recovery succeeded")
+	}
+
+	q.mu.Lock()
+	q.up = true
+	q.mu.Unlock()
+	eventually(t, "the waiting job completed once Redis was up", func() bool { return s.get("waiting") == "completed" })
+}
+
+// Stopping while still waiting for Redis returns promptly and cleanly.
+func TestPoolStopsWhileWaitingForRedis(t *testing.T) {
+	q := &flakyQueue{memQueue: &memQueue{}}
+	p := newPool(nil, newMemStore(), 1, (&counter{}).handle)
+	p.Queue = q
+	p.RetryWait = time.Hour
+	stop := start(t, p)
+
+	eventually(t, "the first failed recovery", func() bool { n, _ := q.state(); return n >= 1 })
+	began := time.Now()
+	stop()
+	if took := time.Since(began); took > time.Second {
+		t.Errorf("stop took %v while waiting for Redis, want well under 1s", took)
+	}
+}

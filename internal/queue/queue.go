@@ -45,6 +45,25 @@ type Queue struct {
 // the URL nor go-redis's parse error, which may quote parts of it, ever
 // goes into the returned error.
 func Open(ctx context.Context, rawURL string) (*Queue, error) {
+	q, err := New(rawURL)
+	if err != nil {
+		return nil, err
+	}
+
+	pingCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if err := q.PingContext(pingCtx); err != nil {
+		q.Close()
+		return nil, fmt.Errorf("queue: ping: %w", err)
+	}
+	return q, nil
+}
+
+// New returns a Queue for the Redis server at rawURL without connecting:
+// go-redis dials on the first command. Use it when Redis may not be up yet
+// and the caller retries on its own (the API's relay and workers do). Like
+// Open, it never puts the URL or go-redis's parse error into its error.
+func New(rawURL string) (*Queue, error) {
 	opts, err := redis.ParseURL(rawURL)
 	if err != nil {
 		return nil, errors.New("queue: GOFLOW_REDIS_URL is not a valid redis:// or rediss:// URL")
@@ -54,16 +73,7 @@ func Open(ctx context.Context, rawURL string) (*Queue, error) {
 	opts.DialTimeout = 2 * time.Second
 	opts.ReadTimeout = 2 * time.Second
 	opts.WriteTimeout = 2 * time.Second
-
-	q := &Queue{rdb: redis.NewClient(opts), key: PendingKey, processing: ProcessingKey}
-
-	pingCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	if err := q.PingContext(pingCtx); err != nil {
-		q.Close()
-		return nil, fmt.Errorf("queue: ping: %w", err)
-	}
-	return q, nil
+	return &Queue{rdb: redis.NewClient(opts), key: PendingKey, processing: ProcessingKey}, nil
 }
 
 // Enqueue adds job IDs to the pending list in one command, keeping their
