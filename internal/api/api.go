@@ -28,6 +28,10 @@ type JobStore interface {
 	Get(ctx context.Context, userID, id string) (*job.Job, error)
 	List(ctx context.Context, userID string, p job.ListParams) (job.Page, error)
 	Delete(ctx context.Context, userID, id string) error
+	// GetByIdempotencyKey finds the job userID created with key.
+	GetByIdempotencyKey(ctx context.Context, userID, key string) (*job.Job, error)
+	// Rerun puts a dead or failed job back to pending with fresh attempts.
+	Rerun(ctx context.Context, userID, id string) (*job.Job, error)
 }
 
 // Pinger reports whether a dependency is reachable. *sql.DB satisfies it.
@@ -86,6 +90,7 @@ func NewRouter(d Deps) http.Handler {
 	mux.HandleFunc("GET /api/v1/jobs", h.requireSession(h.listJobs))
 	mux.HandleFunc("GET /api/v1/jobs/{id}", h.requireSession(h.getJob))
 	mux.HandleFunc("DELETE /api/v1/jobs/{id}", h.requireSession(h.deleteJob))
+	mux.HandleFunc("POST /api/v1/jobs/{id}/retry", h.requireSession(h.retryJob))
 
 	var handler http.Handler = mux
 	handler = jsonMuxErrors(handler)
@@ -165,7 +170,41 @@ type createJobRequest struct {
 	Title string `json:"title"`
 }
 
+// Idempotency-Key: a client sends a unique value with a create, and sends
+// the same value again if it never saw the answer (a timeout, a dropped
+// connection). The second request returns the first job instead of making
+// another. Names and status codes follow the IETF draft
+// draft-ietf-httpapi-idempotency-key-header.
+const (
+	idempotencyKeyHeader = "Idempotency-Key"
+	replayedHeader       = "Idempotent-Replayed"
+)
+
+// idempotencyKey returns the request's key, "" if it has none, or an error
+// if the header is there but unusable.
+func idempotencyKey(r *http.Request) (string, error) {
+	values := r.Header.Values(idempotencyKeyHeader)
+	switch len(values) {
+	case 0:
+		return "", nil
+	case 1:
+		if err := job.ValidateIdempotencyKey(values[0]); err != nil {
+			return "", err
+		}
+		return values[0], nil
+	default:
+		return "", errors.New("send one Idempotency-Key header, not several")
+	}
+}
+
 func (h *handler) createJob(w http.ResponseWriter, r *http.Request) {
+	key, err := idempotencyKey(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest,
+			fmt.Sprintf("Idempotency-Key must be 1 to %d visible ASCII characters, sent once", job.MaxIdempotencyKeyLength))
+		return
+	}
+
 	var req createJobRequest
 	if err := decodeJSON(w, r, &req); err != nil {
 		writeRequestError(w, err)
@@ -191,9 +230,18 @@ func (h *handler) createJob(w http.ResponseWriter, r *http.Request) {
 
 	// The owner always comes from the session, never from the request body.
 	j.UserID = callerID(r)
+	j.IdempotencyKey = key
 	// One transaction: the job and its outbox row. Redis is not involved,
 	// so a Redis outage can't fail this request or lose the job.
-	if err := h.store.Add(ctx, j); err != nil {
+	err = h.store.Add(ctx, j)
+	if errors.Is(err, job.ErrDuplicateKey) {
+		// PostgreSQL's unique index decided: an earlier request with this
+		// key won. Never "check first, then insert" in Go: two requests
+		// would both pass the check (FAILURES.md, case 34).
+		h.replayCreate(ctx, w, r, j)
+		return
+	}
+	if err != nil {
 		h.storeError(w, r, err)
 		return
 	}
@@ -206,6 +254,32 @@ func (h *handler) createJob(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Location", "/api/v1/jobs/"+j.ID)
 	writeJSON(w, http.StatusCreated, j)
+}
+
+// replayCreate answers a create whose Idempotency-Key was already used by
+// the same user: the first job, unchanged, with 200 instead of 201 and
+// Idempotent-Replayed: true. Nothing new is stored or queued.
+func (h *handler) replayCreate(ctx context.Context, w http.ResponseWriter, r *http.Request, req *job.Job) {
+	first, err := h.store.GetByIdempotencyKey(ctx, req.UserID, req.IdempotencyKey)
+	if errors.Is(err, job.ErrNotFound) {
+		// The first job was deleted between our INSERT failing and this read.
+		writeError(w, http.StatusConflict, "the job for this Idempotency-Key was just deleted; try again")
+		return
+	}
+	if err != nil {
+		h.storeError(w, r, err)
+		return
+	}
+	// Same key, different request: almost always a client bug (a key
+	// reused for new work). Silently returning the old job would hide it.
+	if first.Title != req.Title {
+		writeError(w, http.StatusUnprocessableEntity, "this Idempotency-Key was already used with a different title")
+		return
+	}
+
+	w.Header().Set("Location", "/api/v1/jobs/"+first.ID)
+	w.Header().Set(replayedHeader, "true")
+	writeJSON(w, http.StatusOK, first)
 }
 
 type listJobsResponse struct {
@@ -285,4 +359,28 @@ func (h *handler) deleteJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// retryJob re-runs one of the caller's dead jobs: attempts back to 0,
+// status pending, and through the outbox to the queue again.
+func (h *handler) retryJob(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := dbContext(r)
+	defer cancel()
+
+	j, err := h.store.Rerun(ctx, callerID(r), r.PathValue("id"))
+	switch {
+	case errors.Is(err, job.ErrNotFound):
+		writeError(w, http.StatusNotFound, "job not found")
+		return
+	case errors.Is(err, job.ErrNotRerunnable):
+		writeError(w, http.StatusConflict, "only a dead or failed job can be retried")
+		return
+	case err != nil:
+		h.storeError(w, r, err)
+		return
+	}
+	if h.relay != nil {
+		h.relay.Wake()
+	}
+	writeJSON(w, http.StatusOK, j)
 }
