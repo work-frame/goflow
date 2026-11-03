@@ -50,8 +50,9 @@ type Queue interface {
 
 // Store is what the pool needs from PostgreSQL. *database.WorkStore satisfies it.
 type Store interface {
-	// Claim returns the attempt number (0: not won, don't run) and the limit.
-	Claim(ctx context.Context, id string) (attempt, maxAttempts int, err error)
+	// Claim returns the attempt number (0: not won, don't run), the limit
+	// and the job's title.
+	Claim(ctx context.Context, id string) (attempt, maxAttempts int, title string, err error)
 	Complete(ctx context.Context, id string) error
 	// Retry records a retry due after delay and returns when it is due.
 	Retry(ctx context.Context, id string, delay time.Duration, lastError string) (time.Time, error)
@@ -60,8 +61,19 @@ type Store interface {
 	ResetProcessing(ctx context.Context) (int64, error)
 }
 
-// Handler does the work for one job. It must return when ctx is cancelled.
-type Handler func(ctx context.Context, jobID string) error
+// Run is one attempt at a job, as a Handler sees it.
+type Run struct {
+	JobID   string
+	Title   string
+	Attempt int // 1 for the first run
+}
+
+// Handler does the work for one attempt. ctx carries the job's deadline
+// (Pool.JobTimeout) and is cancelled at shutdown. A handler must pass ctx to
+// everything that can block (network calls, sleeps) and return when it ends:
+// Go can't stop a goroutine from outside, so a handler that ignores ctx
+// keeps its worker busy until it finishes on its own.
+type Handler func(ctx context.Context, run Run) error
 
 // Pool runs Workers goroutines until its context ends.
 type Pool struct {
@@ -82,6 +94,10 @@ type Pool struct {
 	// Backoff returns how long a job waits before its next attempt, after
 	// attempt n failed. Nil means the default, Backoff.
 	Backoff func(attempt int) time.Duration
+	// JobTimeout limits one attempt. A handler still running then gets its
+	// context cancelled, and the attempt counts as failed ("timed out"), so
+	// it is retried like any other failure. Zero means no limit.
+	JobTimeout time.Duration
 }
 
 // Run recovers what a previous run left behind, starts the workers, and
@@ -215,7 +231,7 @@ func (p *Pool) work(stop, jobsCtx context.Context, log *slog.Logger) {
 // process runs one job. Errors are logged, never fatal: unless the outcome
 // was saved, the ID stays in the processing list for the next start.
 func (p *Pool) process(ctx context.Context, log *slog.Logger, id string) {
-	attempt, maxAttempts, err := p.Store.Claim(ctx, id)
+	attempt, maxAttempts, title, err := p.Store.Claim(ctx, id)
 	if err != nil {
 		log.Warn("worker: claim failed; the ID stays in processing", "err", err)
 		return
@@ -228,7 +244,7 @@ func (p *Pool) process(ctx context.Context, log *slog.Logger, id string) {
 	log = log.With("attempt", attempt, "max_attempts", maxAttempts)
 
 	start := time.Now()
-	err = p.Handle(ctx, id)
+	err = p.runHandler(ctx, Run{JobID: id, Title: title, Attempt: attempt}, log)
 	if ctx.Err() != nil {
 		// Only after the drain timeout. Record nothing: the job stays
 		// processing and its ID stays in the processing list.
@@ -263,6 +279,29 @@ func (p *Pool) process(ctx context.Context, log *slog.Logger, id string) {
 		}
 	}
 	p.ack(saveCtx, log, id)
+}
+
+// runHandler runs one attempt under the job timeout. Two different ends are
+// kept apart: ctx (shutdown) ending means "record nothing", while the job's
+// own deadline passing is an ordinary failure, retried with backoff.
+func (p *Pool) runHandler(ctx context.Context, run Run, log *slog.Logger) error {
+	if p.JobTimeout <= 0 {
+		return p.Handle(ctx, run)
+	}
+	runCtx, cancel := context.WithTimeout(ctx, p.JobTimeout)
+	defer cancel()
+
+	err := p.Handle(runCtx, run)
+	if errors.Is(runCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
+		if err == nil {
+			// It finished, just late: its work is done, so it counts as done.
+			// Treating it as failed would run it again.
+			log.Warn("worker: job finished after its deadline", "timeout", p.JobTimeout)
+			return nil
+		}
+		return fmt.Errorf("timed out after %v: %w", p.JobTimeout, err)
+	}
+	return err
 }
 
 // retry records a failed attempt that will run again, then schedules it.
@@ -310,7 +349,7 @@ func sleep(ctx context.Context, d time.Duration) {
 // and gives up early if its context is cancelled. Real job types replace it
 // later.
 func Placeholder(d time.Duration) Handler {
-	return func(ctx context.Context, _ string) error {
+	return func(ctx context.Context, _ Run) error {
 		return sleepOrCancel(ctx, d)
 	}
 }

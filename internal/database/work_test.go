@@ -13,7 +13,7 @@ import (
 
 func claim(t *testing.T, w *WorkStore, id string) bool {
 	t.Helper()
-	attempt, _, err := w.Claim(context.Background(), id)
+	attempt, _, _, err := w.Claim(context.Background(), id)
 	if err != nil {
 		t.Fatalf("Claim(%s): %v", id, err)
 	}
@@ -99,7 +99,7 @@ func TestClaimHasExactlyOneWinner(t *testing.T) {
 			go func() {
 				defer wg.Done()
 				<-start // both goroutines are ready; release them together
-				attempt, _, err := w.Claim(ctx, id)
+				attempt, _, _, err := w.Claim(ctx, id)
 				if err != nil {
 					errs <- err
 					return
@@ -181,9 +181,9 @@ func TestRetryThenClaimCountsAttempts(t *testing.T) {
 	ctx := context.Background()
 	id := addJobs(t, f, "flaky")[0]
 
-	attempt, max, err := w.Claim(ctx, id)
-	if err != nil || attempt != 1 || max != job.DefaultMaxAttempts {
-		t.Fatalf("first Claim = %d of %d, %v; want 1 of %d", attempt, max, err, job.DefaultMaxAttempts)
+	attempt, max, title, err := w.Claim(ctx, id)
+	if err != nil || attempt != 1 || max != job.DefaultMaxAttempts || title != "flaky" {
+		t.Fatalf("first Claim = %d of %d (%q), %v; want 1 of %d (flaky)", attempt, max, title, err, job.DefaultMaxAttempts)
 	}
 	before := time.Now()
 	due, err := w.Retry(ctx, id, 30*time.Second, "smtp: connection refused")
@@ -198,7 +198,7 @@ func TestRetryThenClaimCountsAttempts(t *testing.T) {
 		t.Fatalf("after Retry: status %s, attempts %d, next %v, last_error %q", status, attempts, next, lastError)
 	}
 
-	attempt, _, err = w.Claim(ctx, id)
+	attempt, _, _, err = w.Claim(ctx, id)
 	if err != nil || attempt != 2 {
 		t.Fatalf("Claim of a retrying job = attempt %d, %v; want 2", attempt, err)
 	}

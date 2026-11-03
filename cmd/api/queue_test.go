@@ -133,3 +133,55 @@ func TestAPIStartsWhenRedisIsDown(t *testing.T) {
 		t.Errorf("status = %q, want pending: with Redis down the job waits in the outbox", got.Status)
 	}
 }
+
+// jobState reads a job's status and attempts through the API.
+func jobState(t *testing.T, client *http.Client, base, token, id string) (string, int) {
+	t.Helper()
+	status, _, body := requestAs(t, client, http.MethodGet, base+"/api/v1/jobs/"+id, token, "")
+	if status != http.StatusOK {
+		t.Fatalf("get %s: status %d, body %s", id, status, body)
+	}
+	var got struct {
+		Status   string `json:"status"`
+		Attempts int    `json:"attempts"`
+	}
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatal(err)
+	}
+	return got.Status, got.Attempts
+}
+
+// The whole retry path, in one process with real PostgreSQL and Redis:
+// a job that fails once is retried after its backoff (delayed set →
+// promoter → queue) and completes on attempt 2; a permanent failure is
+// dead after 1 attempt.
+func TestAPIRetriesAFailedJob(t *testing.T) {
+	dbURL := testDatabaseURL(t)
+	redisURL := testRedisURL(t)
+
+	cfg := testConfig("127.0.0.1:0", dbURL)
+	cfg.RedisURL = redisURL
+	cfg.Workers = 2
+	base, _ := startServerWith(t, cfg)
+	client := &http.Client{Timeout: 5 * time.Second}
+
+	token := signUp(t, client, base, dbURL)
+	flaky := createJob(t, client, base, token, "flaky:1")
+	broken := createJob(t, client, base, token, "fail:permanent")
+
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		fs, fa := jobState(t, client, base, token, flaky)
+		bs, ba := jobState(t, client, base, token, broken)
+		if fs == "completed" && bs == "dead" {
+			if fa != 2 || ba != 1 {
+				t.Fatalf("attempts: flaky %d, broken %d; want 2 and 1", fa, ba)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("after 20s: flaky %s (%d attempts), broken %s (%d); want completed and dead", fs, fa, bs, ba)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}

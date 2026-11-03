@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -117,26 +118,29 @@ type memStore struct {
 	max      int
 	retryErr error // when set, Retry fails (the "commit" fails)
 	calls    *callLog
+	titles   map[string]string
+	errors   map[string]string // last error per job, from Retry and Bury
 }
 
 func newMemStore(ids ...string) *memStore {
-	s := &memStore{status: map[string]string{}, attempts: map[string]int{}, max: 3, calls: &callLog{}}
+	s := &memStore{status: map[string]string{}, attempts: map[string]int{}, max: 3, calls: &callLog{},
+		titles: map[string]string{}, errors: map[string]string{}}
 	for _, id := range ids {
 		s.status[id] = "queued"
 	}
 	return s
 }
 
-func (s *memStore) Claim(_ context.Context, id string) (int, int, error) {
+func (s *memStore) Claim(_ context.Context, id string) (int, int, string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	switch s.status[id] {
 	case "pending", "queued", "retrying":
 		s.status[id] = "processing"
 		s.attempts[id]++
-		return s.attempts[id], s.max, nil
+		return s.attempts[id], s.max, s.titles[id], nil
 	}
-	return 0, 0, nil
+	return 0, 0, "", nil
 }
 
 func (s *memStore) ResetProcessing(context.Context) (int64, error) {
@@ -165,22 +169,40 @@ func (s *memStore) Complete(_ context.Context, id string) error {
 	return nil
 }
 
-func (s *memStore) Retry(_ context.Context, id string, delay time.Duration, _ string) (time.Time, error) {
+func (s *memStore) Retry(_ context.Context, id string, delay time.Duration, lastError string) (time.Time, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.calls.add("postgres:retry " + id)
 	if s.retryErr != nil {
 		return time.Time{}, s.retryErr
 	}
+	s.errors[id] = lastError
 	if s.status[id] == "processing" {
 		s.status[id] = "retrying"
 	}
 	return time.Now().Add(delay), nil
 }
 
-func (s *memStore) Bury(_ context.Context, id string, _ string) error {
+func (s *memStore) Bury(_ context.Context, id string, lastError string) error {
+	s.mu.Lock()
+	s.errors[id] = lastError
+	s.mu.Unlock()
 	s.setIf(id, "processing", "dead")
 	return nil
+}
+
+func (s *memStore) lastError(id string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.errors[id]
+}
+
+// addJob registers a queued job with a title, for handlers that read it.
+func (s *memStore) addJob(id, title string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.status[id] = "queued"
+	s.titles[id] = title
 }
 
 func (s *memStore) get(id string) string {
@@ -219,7 +241,8 @@ type counter struct {
 	calls map[string]int
 }
 
-func (c *counter) handle(_ context.Context, id string) error {
+func (c *counter) handle(_ context.Context, r Run) error {
+	id := r.JobID
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.calls == nil {
@@ -299,7 +322,7 @@ func TestPoolRunsJobsConcurrently(t *testing.T) {
 	allStarted := make(chan struct{})
 	go func() { started.Wait(); close(allStarted) }()
 
-	start(t, newPool(q, s, len(ids), func(ctx context.Context, _ string) error {
+	start(t, newPool(q, s, len(ids), func(ctx context.Context, _ Run) error {
 		started.Done()
 		select {
 		case <-allStarted:
@@ -337,7 +360,7 @@ func TestPoolRunsADuplicateIDOnce(t *testing.T) {
 // A permanent error buries the job at once: no retry is scheduled.
 func TestPermanentErrorBuriesTheJob(t *testing.T) {
 	q, s := &memQueue{pending: []string{"bad"}}, newMemStore("bad")
-	start(t, newPool(q, s, 1, func(context.Context, string) error {
+	start(t, newPool(q, s, 1, func(context.Context, Run) error {
 		return Permanent(errors.New("invalid email address"))
 	}))
 
@@ -356,7 +379,7 @@ func TestRetryableErrorRunsAgain(t *testing.T) {
 	q, s := &memQueue{pending: []string{"flaky"}}, newMemStore("flaky")
 	var mu sync.Mutex
 	runs := 0
-	p := newPool(q, s, 1, func(context.Context, string) error {
+	p := newPool(q, s, 1, func(context.Context, Run) error {
 		mu.Lock()
 		defer mu.Unlock()
 		runs++
@@ -392,7 +415,7 @@ func TestRetryableErrorRunsAgain(t *testing.T) {
 // After max attempts the job is dead, not retried again.
 func TestOutOfAttemptsBuriesTheJob(t *testing.T) {
 	q, s := &memQueue{pending: []string{"doomed"}}, newMemStore("doomed")
-	p := newPool(q, s, 1, func(context.Context, string) error { return errors.New("still down") })
+	p := newPool(q, s, 1, func(context.Context, Run) error { return errors.New("still down") })
 	p.Backoff = func(int) time.Duration { return time.Millisecond }
 	start(t, p)
 
@@ -415,7 +438,7 @@ func TestOutOfAttemptsBuriesTheJob(t *testing.T) {
 func TestRetryIsRecordedBeforeItIsScheduled(t *testing.T) {
 	q, s := &memQueue{pending: []string{"ok"}}, newMemStore("ok", "commit-fails")
 	q.calls = s.calls
-	p := newPool(q, s, 1, func(context.Context, string) error { return errors.New("boom") })
+	p := newPool(q, s, 1, func(context.Context, Run) error { return errors.New("boom") })
 	p.Backoff = func(int) time.Duration { return time.Minute }
 	start(t, p)
 
@@ -472,7 +495,7 @@ func TestStopLetsTheActiveJobFinish(t *testing.T) {
 	inJob := make(chan struct{})
 	release := make(chan struct{})
 	var ctxErrAtEnd error
-	p := newPool(q, s, 1, func(ctx context.Context, _ string) error {
+	p := newPool(q, s, 1, func(ctx context.Context, _ Run) error {
 		close(inJob)
 		<-release
 		ctxErrAtEnd = ctx.Err()
@@ -505,7 +528,7 @@ func TestStopLetsTheActiveJobFinish(t *testing.T) {
 func TestDrainTimeoutCancelsAndKeepsTheJob(t *testing.T) {
 	q, s := &memQueue{pending: []string{"slow"}}, newMemStore("slow")
 	inJob := make(chan struct{})
-	p := newPool(q, s, 1, func(ctx context.Context, _ string) error {
+	p := newPool(q, s, 1, func(ctx context.Context, _ Run) error {
 		close(inJob)
 		<-ctx.Done() // only returns once cancelled
 		return ctx.Err()
@@ -609,5 +632,102 @@ func TestPoolStopsWhileWaitingForRedis(t *testing.T) {
 	stop()
 	if took := time.Since(began); took > time.Second {
 		t.Errorf("stop took %v while waiting for Redis, want well under 1s", took)
+	}
+}
+
+// A handler that hangs is cancelled at the job timeout, and the attempt
+// counts as an ordinary failure: retried, with "timed out" recorded. The
+// worker is free for the next job.
+func TestJobTimeoutRetriesAHangingJob(t *testing.T) {
+	q, s := &memQueue{pending: []string{"stuck", "next"}}, newMemStore("stuck", "next")
+	var mu sync.Mutex
+	ran := map[string]bool{}
+	p := newPool(q, s, 1, func(ctx context.Context, r Run) error {
+		mu.Lock()
+		ran[r.JobID] = true
+		mu.Unlock()
+		if r.JobID == "stuck" {
+			<-ctx.Done() // hangs until its deadline
+			return ctx.Err()
+		}
+		return nil
+	})
+	p.JobTimeout = 20 * time.Millisecond
+	p.Backoff = func(int) time.Duration { return time.Hour }
+	start(t, p)
+
+	eventually(t, "stuck timed out and retrying, next completed", func() bool {
+		return s.get("stuck") == "retrying" && s.get("next") == "completed"
+	})
+	if e := s.lastError("stuck"); !strings.Contains(e, "timed out after 20ms") {
+		t.Errorf("last error = %q, want it to say timed out after 20ms", e)
+	}
+}
+
+// A job that finishes late but successfully counts as done: retrying it
+// would run its work twice.
+func TestLateSuccessCountsAsDone(t *testing.T) {
+	q, s := &memQueue{pending: []string{"slow"}}, newMemStore("slow")
+	p := newPool(q, s, 1, func(ctx context.Context, _ Run) error {
+		time.Sleep(40 * time.Millisecond) // ignores ctx, then succeeds
+		return nil
+	})
+	p.JobTimeout = 10 * time.Millisecond
+	start(t, p)
+
+	eventually(t, "slow completed", func() bool { return s.get("slow") == "completed" })
+}
+
+// The demo handler: each title picks a behaviour.
+func TestDemoHandler(t *testing.T) {
+	h := Demo(time.Millisecond)
+	ctx := context.Background()
+	tests := []struct {
+		title     string
+		attempt   int
+		wantErr   bool
+		permanent bool
+	}{
+		{"send welcome email", 1, false, false},
+		{"sleep:5ms", 1, false, false},
+		{"sleep:soon", 1, true, true},
+		{"fail", 1, true, false},
+		{"fail:permanent", 1, true, true},
+		{"flaky:2", 1, true, false},
+		{"flaky:2", 2, true, false},
+		{"flaky:2", 3, false, false},
+		{"flaky:x", 1, true, true},
+	}
+	for _, tc := range tests {
+		err := h(ctx, Run{JobID: "j", Title: tc.title, Attempt: tc.attempt})
+		if (err != nil) != tc.wantErr || IsPermanent(err) != tc.permanent {
+			t.Errorf("%q attempt %d: err = %v (permanent %v), want error %v, permanent %v",
+				tc.title, tc.attempt, err, IsPermanent(err), tc.wantErr, tc.permanent)
+		}
+	}
+
+	hangCtx, cancel := context.WithTimeout(ctx, 10*time.Millisecond)
+	defer cancel()
+	if err := h(hangCtx, Run{Title: "hang"}); !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("hang: err = %v, want the context's deadline error", err)
+	}
+}
+
+// A flaky job runs to completion through the pool: fails twice, then succeeds.
+func TestPoolRunsAFlakyJobToCompletion(t *testing.T) {
+	q, s := &memQueue{}, newMemStore()
+	s.addJob("f", "flaky:2")
+	q.add("f")
+	p := newPool(q, s, 1, Demo(time.Millisecond))
+	p.Backoff = func(int) time.Duration { return time.Millisecond }
+	start(t, p)
+
+	for range 2 {
+		eventually(t, "a retry scheduled", func() bool { return len(q.scheduled()) == 1 })
+		q.promote()
+	}
+	eventually(t, "f completed on attempt 3", func() bool { return s.get("f") == "completed" })
+	if s.attemptsOf("f") != 3 {
+		t.Errorf("attempts = %d, want 3", s.attemptsOf("f"))
 	}
 }

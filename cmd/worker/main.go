@@ -33,6 +33,8 @@ const (
 	simulatedWork = 5 * time.Second
 	// drainTimeout is how long running jobs may finish after SIGTERM.
 	drainTimeout = 20 * time.Second
+	// jobTimeout limits one attempt; a job still running then is retried.
+	jobTimeout = 15 * time.Second
 	// Allowed range for GOFLOW_WORKERS.
 	defaultWorkers, maxWorkers = 4, 32
 )
@@ -109,7 +111,8 @@ func run(ctx context.Context, logger *slog.Logger, dbURL, redisURL string, worke
 	p := &worker.Pool{
 		Queue:        q,
 		Store:        database.NewWorkStore(db),
-		Handle:       worker.Placeholder(simulatedWork),
+		Handle:       worker.Demo(simulatedWork),
+		JobTimeout:   jobTimeout,
 		Logger:       logger,
 		Workers:      workers,
 		DrainTimeout: drainTimeout,

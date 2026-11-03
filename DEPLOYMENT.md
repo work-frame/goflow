@@ -130,6 +130,16 @@ What happened on 3 November 2026:
 - A manual **Deploy latest commit** a few minutes later went live. Both waiting jobs (one created on 2 November, one minutes earlier) completed within 30 s of the start, on two workers at once.
 - Since Task 28, the API starts even when Redis is unreachable, so a sync that creates a Key Value and redeploys the API at the same time can't fail this way.
 
+## Retries live (Task 30)
+
+```bash
+export GOFLOW_API_URL=https://goflow-api-hewh.onrender.com
+goflow job create flaky:2 && goflow job create fail && goflow job create fail:permanent && goflow job create hang
+goflow job list     # run again every 10-20 s and watch STATUS and TRIES
+```
+
+Expected within a few minutes: `flaky:2` → `retrying` 1/3, `retrying` 2/3, `completed` 3/3; `fail` → `dead` 3/3; `fail:permanent` → `dead` 1/3 at once; `hang` → `retrying` after 15 s each time, then `dead` 3/3. In the logs: `worker: job failed, will retry`, `promoter: retries due, queued again`, `worker: job dead`. A `promoter: can't reach Redis` with a script error would mean Key Value refuses Lua; overdue retries would then come back through the reconciler instead.
+
 ## Rolling back
 
 Render keeps previous deploys. In the dashboard: `goflow-api` → **Deploys** → pick the last good one → **Rollback**. A rollback doesn't undo migrations, so a migration must keep working with the code before it (add columns before using them, drop them a release later).

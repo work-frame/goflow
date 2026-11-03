@@ -32,6 +32,10 @@ const (
 	// must fit inside the host's shutdown delay (Render: 30 s by default)
 	// together with the HTTP shutdown, which runs at the same time.
 	workerDrain = 20 * time.Second
+	// jobTimeout limits one attempt; a job still running then is retried.
+	// It is below workerDrain, so a job started just before SIGTERM can
+	// still finish or time out inside the drain.
+	jobTimeout = 15 * time.Second
 )
 
 func main() {
@@ -125,7 +129,8 @@ func run(ctx context.Context, logger *slog.Logger, cfg config, ready func(addr s
 			pool := &worker.Pool{
 				Queue:        q,
 				Store:        database.NewWorkStore(db),
-				Handle:       worker.Placeholder(cfg.SimulatedWork),
+				Handle:       worker.Demo(cfg.SimulatedWork),
+				JobTimeout:   jobTimeout,
 				Logger:       logger,
 				Workers:      cfg.Workers,
 				DrainTimeout: workerDrain,

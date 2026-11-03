@@ -12,7 +12,7 @@ I'm building it to learn production Go: the standard library first, then HTTP, P
 - **Phase 4 (done):** accounts, login sessions, per-user jobs, `goflow login`, and a first deployment on Render and Neon ([DEPLOYMENT.md](DEPLOYMENT.md))
 - **Phase 5 (done):** Redis job queue. A new job and an outbox row are saved in one transaction; with `GOFLOW_REDIS_URL` set, a background relay moves the ID to a Redis list and marks the job `queued`. A single worker (`cmd/worker`) takes IDs off the queue and runs jobs to `completed`; the work itself is a placeholder until real job types arrive. Runs locally; not deployed yet.
 - **Phase 6 (done):** a pool of concurrent workers (`GOFLOW_WORKERS`) with graceful shutdown. On Render, the API runs the pool itself against a free Key Value queue ([DEPLOYMENT.md](DEPLOYMENT.md)). Jobs are created, queued and completed end to end in production; the work is still a 5-second placeholder.
-- **Phase 7 (in progress):** failed jobs retry with exponential backoff and jitter, up to 3 attempts, then become `dead`; permanent errors skip the retries. Next: timeouts, a dead-letter queue and idempotent job creation.
+- **Phase 7 (in progress):** failed jobs retry with exponential backoff and jitter, up to 3 attempts, then become `dead`; permanent errors skip the retries. Each attempt has a 15-second limit. Next: a dead-letter queue and idempotent job creation.
 
 ## Requirements
 
@@ -148,12 +148,23 @@ The CLI is a client for the HTTP API, so the API must be running, locally or hos
 ```bash
 goflow login                             # asks for email and password (the password isn't shown)
 goflow job create send welcome email     # prints the new job's ID
-goflow job list                          # every job, oldest first (follows pages)
+goflow job list                          # every job, oldest first, with TRIES (attempts/max)
 goflow job list --status pending         # filter by status
 goflow job get <id>                      # one job as JSON
 goflow job delete <id>                   # remove a job
 goflow logout                            # ends the session on the server and deletes the saved login
 ```
+
+Until GoFlow has real job types, a job's title can pick a test behaviour, to watch retries and timeouts happen:
+
+| Title | What the worker does |
+|---|---|
+| `sleep:3s` | works for 3 s (at most 1 minute), then succeeds |
+| `fail` | fails every time: retried with backoff, then `dead` after 3 attempts |
+| `fail:permanent` | fails with a permanent error: `dead` after 1 attempt |
+| `flaky:2` | fails on attempts 1 and 2, succeeds on attempt 3 |
+| `hang` | never finishes on its own: cancelled at the 15-second limit and retried |
+| anything else | works for 5 s, then succeeds |
 
 | Variable | Default | Meaning |
 |---|---|---|
