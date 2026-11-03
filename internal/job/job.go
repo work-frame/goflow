@@ -32,6 +32,9 @@ const (
 // DefaultMaxAttempts is how many times a job runs before it is dead.
 const DefaultMaxAttempts = 3
 
+// MaxIdempotencyKeyLength matches the CHECK on jobs.idempotency_key.
+const MaxIdempotencyKeyLength = 255
+
 // Valid reports whether s is one of the known statuses.
 func (s Status) Valid() bool {
 	switch s {
@@ -42,11 +45,37 @@ func (s Status) Valid() bool {
 	}
 }
 
+// Rerunnable reports whether a job in status s may be re-run by its owner:
+// only one that has stopped for good after failing. A completed job is
+// finished work; anything else is still on its way.
+func (s Status) Rerunnable() bool {
+	return s == StatusDead || s == StatusFailed
+}
+
 // Sentinel errors returned by New. Callers check them with errors.Is.
 var (
 	ErrEmptyTitle   = errors.New("job: title is required")
 	ErrTitleTooLong = errors.New("job: title exceeds 200 characters")
 )
+
+// ErrBadIdempotencyKey is returned by ValidateIdempotencyKey.
+var ErrBadIdempotencyKey = errors.New("job: idempotency key must be 1 to 255 visible ASCII characters")
+
+// ValidateIdempotencyKey accepts 1 to 255 visible ASCII characters (no
+// spaces, no control characters). A UUID fits; so does any random token.
+// Keeping the alphabet small means a key can't smuggle a newline into a log
+// line or look like a different key after Unicode normalisation.
+func ValidateIdempotencyKey(key string) error {
+	if key == "" || len(key) > MaxIdempotencyKeyLength {
+		return ErrBadIdempotencyKey
+	}
+	for i := 0; i < len(key); i++ {
+		if key[i] < '!' || key[i] > '~' {
+			return ErrBadIdempotencyKey
+		}
+	}
+	return nil
+}
 
 // Job is a unit of background work.
 type Job struct {
@@ -62,6 +91,10 @@ type Job struct {
 	MaxAttempts int `json:"max_attempts"`
 	// NextAttemptAt is set while the job is retrying.
 	NextAttemptAt *time.Time `json:"next_attempt_at,omitempty"`
+
+	// IdempotencyKey is the client's Idempotency-Key header, or "" if it
+	// sent none. Never returned: the client already knows it.
+	IdempotencyKey string `json:"-"`
 }
 
 // New validates the title and returns a pending job.

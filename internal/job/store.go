@@ -5,12 +5,17 @@ import (
 	"errors"
 	"slices"
 	"sync"
+	"time"
 )
 
 var (
 	ErrNotFound    = errors.New("job: not found")
 	ErrDuplicateID = errors.New("job: duplicate id")
 	ErrNilJob      = errors.New("job: nil job")
+	// ErrDuplicateKey: the owner already has a job with this idempotency key.
+	ErrDuplicateKey = errors.New("job: duplicate idempotency key")
+	// ErrNotRerunnable: only a dead (or old failed) job can be re-run.
+	ErrNotRerunnable = errors.New("job: only a dead or failed job can be re-run")
 )
 
 // MemoryStore keeps jobs in a map. It is safe for concurrent use.
@@ -38,6 +43,9 @@ func (s *MemoryStore) Add(j *Job) error {
 
 	if _, exists := s.jobs[j.ID]; exists {
 		return ErrDuplicateID
+	}
+	if j.IdempotencyKey != "" && s.findByKey(j.UserID, j.IdempotencyKey) != nil {
+		return ErrDuplicateKey
 	}
 	c := *j
 	s.jobs[j.ID] = &c
@@ -87,4 +95,50 @@ func (s *MemoryStore) Delete(id string) error {
 	}
 	delete(s.jobs, id)
 	return nil
+}
+
+// GetByIdempotencyKey returns a copy of userID's job created with key, or
+// ErrNotFound.
+func (s *MemoryStore) GetByIdempotencyKey(userID, key string) (*Job, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	j := s.findByKey(userID, key)
+	if j == nil {
+		return nil, ErrNotFound
+	}
+	c := *j
+	return &c, nil
+}
+
+// findByKey scans every job. Fine for tests; PostgreSQL uses an index.
+// The caller holds s.mu.
+func (s *MemoryStore) findByKey(userID, key string) *Job {
+	for _, j := range s.jobs {
+		if j.UserID == userID && j.IdempotencyKey == key {
+			return j
+		}
+	}
+	return nil
+}
+
+// Rerun puts a dead or failed job back to pending with its attempts reset,
+// and returns a copy. Same rules as database.JobStore.Rerun.
+func (s *MemoryStore) Rerun(id string) (*Job, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	j, ok := s.jobs[id]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	if !j.Status.Rerunnable() {
+		return nil, ErrNotRerunnable
+	}
+	j.Status = StatusPending
+	j.Attempts = 0
+	j.NextAttemptAt = nil
+	j.UpdatedAt = time.Now().UTC().Truncate(time.Microsecond)
+	c := *j
+	return &c, nil
 }

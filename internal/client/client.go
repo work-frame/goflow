@@ -132,6 +132,17 @@ func (c *Client) Delete(ctx context.Context, id string) error {
 	return c.do(ctx, http.MethodDelete, "/api/v1/jobs/"+url.PathEscape(id), nil, http.StatusNoContent, nil)
 }
 
+// Retry re-runs a dead job with a fresh set of attempts and returns it,
+// now pending. It returns job.ErrNotFound for a job you don't have, and an
+// *APIError with status 409 for a job that isn't dead.
+func (c *Client) Retry(ctx context.Context, id string) (*job.Job, error) {
+	var j job.Job
+	if err := c.do(ctx, http.MethodPost, "/api/v1/jobs/"+url.PathEscape(id)+"/retry", nil, http.StatusOK, &j); err != nil {
+		return nil, err
+	}
+	return &j, nil
+}
+
 // do sends one request, checks the status, and decodes the body into out if out is not nil.
 func (c *Client) do(ctx context.Context, method, path string, body []byte, want int, out any) error {
 	var r io.Reader

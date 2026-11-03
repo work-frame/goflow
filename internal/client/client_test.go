@@ -47,6 +47,17 @@ func (s memStore) List(_ context.Context, userID string, p job.ListParams) (job.
 	return job.Paginate(mine, p)
 }
 
+func (s memStore) GetByIdempotencyKey(_ context.Context, userID, key string) (*job.Job, error) {
+	return s.m.GetByIdempotencyKey(userID, key)
+}
+
+func (s memStore) Rerun(ctx context.Context, userID, id string) (*job.Job, error) {
+	if _, err := s.Get(ctx, userID, id); err != nil {
+		return nil, err
+	}
+	return s.m.Rerun(id)
+}
+
 // oneSession is a SessionStore that knows a single valid token.
 type oneSession struct {
 	hash []byte
@@ -201,5 +212,24 @@ func TestClientWithoutAValidTokenIsUnauthenticated(t *testing.T) {
 	c := New(url, token)
 	if _, err := c.Get(ctx, "does-not-exist"); !errors.Is(err, job.ErrNotFound) || strings.Contains(err.Error(), token) {
 		t.Errorf("err = %v, want job.ErrNotFound without the token in it", err)
+	}
+}
+
+func TestClientRetry(t *testing.T) {
+	c := newTestClient(t)
+	ctx := context.Background()
+
+	created, err := c.Create(ctx, "not dead yet")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A pending job can't be retried: the API's 409 message comes through.
+	_, err = c.Retry(ctx, created.ID)
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) || apiErr.Status != http.StatusConflict || !strings.Contains(apiErr.Message, "dead") {
+		t.Fatalf("Retry(pending) = %v, want a 409 APIError about dead jobs", err)
+	}
+	if _, err := c.Retry(ctx, "nope"); !errors.Is(err, job.ErrNotFound) {
+		t.Fatalf("Retry(missing) = %v, want job.ErrNotFound", err)
 	}
 }

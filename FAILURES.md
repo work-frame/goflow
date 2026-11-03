@@ -435,6 +435,36 @@ Each case was reproduced on a real machine (Arch Linux, Go 1.27, PostgreSQL 17) 
   ```
 - **Why:** the same two-systems problem as the dual write, now inside the worker. Scheduling first means that if the PostgreSQL write then fails, Redis holds a retry the source of truth never recorded: the job is still `processing` in PostgreSQL while its ID will come back from the delayed set. Recording first means the worst case is the reverse, a retry PostgreSQL knows about but Redis doesn't, and that one is safe: the reconciler finds `retrying` jobs that are overdue and sends them again. Write to the system of record first; let the other system be the one that can be repaired.
 
+## 33. Every attempt has a deadline
+
+- **Safeguard:** `Pool.runHandler` runs the handler under `context.WithTimeout(ctx, p.JobTimeout)` (15 s in production). When the deadline passes, the attempt fails with `timed out after 15s` and is retried like any other failure.
+- **Removed:** the deadline. The handler ran with the pool's job context only, which ends at shutdown and never before.
+- **Caught by:** `TestJobTimeoutRetriesAHangingJob`: one worker, a job that waits for its context, and a second job behind it.
+- **Observed:**
+  ```text
+  --- FAIL: TestJobTimeoutRetriesAHangingJob (6.00s)
+      worker_test.go:659: after 5s: stuck timed out and retrying, next completed
+  ```
+- **Why:** a handler waiting on something that never answers (a server that accepts the connection and then says nothing) holds its worker forever. On Render there are 2 workers, so 2 such jobs stop every other job: the test shows it with 1 worker, where `next` never ran. Nothing failed, so nothing was retried or logged, and the job stayed `processing` until the next restart. With the deadline, a hung job uses up its attempts and ends `dead`: live on Render, `hang` went `retrying` after 15 s each time and was `dead` 3/3 (DEPLOYMENT.md). A deadline only works if the handler passes `ctx` on: Go can't stop a goroutine from outside.
+
+## 34. A reused Idempotency-Key returns the first job
+
+- **Safeguard:** when `JobStore.Add` returns `job.ErrDuplicateKey`, `createJob` calls `replayCreate`: it reads the existing job with `GetByIdempotencyKey` and answers `200` with it and `Idempotent-Replayed: true`.
+- **Removed:** that branch (`if false && errors.Is(err, job.ErrDuplicateKey)`), so the error went to `storeError` like any other.
+- **Caught by:** `TestIdempotentCreateUnderConcurrency` (20 concurrent HTTP requests with one key, real PostgreSQL) and three handler tests.
+- **Observed:**
+  ```text
+  --- FAIL: TestIdempotentCreateUnderConcurrency (0.07s)
+      idempotency_test.go:65: request 0: status 500, want 201 or 200
+      ...                                    (requests 1-7 and 9-19 the same)
+      idempotency_test.go:68: request 8 got job "2ec2e1f9711c1d6bcb4e9001699f920f", request 0 got ""
+      idempotency_test.go:72: 1 created, 0 replayed; want 1 and 19
+  (which request wins, and the job ID, change every run)
+  --- FAIL: TestCreateWithTheSameKeyReturnsTheFirstJob (0.00s)
+      idempotency_test.go:35: repeated create: status 500, body {"error":"internal error"}
+  ```
+- **Why:** the data stayed correct even when broken: one job, because the unique index on `(user_id, idempotency_key)` refused the other 19 `INSERT`s. That is the half that must live in the database: a "look the key up first, insert if missing" check in Go lets concurrent requests all see "missing". The other half is the answer. A client sends the same key again exactly because it doesn't know what happened; a `500` tells it "something broke, try again", and a client that keeps trying gets `500` forever while its job runs. The loser of the race has to get the winner's job, the same answer as if it had been first.
+
 ## Experiment: the naive dual write loses a job
 
 Not a removed safeguard but the design of Task 22, run live on 2 November 2026 to see the failure Task 23 fixes. `POST /api/v1/jobs` saved the job in PostgreSQL, then pushed its ID to Redis, with nothing tying the two together.
