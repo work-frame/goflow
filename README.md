@@ -11,7 +11,7 @@ I'm building it to learn production Go: the standard library first, then HTTP, P
 - **Phase 3 (done):** PostgreSQL storage with migrations, constraints and keyset pagination
 - **Phase 4 (done):** accounts, login sessions, per-user jobs, `goflow login`, and a first deployment on Render and Neon ([DEPLOYMENT.md](DEPLOYMENT.md))
 - **Phase 5 (done):** Redis job queue. A new job and an outbox row are saved in one transaction; with `GOFLOW_REDIS_URL` set, a background relay moves the ID to a Redis list and marks the job `queued`. A single worker (`cmd/worker`) takes IDs off the queue and runs jobs to `completed`; the work itself is a placeholder until real job types arrive. Runs locally; not deployed yet.
-- **Phase 6 (in progress):** a pool of concurrent workers (`GOFLOW_WORKERS`) with graceful shutdown; hosted Redis next.
+- **Phase 6 (in progress):** a pool of concurrent workers (`GOFLOW_WORKERS`) with graceful shutdown. On Render, the API runs the pool itself against a free Key Value queue ([DEPLOYMENT.md](DEPLOYMENT.md)).
 
 ## Requirements
 
@@ -42,7 +42,8 @@ go build -o bin/worker ./cmd/worker   # job worker
 | `GOFLOW_BCRYPT_COST` | `12` | bcrypt cost for password hashes, 10 to 14. Each step doubles the time per hash. The server refuses to start outside this range. |
 | `GOFLOW_REGISTRATION` | `closed` | `open` lets anyone create an account with `POST /api/v1/auth/register`; `closed` answers `403`. |
 | `PORT` | none | Port to listen on, as set by hosting platforms such as Render. Used only when `GOFLOW_ADDR` is not set. |
-| `GOFLOW_REDIS_URL` | none (queue off) | Redis for the job queue, e.g. `redis://127.0.0.1:6379/0`. A Redis on another machine must use `rediss://` (TLS). Without it, new jobs stay `pending` in the outbox until a server with Redis starts. |
+| `GOFLOW_REDIS_URL` | none (queue off) | Redis for the job queue, e.g. `redis://127.0.0.1:6379/0`. A Redis on another machine must use `rediss://` (TLS), except a single-label private-network name such as Render's `red-abc123`. Without it, new jobs stay `pending` in the outbox until a server with Redis starts. |
+| `GOFLOW_WORKERS` | `0` | Job workers the API runs itself, 0 to 32. Needs `GOFLOW_REDIS_URL`. Only one API instance may run workers. |
 
 The server stops on `Ctrl+C` or `SIGTERM`, finishing in-flight requests first (up to 10 seconds).
 

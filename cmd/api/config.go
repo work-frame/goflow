@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"time"
 
 	"github.com/work-frame/goflow/internal/auth"
 	"github.com/work-frame/goflow/internal/urlcheck"
@@ -15,6 +16,10 @@ import (
 const (
 	minBcryptCost = 10
 	maxBcryptCost = 14
+	// maxWorkers caps GOFLOW_WORKERS.
+	maxWorkers = 32
+	// simulatedWork is how long the placeholder job handler takes.
+	simulatedWork = 5 * time.Second
 )
 
 // config is everything the API server reads from its environment.
@@ -25,6 +30,12 @@ type config struct {
 	RedisURL         string // optional; may hold a password: never log it
 	BcryptCost       int
 	RegistrationOpen bool
+	// Workers is how many job workers the API runs itself (0: none).
+	// Needs RedisURL. Only ONE API instance may run workers: see worker.Pool.
+	Workers int
+	// SimulatedWork is how long each placeholder job takes. Not read from
+	// the environment; tests shorten it.
+	SimulatedWork time.Duration
 }
 
 // loadConfig reads the API settings through getenv (os.Getenv in production,
@@ -34,10 +45,11 @@ type config struct {
 // is closed, and a remote database must be reached over TLS.
 func loadConfig(getenv func(string) string) (config, error) {
 	cfg := config{
-		Addr:        getenv("GOFLOW_ADDR"),
-		DatabaseURL: getenv("GOFLOW_DATABASE_URL"),
-		RedisURL:    getenv("GOFLOW_REDIS_URL"),
-		BcryptCost:  auth.DefaultCost,
+		Addr:          getenv("GOFLOW_ADDR"),
+		DatabaseURL:   getenv("GOFLOW_DATABASE_URL"),
+		RedisURL:      getenv("GOFLOW_REDIS_URL"),
+		BcryptCost:    auth.DefaultCost,
+		SimulatedWork: simulatedWork,
 	}
 	var errs []error
 
@@ -65,6 +77,18 @@ func loadConfig(getenv func(string) string) (config, error) {
 	if cfg.RedisURL != "" {
 		if err := urlcheck.RedisTLS(cfg.RedisURL); err != nil {
 			errs = append(errs, err)
+		}
+	}
+
+	if raw := getenv("GOFLOW_WORKERS"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		switch {
+		case err != nil || n < 0 || n > maxWorkers:
+			errs = append(errs, fmt.Errorf("GOFLOW_WORKERS must be a whole number from 0 to %d, got %q", maxWorkers, raw))
+		case n > 0 && cfg.RedisURL == "":
+			errs = append(errs, errors.New("GOFLOW_WORKERS needs GOFLOW_REDIS_URL: workers take jobs from Redis"))
+		default:
+			cfg.Workers = n
 		}
 	}
 

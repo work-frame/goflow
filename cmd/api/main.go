@@ -17,11 +17,22 @@ import (
 	"github.com/work-frame/goflow/internal/database"
 	"github.com/work-frame/goflow/internal/queue"
 	"github.com/work-frame/goflow/internal/relay"
+	"github.com/work-frame/goflow/internal/worker"
 )
 
-// relayInterval is the longest a job waits in the outbox when no wake-up
-// arrives: after Redis comes back, or for jobs another instance saved.
-const relayInterval = 30 * time.Second
+const (
+	// relayRetry is the first wait after a failed relay pass; it doubles
+	// after each further failure, up to 5 minutes.
+	relayRetry = time.Second
+	// reconcileEvery and staleAfter: once an hour, re-send jobs that have
+	// been queued for more than 10 minutes (Redis may have lost their IDs).
+	reconcileEvery = time.Hour
+	staleAfter     = 10 * time.Minute
+	// workerDrain is how long running jobs may finish after SIGTERM. It
+	// must fit inside the host's shutdown delay (Render: 30 s by default)
+	// together with the HTTP shutdown, which runs at the same time.
+	workerDrain = 20 * time.Second
+)
 
 func main() {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
@@ -49,7 +60,7 @@ func main() {
 func run(ctx context.Context, logger *slog.Logger, cfg config, ready func(addr string)) error {
 	// Never log cfg.DatabaseURL or cfg.RedisURL: they can contain passwords.
 	logger.Info("starting", "addr", cfg.Addr, "bcrypt_cost", cfg.BcryptCost,
-		"registration_open", cfg.RegistrationOpen, "queue_enabled", cfg.RedisURL != "")
+		"registration_open", cfg.RegistrationOpen, "queue_enabled", cfg.RedisURL != "", "workers", cfg.Workers)
 
 	// Connect before opening the port: an instance that can't reach its database
 	// should never start accepting traffic.
@@ -84,11 +95,44 @@ func run(ctx context.Context, logger *slog.Logger, cfg config, ready func(addr s
 		defer q.Close()
 		logger.Info("queue connected")
 
-		rl = relay.New(database.NewOutboxStore(db), q, logger, relayInterval)
-		// Deferred after q.Close and db.Close, so it runs first: the relay
-		// stops, then the queue and the database close.
+		outbox := database.NewOutboxStore(db)
+		rl = relay.New(outbox, q, logger, relayRetry)
+		// Deferred after q.Close and db.Close, so these run first: the relay
+		// and the reconciler stop, then the queue and the database close.
 		stopRelay := rl.Start(ctx)
 		defer stopRelay()
+		stopReconciler := relay.NewReconciler(outbox, q, logger, reconcileEvery, staleAfter).Start(ctx)
+		defer stopReconciler()
+
+		if cfg.Workers > 0 {
+			// The pool's startup recovery resets every 'processing' job, so
+			// ONLY ONE API INSTANCE may run workers (see worker.Pool.Run).
+			pool := &worker.Pool{
+				Queue:        q,
+				Store:        database.NewWorkStore(db),
+				Handle:       worker.Placeholder(cfg.SimulatedWork),
+				Logger:       logger,
+				Workers:      cfg.Workers,
+				DrainTimeout: workerDrain,
+			}
+			// The pool stops taking jobs when ctx ends (SIGTERM), at the same
+			// moment the HTTP server starts shutting down, and drains in
+			// parallel with it. stopPool also covers run returning early
+			// (a serve error) without SIGTERM. Deferred after q.Close and
+			// db.Close, so the pool has finished before they close.
+			poolCtx, stopPool := context.WithCancel(ctx)
+			poolDone := make(chan struct{})
+			go func() {
+				defer close(poolDone)
+				if err := pool.Run(poolCtx); err != nil {
+					logger.Error("worker pool could not start; jobs wait in Redis", "err", err)
+				}
+			}()
+			defer func() {
+				stopPool()
+				<-poolDone
+			}()
+		}
 	} else {
 		logger.Warn("queue disabled: GOFLOW_REDIS_URL is not set, so new jobs wait in the outbox")
 	}

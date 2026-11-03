@@ -3,6 +3,7 @@ package main
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"golang.org/x/crypto/bcrypt"
 )
@@ -10,7 +11,7 @@ import (
 // testConfig is a valid config for tests. It uses bcrypt's minimum cost,
 // which loadConfig would refuse: tests skip loadConfig and call run directly.
 func testConfig(addr, dbURL string) config {
-	return config{Addr: addr, DatabaseURL: dbURL, BcryptCost: bcrypt.MinCost, RegistrationOpen: true}
+	return config{Addr: addr, DatabaseURL: dbURL, BcryptCost: bcrypt.MinCost, RegistrationOpen: true, SimulatedWork: 10 * time.Millisecond}
 }
 
 // env turns a map into a getenv function.
@@ -41,6 +42,9 @@ func TestLoadConfigDefaults(t *testing.T) {
 	if cfg.RedisURL != "" {
 		t.Errorf("RedisURL = %q, want empty: the queue is optional", cfg.RedisURL)
 	}
+	if cfg.Workers != 0 {
+		t.Errorf("Workers = %d, want 0: the API runs no workers unless asked", cfg.Workers)
+	}
 }
 
 func TestLoadConfigReadsEverySetting(t *testing.T) {
@@ -50,11 +54,13 @@ func TestLoadConfigReadsEverySetting(t *testing.T) {
 		"GOFLOW_BCRYPT_COST":  "11",
 		"GOFLOW_REGISTRATION": "open",
 		"GOFLOW_REDIS_URL":    sampleRedisURL,
+		"GOFLOW_WORKERS":      "3",
 	}))
 	if err != nil {
 		t.Fatalf("loadConfig: %v", err)
 	}
-	want := config{Addr: "127.0.0.1:9000", DatabaseURL: testDBURL, RedisURL: sampleRedisURL, BcryptCost: 11, RegistrationOpen: true}
+	want := config{Addr: "127.0.0.1:9000", DatabaseURL: testDBURL, RedisURL: sampleRedisURL, BcryptCost: 11, RegistrationOpen: true,
+		Workers: 3, SimulatedWork: 5 * time.Second}
 	if cfg != want {
 		t.Errorf("config = %+v, want %+v", cfg, want)
 	}
@@ -74,6 +80,8 @@ func TestLoadConfigRejectsBadSettings(t *testing.T) {
 		{"every problem reported", map[string]string{"GOFLOW_BCRYPT_COST": "3"}, []string{"GOFLOW_DATABASE_URL is required", "got 3"}},
 		{"bad registration value", map[string]string{"GOFLOW_DATABASE_URL": testDBURL, "GOFLOW_REGISTRATION": "yes"}, []string{`"open" or "closed", got "yes"`}},
 		{"bad port", map[string]string{"GOFLOW_DATABASE_URL": testDBURL, "PORT": "http"}, []string{`PORT must be a port number, got "http"`}},
+		{"workers without Redis", map[string]string{"GOFLOW_DATABASE_URL": testDBURL, "GOFLOW_WORKERS": "2"}, []string{"GOFLOW_WORKERS needs GOFLOW_REDIS_URL"}},
+		{"too many workers", map[string]string{"GOFLOW_DATABASE_URL": testDBURL, "GOFLOW_REDIS_URL": sampleRedisURL, "GOFLOW_WORKERS": "33"}, []string{`from 0 to 32, got "33"`}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -156,6 +164,7 @@ func TestLoadConfigRequiresTLSForRemoteRedis(t *testing.T) {
 		{"redis://localhost:6379/0", true},
 		{"redis://:pw@127.0.0.1:6379/0", true},
 		{"redis://[::1]:6379", true},
+		{"redis://red-abc123:6379", true}, // Render's private network
 		{"rediss://default:pw@cache.example.com:6379", true},
 		{"redis://default:pw@cache.example.com:6379", false},
 		{"http://default:pw@localhost:6379", false},

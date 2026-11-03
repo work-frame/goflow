@@ -147,7 +147,7 @@ All errors are `{"error": "..."}`.
 
 1. Read every setting with `loadConfig` and report all problems at once (`errors.Join`): a missing or non-TLS remote `GOFLOW_DATABASE_URL`, a bcrypt cost outside 10–14, a `GOFLOW_REGISTRATION` other than `open` or `closed`. Errors never include the URL, which holds the password.
 2. Connect (5 s ping), run migrations. No port is opened if this fails.
-3. If `GOFLOW_REDIS_URL` is set, connect to Redis (5 s ping) and start the relay. Otherwise log a warning: new jobs wait in the outbox.
+3. If `GOFLOW_REDIS_URL` is set, connect to Redis (5 s ping) and start the relay and the reconciler, and, with `GOFLOW_WORKERS` above 0, the worker pool. Otherwise log a warning: new jobs wait in the outbox.
 4. Start the hourly expired-session cleanup, and build the dummy bcrypt hash used for unknown emails in the background.
 5. Bind the port (`GOFLOW_ADDR`, else `PORT`, else `:8080`), log `listening`, serve.
 6. On `SIGINT`/`SIGTERM`: stop accepting connections, finish in-flight requests (up to 10 s), stop the cleanup and the relay, then close Redis and the database pool.
@@ -158,7 +158,7 @@ Creating a job writes two things to two systems: the job (PostgreSQL) and its ID
 
 ```text
 POST /api/v1/jobs ─► BEGIN; INSERT jobs; INSERT job_outbox; COMMIT ─► 201 ─► relay.Wake()
-relay (every 30 s, and when woken):
+relay (at start, when woken, and on a retry timer after a failure):
   BEGIN
   SELECT ... FROM job_outbox ORDER BY id LIMIT 100 FOR UPDATE SKIP LOCKED
   LPUSH goflow:jobs:pending <ids>            ── fails? ROLLBACK; rows wait for the next try
@@ -169,11 +169,13 @@ relay (every 30 s, and when woken):
 - **Nothing is lost.** A job exists only together with its outbox row. If Redis is down, the rows wait; the request still succeeds.
 - **Delivered at least once, not exactly once.** If `LPUSH` succeeds and the `COMMIT` then fails, the rows remain and the same IDs are pushed again. Workers (Phase 6) must handle seeing a job twice.
 - **Several instances are safe.** `FOR UPDATE SKIP LOCKED` gives each relay different rows.
-- **`Wake` never blocks.** It's a send on a channel with room for one signal; extra wake-ups are dropped because the next pass sends everything anyway. The 30 s tick covers wake-ups that never came.
+- **`Wake` never blocks.** It's a send on a channel with room for one signal; extra wake-ups are dropped because the next pass sends everything anyway.
+- **No polling while healthy.** After a failed pass the relay retries after 1 s, doubling up to 5 minutes; while all is well it doesn't query the database between wake-ups. Neon's free compute sleeps after 5 idle minutes and has 100 compute-hours a month; a query every 30 s would keep it awake around the clock (about 180 hours at the smallest size). `TestRelayDoesNotPollWhileHealthy` guards this.
+- **The reconciler re-sends lost IDs.** The outbox gets an ID to Redis once; it can't see Redis lose it later (a free Key Value restart empties the lists). At start and then hourly, the API re-sends jobs `queued` for more than 10 minutes and moves their `updated_at` forward. A duplicate is harmless: `Claim` lets one worker win. One query an hour keeps Neon's cost small.
 
 ### The worker pool
 
-`cmd/worker` runs `GOFLOW_WORKERS` goroutines (default 4). Each one loops:
+`cmd/worker` runs `GOFLOW_WORKERS` goroutines (default 4). The API can run the same pool itself (`GOFLOW_WORKERS` above 0 in its environment), which is how it runs on Render. Each worker loops:
 
 ```text
 Take      BLMOVE goflow:jobs:pending → goflow:jobs:processing   (atomic; waits up to 2 s)
@@ -241,7 +243,7 @@ Everything runs with the race detector (`./scripts/check.sh`). [FAILURES.md](FAI
 - The work itself is a placeholder; real job types, retries and timeouts come in Phases 6–7.
 - One worker process at a time (see [The worker pool](#the-worker-pool)); not safe with several. It isn't deployed on Render yet.
 - Jobs reach Redis at least once; a duplicate ID is possible after a failed commit. Workers must be idempotent (Phase 6–7).
-- Every API instance with Redis polls the outbox every 30 s. On a database that sleeps when idle (Neon free), that keeps it awake: decide in Phase 6, when Redis is hosted.
+- Plain `redis://` is accepted for single-label private-network names (Render's internal Key Value host): that traffic is unencrypted inside the provider's network.
 - No rate limit on login or password change (Phase 9). Closed registration limits who has an account meanwhile.
 - After the bcrypt cost changes, response time can tell old accounts from unknown emails until each user logs in once.
 - A failed readiness check is logged twice, and every `/healthz` check from Render is logged (Phase 10).
