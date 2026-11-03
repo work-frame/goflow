@@ -3,9 +3,11 @@ package queue
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -25,9 +27,10 @@ func openTestQueue(t *testing.T) *Queue {
 	}
 	q.key = "goflow:test:" + t.Name() + ":pending"
 	q.processing = "goflow:test:" + t.Name() + ":processing"
-	q.rdb.Del(context.Background(), q.key, q.processing)
+	q.delayed = "goflow:test:" + t.Name() + ":delayed"
+	q.rdb.Del(context.Background(), q.key, q.processing, q.delayed)
 	t.Cleanup(func() {
-		q.rdb.Del(context.Background(), q.key, q.processing)
+		q.rdb.Del(context.Background(), q.key, q.processing, q.delayed)
 		q.Close()
 	})
 	return q
@@ -191,5 +194,82 @@ func TestNewDoesNotConnect(t *testing.T) {
 	}
 	if _, err := New("http://localhost:6379"); err == nil {
 		t.Fatal("New accepted an http:// URL")
+	}
+}
+
+// Only due IDs move, earliest first; later ones stay scheduled.
+func TestPromoteDueMovesOnlyDueIDsInOrder(t *testing.T) {
+	q := openTestQueue(t)
+	ctx := context.Background()
+	now := time.Now()
+	for id, at := range map[string]time.Time{
+		"due-second": now.Add(-time.Second),
+		"due-first":  now.Add(-time.Minute),
+		"later":      now.Add(time.Hour),
+	} {
+		if err := q.Schedule(ctx, id, at); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	n, err := q.PromoteDue(ctx, now, 100)
+	if err != nil || n != 2 {
+		t.Fatalf("PromoteDue = %d, %v; want 2, nil", n, err)
+	}
+	var order []string
+	for range 2 {
+		id, err := q.Take(ctx, time.Second)
+		if err != nil {
+			t.Fatal(err)
+		}
+		order = append(order, id)
+	}
+	if want := []string{"due-first", "due-second"}; !slices.Equal(order, want) {
+		t.Errorf("taken order = %v, want %v (earliest due first)", order, want)
+	}
+	if left, _ := q.rdb.ZRange(ctx, q.delayed, 0, -1).Result(); !slices.Equal(left, []string{"later"}) {
+		t.Errorf("delayed set = %v, want [later]", left)
+	}
+}
+
+// Two promoters racing never deliver an ID twice: the script runs as one step.
+func TestPromoteDueNeverDuplicates(t *testing.T) {
+	q := openTestQueue(t)
+	ctx := context.Background()
+	past := time.Now().Add(-time.Second)
+	for i := range 200 {
+		if err := q.Schedule(ctx, fmt.Sprintf("job-%03d", i), past); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var wg sync.WaitGroup
+	for range 4 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				n, err := q.PromoteDue(ctx, time.Now(), 7)
+				if err != nil || n == 0 {
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+
+	ids, err := q.rdb.LRange(ctx, q.key, 0, -1).Result()
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]bool{}
+	for _, id := range ids {
+		if seen[id] {
+			t.Fatalf("%s delivered twice", id)
+		}
+		seen[id] = true
+	}
+	if len(ids) != 200 {
+		t.Fatalf("delivered %d IDs, want 200", len(ids))
 	}
 }

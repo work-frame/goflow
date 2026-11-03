@@ -1,6 +1,6 @@
 # GoFlow
 
-GoFlow is a job-processing platform written in Go. You submit background jobs, and GoFlow tracks them through their lifecycle (`pending`, `queued`, `processing`, `completed`, `failed`).
+GoFlow is a job-processing platform written in Go. You submit background jobs, and GoFlow tracks them through their lifecycle (`pending`, `queued`, `processing`, then `completed`, or `retrying` and finally `dead` when a job keeps failing).
 
 I'm building it to learn production Go: the standard library first, then HTTP, PostgreSQL, Redis queues, concurrent workers, observability, Docker and CI/CD.
 
@@ -12,7 +12,7 @@ I'm building it to learn production Go: the standard library first, then HTTP, P
 - **Phase 4 (done):** accounts, login sessions, per-user jobs, `goflow login`, and a first deployment on Render and Neon ([DEPLOYMENT.md](DEPLOYMENT.md))
 - **Phase 5 (done):** Redis job queue. A new job and an outbox row are saved in one transaction; with `GOFLOW_REDIS_URL` set, a background relay moves the ID to a Redis list and marks the job `queued`. A single worker (`cmd/worker`) takes IDs off the queue and runs jobs to `completed`; the work itself is a placeholder until real job types arrive. Runs locally; not deployed yet.
 - **Phase 6 (done):** a pool of concurrent workers (`GOFLOW_WORKERS`) with graceful shutdown. On Render, the API runs the pool itself against a free Key Value queue ([DEPLOYMENT.md](DEPLOYMENT.md)). Jobs are created, queued and completed end to end in production; the work is still a 5-second placeholder.
-- **Phase 7 (next):** retries with backoff, timeouts, a dead-letter queue and idempotent job handlers.
+- **Phase 7 (in progress):** failed jobs retry with exponential backoff and jitter, up to 3 attempts, then become `dead`; permanent errors skip the retries. Next: timeouts, a dead-letter queue and idempotent job creation.
 
 ## Requirements
 
@@ -69,7 +69,7 @@ The server stops on `Ctrl+C` or `SIGTERM`, finishing in-flight requests first (u
 
 | Parameter | Default | Meaning |
 |---|---|---|
-| `status` | (all) | `pending`, `queued`, `processing`, `completed` or `failed` |
+| `status` | (all) | `pending`, `queued`, `processing`, `retrying`, `completed`, `dead`, or `failed` (jobs from before retries) |
 | `limit` | 50 | Jobs per page, 1 to 200 |
 | `cursor` | (start) | The `next_cursor` from the previous page. Treat it as opaque |
 

@@ -249,3 +249,53 @@ func TestReconcilerRunsAgainOnItsInterval(t *testing.T) {
 
 	eventually(t, "three runs", func() bool { return s.runCount() >= 3 })
 }
+
+// memDelayed is a delayed set: due times by ID, promoted into queued.
+type memDelayed struct {
+	mu     sync.Mutex
+	due    map[string]time.Time
+	queued []string
+}
+
+func (d *memDelayed) PromoteDue(_ context.Context, now time.Time, limit int) (int, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	var ready []string
+	for id, at := range d.due {
+		if !at.After(now) {
+			ready = append(ready, id)
+		}
+	}
+	slices.Sort(ready)
+	ready = ready[:min(limit, len(ready))]
+	for _, id := range ready {
+		delete(d.due, id)
+		d.queued = append(d.queued, id)
+	}
+	return len(ready), nil
+}
+
+func (d *memDelayed) snapshot() []string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return slices.Clone(d.queued)
+}
+
+func TestPromoterMovesRetriesWhenDue(t *testing.T) {
+	d := &memDelayed{due: map[string]time.Time{
+		"now":   time.Now().Add(-time.Second),
+		"later": time.Now().Add(80 * time.Millisecond),
+		"never": time.Now().Add(time.Hour),
+	}}
+	stop := NewPromoter(d, discardLogger(), 5*time.Millisecond).Start(context.Background())
+	defer stop()
+
+	eventually(t, "the due retry promoted", func() bool { return slices.Contains(d.snapshot(), "now") })
+	if slices.Contains(d.snapshot(), "later") {
+		t.Fatal("a retry was promoted before it was due")
+	}
+	eventually(t, "the second retry promoted once due", func() bool { return slices.Contains(d.snapshot(), "later") })
+	if slices.Contains(d.snapshot(), "never") {
+		t.Fatal("a retry due in an hour was promoted")
+	}
+}

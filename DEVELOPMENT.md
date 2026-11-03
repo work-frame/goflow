@@ -142,6 +142,8 @@ docker exec goflow-postgres psql -U goflow -c 'SELECT id, title, status FROM job
 docker exec goflow-postgres psql -U goflow -c 'SELECT * FROM job_outbox'          # jobs not yet in Redis
 docker exec goflow-redis valkey-cli lrange goflow:jobs:pending 0 -1                # job IDs waiting
 docker exec goflow-redis valkey-cli lrange goflow:jobs:processing 0 -1             # taken, not finished
+docker exec goflow-redis valkey-cli zrange goflow:jobs:delayed 0 -1 withscores     # retries and when they're due (Unix ms)
+docker exec goflow-postgres psql -U goflow -c "SELECT id, status, attempts, next_attempt_at, last_error FROM jobs WHERE status IN ('retrying','dead')"
 ```
 
 ## Deploying

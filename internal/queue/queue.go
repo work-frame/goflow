@@ -26,6 +26,10 @@ const (
 	// An ID stays here until Ack, so a worker that dies mid-job leaves it
 	// behind instead of losing it.
 	ProcessingKey = "goflow:jobs:processing"
+	// DelayedKey is a sorted set of job IDs waiting for a retry, scored by
+	// when they are due (Unix milliseconds). It only schedules delivery:
+	// PostgreSQL records that a job is retrying and when.
+	DelayedKey = "goflow:jobs:delayed"
 )
 
 // ErrEmpty means Take waited and no job ID arrived.
@@ -37,6 +41,7 @@ type Queue struct {
 	rdb        *redis.Client
 	key        string // pending list
 	processing string
+	delayed    string
 }
 
 // Open connects to the Redis server at rawURL and checks it with a PING.
@@ -73,7 +78,7 @@ func New(rawURL string) (*Queue, error) {
 	opts.DialTimeout = 2 * time.Second
 	opts.ReadTimeout = 2 * time.Second
 	opts.WriteTimeout = 2 * time.Second
-	return &Queue{rdb: redis.NewClient(opts), key: PendingKey, processing: ProcessingKey}, nil
+	return &Queue{rdb: redis.NewClient(opts), key: PendingKey, processing: ProcessingKey, delayed: DelayedKey}, nil
 }
 
 // Enqueue adds job IDs to the pending list in one command, keeping their
@@ -146,8 +151,40 @@ func (q *Queue) Recover(ctx context.Context) (int, error) {
 
 // WithKeys returns a Queue that shares q's connections but uses other
 // lists. Tests use it so they never touch the real lists.
-func (q *Queue) WithKeys(pending, processing string) *Queue {
-	return &Queue{rdb: q.rdb, key: pending, processing: processing}
+func (q *Queue) WithKeys(pending, processing, delayed string) *Queue {
+	return &Queue{rdb: q.rdb, key: pending, processing: processing, delayed: delayed}
+}
+
+// Schedule puts a job ID in the delayed set, due at `at`. Scheduling an ID
+// that is already there just moves its due time.
+func (q *Queue) Schedule(ctx context.Context, jobID string, at time.Time) error {
+	if err := q.rdb.ZAdd(ctx, q.delayed, redis.Z{Score: float64(at.UnixMilli()), Member: jobID}).Err(); err != nil {
+		return fmt.Errorf("queue: schedule %s: %w", jobID, err)
+	}
+	return nil
+}
+
+// promoteScript moves up to ARGV[2] IDs due by ARGV[1] (Unix ms) from the
+// delayed set (KEYS[1]) to the pending list (KEYS[2]), earliest first.
+// Redis runs a script as one step: no other command runs in the middle,
+// so two promoters can't move the same ID twice.
+var promoteScript = redis.NewScript(`
+local ids = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', ARGV[1], 'LIMIT', 0, ARGV[2])
+for _, id in ipairs(ids) do
+	redis.call('ZREM', KEYS[1], id)
+	redis.call('LPUSH', KEYS[2], id)
+end
+return #ids
+`)
+
+// PromoteDue moves up to limit IDs that are due by now from the delayed set
+// to the pending list, earliest first, and returns how many it moved.
+func (q *Queue) PromoteDue(ctx context.Context, now time.Time, limit int) (int, error) {
+	n, err := promoteScript.Run(ctx, q.rdb, []string{q.delayed, q.key}, now.UnixMilli(), limit).Int()
+	if err != nil {
+		return 0, fmt.Errorf("queue: promote due retries: %w", err)
+	}
+	return n, nil
 }
 
 // Len reports how many job IDs are waiting.

@@ -114,6 +114,10 @@ func run(ctx context.Context, logger *slog.Logger, cfg config, ready func(addr s
 		defer stopRelay()
 		stopReconciler := relay.NewReconciler(outbox, q, logger, reconcileEvery, staleAfter).Start(ctx)
 		defer stopReconciler()
+		// Due retries move from Redis's delayed set to the queue. Redis only:
+		// it can run every second without waking the database.
+		stopPromoter := relay.NewPromoter(q, logger, time.Second).Start(ctx)
+		defer stopPromoter()
 
 		if cfg.Workers > 0 {
 			// The pool's startup recovery resets every 'processing' job, so

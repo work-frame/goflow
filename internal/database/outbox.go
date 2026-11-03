@@ -91,10 +91,15 @@ func (s *OutboxStore) Relay(ctx context.Context, limit int, send func(ctx contex
 // their updated_at is moved to now, so the next run doesn't send them again
 // unless they stay stuck for another olderThan. It returns how many it sent.
 //
+// It also re-sends 'retrying' jobs whose next_attempt_at passed more than
+// olderThan ago, straight to the pending list, and moves next_attempt_at to
+// now: their ID should have left Redis's delayed set long ago.
+//
 // A job is 'queued' once the relay has put its ID in Redis. Staying queued
-// for long means no worker has claimed it: either the queue is backed up, or
-// Redis lost the ID (a free Key Value restart empties it). Sending it again
-// costs at most a duplicate, which Claim makes harmless.
+// (or overdue while retrying) for long means no worker has claimed it:
+// either the queue is backed up, or Redis lost the ID (a free Key Value
+// restart empties every list and the delayed set). Sending it again costs at
+// most a duplicate, which Claim makes harmless.
 func (s *OutboxStore) RequeueStale(ctx context.Context, olderThan time.Duration, limit int, send func(ctx context.Context, jobIDs []string) error) (int, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -105,7 +110,8 @@ func (s *OutboxStore) RequeueStale(ctx context.Context, olderThan time.Duration,
 	// make_interval takes seconds as a double; olderThan never comes from users.
 	rows, err := tx.QueryContext(ctx,
 		`SELECT id FROM jobs
-		 WHERE status = 'queued' AND updated_at < now() - make_interval(secs => $1)
+		 WHERE (status = 'queued' AND updated_at < now() - make_interval(secs => $1))
+		    OR (status = 'retrying' AND next_attempt_at < now() - make_interval(secs => $1))
 		 ORDER BY updated_at, id LIMIT $2 FOR UPDATE SKIP LOCKED`,
 		olderThan.Seconds(), limit)
 	if err != nil {
@@ -132,7 +138,9 @@ func (s *OutboxStore) RequeueStale(ctx context.Context, olderThan time.Duration,
 		return 0, err
 	}
 	if _, err := tx.ExecContext(ctx,
-		`UPDATE jobs SET updated_at = GREATEST(now(), created_at) WHERE id = ANY($1) AND status = 'queued'`, ids); err != nil {
+		`UPDATE jobs SET updated_at = GREATEST(now(), created_at),
+		        next_attempt_at = CASE WHEN status = 'retrying' THEN now() ELSE next_attempt_at END
+		 WHERE id = ANY($1) AND status IN ('queued', 'retrying')`, ids); err != nil {
 		return 0, fmt.Errorf("database: requeue stale: touch: %w", err)
 	}
 	if err := tx.Commit(); err != nil {

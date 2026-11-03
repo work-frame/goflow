@@ -423,6 +423,18 @@ Each case was reproduced on a real machine (Arch Linux, Go 1.27, PostgreSQL 17) 
   ```
 - **Why:** this is the failed Render deploy of 3 November, reproduced on a laptop. A Blueprint sync created the Key Value and redeployed the API at the same moment; the new API pinged Redis before it accepted connections and exited, so the deploy failed. Exiting protected nothing: job creation never needed Redis (the outbox), and every Redis user already retried. A dependency the program can work without shouldn't be able to stop it from starting. The database is different: without it the API can't serve anything, so it still exits.
 
+## 32. A retry is recorded in PostgreSQL before Redis schedules it
+
+- **Safeguard:** `Pool.retry` calls `Store.Retry` first (the job becomes `retrying` with `next_attempt_at` and `last_error`, committed), and only then `Queue.Schedule` (the ID goes into the delayed set). If the PostgreSQL write fails, nothing is scheduled and the ID stays in the processing list.
+- **Removed:** `Queue.Schedule` called before `Store.Retry`.
+- **Caught by:** `TestRetryIsRecordedBeforeItIsScheduled`, which records the order of the two calls and then makes the PostgreSQL write fail.
+- **Observed:**
+  ```text
+  --- FAIL: TestRetryIsRecordedBeforeItIsScheduled (0.00s)
+      worker_test.go:424: calls = [redis:schedule ok postgres:retry ok redis:schedule ok], want [postgres:retry ok redis:schedule ok]: PostgreSQL first, then Redis
+  ```
+- **Why:** the same two-systems problem as the dual write, now inside the worker. Scheduling first means that if the PostgreSQL write then fails, Redis holds a retry the source of truth never recorded: the job is still `processing` in PostgreSQL while its ID will come back from the delayed set. Recording first means the worst case is the reverse, a retry PostgreSQL knows about but Redis doesn't, and that one is safe: the reconciler finds `retrying` jobs that are overdue and sends them again. Write to the system of record first; let the other system be the one that can be repaired.
+
 ## Experiment: the naive dual write loses a job
 
 Not a removed safeguard but the design of Task 22, run live on 2 November 2026 to see the failure Task 23 fixes. `POST /api/v1/jobs` saved the job in PostgreSQL, then pushed its ID to Redis, with nothing tying the two together.
