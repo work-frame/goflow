@@ -2,6 +2,8 @@ package database
 
 import (
 	"context"
+	"fmt"
+	"sync"
 	"testing"
 
 	"github.com/work-frame/goflow/internal/job"
@@ -56,14 +58,99 @@ func TestClaimSkipsFinishedAndMissingJobs(t *testing.T) {
 	}
 }
 
-// A worker that died mid-job left it processing; claiming it again resumes it.
-func TestClaimResumesAProcessingJob(t *testing.T) {
+// A processing job is someone else's: claiming it again must lose.
+func TestClaimRefusesAProcessingJob(t *testing.T) {
 	f := newJobsFixture(t)
 	w := NewWorkStore(f.db)
-	id := addJobs(t, f, "interrupted")[0]
+	id := addJobs(t, f, "taken")[0]
 
-	claim(t, w, id)
 	if !claim(t, w, id) {
-		t.Fatal("second Claim of a processing job = false, want true")
+		t.Fatal("first Claim = false, want true")
+	}
+	if claim(t, w, id) {
+		t.Fatal("second Claim of a processing job = true, want false: the job would run twice")
+	}
+}
+
+// Two goroutines claim the same job at the same moment, over and over,
+// against real PostgreSQL. Exactly one may win each time. The goroutines use
+// separate pooled connections, so this is the same race as two processes.
+func TestClaimHasExactlyOneWinner(t *testing.T) {
+	f := newJobsFixture(t)
+	w := NewWorkStore(f.db)
+	ctx := context.Background()
+	const rounds = 50
+
+	ids := make([]string, rounds)
+	for i := range rounds {
+		ids[i] = addJobs(t, f, fmt.Sprintf("race %d", i))[0]
+	}
+
+	for i, id := range ids {
+		start := make(chan struct{})
+		results := make(chan bool, 2)
+		errs := make(chan error, 2)
+		var wg sync.WaitGroup
+		for range 2 {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start // both goroutines are ready; release them together
+				won, err := w.Claim(ctx, id)
+				if err != nil {
+					errs <- err
+					return
+				}
+				results <- won
+			}()
+		}
+		close(start)
+		wg.Wait()
+		close(results)
+		close(errs)
+		for err := range errs {
+			t.Fatalf("round %d: Claim: %v", i, err)
+		}
+		winners := 0
+		for won := range results {
+			if won {
+				winners++
+			}
+		}
+		if winners != 1 {
+			t.Fatalf("round %d: %d goroutines won the claim, want exactly 1", i, winners)
+		}
+	}
+}
+
+// Startup recovery: processing jobs go back to queued; other statuses stay.
+func TestResetProcessing(t *testing.T) {
+	f := newJobsFixture(t)
+	w := NewWorkStore(f.db)
+	ctx := context.Background()
+	ids := addJobs(t, f, "stuck one", "stuck two", "finished", "waiting")
+
+	for _, id := range ids[:3] {
+		claim(t, w, id)
+	}
+	if err := w.Complete(ctx, ids[2]); err != nil {
+		t.Fatal(err)
+	}
+
+	n, err := w.ResetProcessing(ctx)
+	if err != nil {
+		t.Fatalf("ResetProcessing: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("ResetProcessing changed %d jobs, want 2", n)
+	}
+	want := map[string]job.Status{ids[0]: job.StatusQueued, ids[1]: job.StatusQueued, ids[2]: job.StatusCompleted, ids[3]: job.StatusPending}
+	for id, status := range want {
+		if got := statusOf(t, f, id); got != status {
+			t.Errorf("job %s: status %s, want %s", id, got, status)
+		}
+	}
+	if !claim(t, w, ids[0]) {
+		t.Error("a reset job can't be claimed again")
 	}
 }

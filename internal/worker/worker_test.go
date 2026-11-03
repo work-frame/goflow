@@ -35,7 +35,7 @@ func (q *memQueue) Take(ctx context.Context, timeout time.Duration) (string, err
 	select { // nothing waiting: block briefly, like BLMOVE
 	case <-ctx.Done():
 		return "", ctx.Err()
-	case <-time.After(5 * time.Millisecond):
+	case <-time.After(2 * time.Millisecond):
 		return "", queue.ErrEmpty
 	}
 }
@@ -58,13 +58,20 @@ func (q *memQueue) Recover(context.Context) (int, error) {
 	return n, nil
 }
 
+func (q *memQueue) add(ids ...string) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.pending = append(q.pending, ids...)
+}
+
 func (q *memQueue) lists() (pending, processing []string) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	return slices.Clone(q.pending), slices.Clone(q.processing)
 }
 
-// memStore tracks job statuses like WorkStore does.
+// memStore tracks statuses like WorkStore: Claim wins only from pending or
+// queued, under a mutex, so exactly one caller wins.
 type memStore struct {
 	mu     sync.Mutex
 	status map[string]string
@@ -82,14 +89,27 @@ func (s *memStore) Claim(_ context.Context, id string) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	switch s.status[id] {
-	case "pending", "queued", "processing":
+	case "pending", "queued":
 		s.status[id] = "processing"
 		return true, nil
 	}
 	return false, nil
 }
 
-func (s *memStore) set(id, from, to string) {
+func (s *memStore) ResetProcessing(context.Context) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var n int64
+	for id, st := range s.status {
+		if st == "processing" {
+			s.status[id] = "queued"
+			n++
+		}
+	}
+	return n, nil
+}
+
+func (s *memStore) setIf(id, from, to string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.status[id] == from {
@@ -98,12 +118,12 @@ func (s *memStore) set(id, from, to string) {
 }
 
 func (s *memStore) Complete(_ context.Context, id string) error {
-	s.set(id, "processing", "completed")
+	s.setIf(id, "processing", "completed")
 	return nil
 }
 
 func (s *memStore) Fail(_ context.Context, id string) error {
-	s.set(id, "processing", "failed")
+	s.setIf(id, "processing", "failed")
 	return nil
 }
 
@@ -111,28 +131,6 @@ func (s *memStore) get(id string) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.status[id]
-}
-
-// runUntil runs w until done reports true (or 5 s pass), then stops it.
-func runUntil(t *testing.T, w *Worker, what string, done func() bool) {
-	t.Helper()
-	ctx, cancel := context.WithCancel(context.Background())
-	finished := make(chan error, 1)
-	go func() { finished <- w.Run(ctx) }()
-
-	deadline := time.Now().Add(5 * time.Second)
-	for !done() {
-		if time.Now().After(deadline) {
-			cancel()
-			<-finished
-			t.Fatalf("after 5s: %s", what)
-		}
-		time.Sleep(time.Millisecond)
-	}
-	cancel()
-	if err := <-finished; err != nil {
-		t.Fatalf("Run: %v", err)
-	}
 }
 
 // counter counts handler calls per job ID.
@@ -157,30 +155,97 @@ func (c *counter) count(id string) int {
 	return c.calls[id]
 }
 
-func TestWorkerCompletesAndAcks(t *testing.T) {
-	q := &memQueue{pending: []string{"job1"}}
-	s := newMemStore("job1")
-	c := &counter{}
-	w := &Worker{Queue: q, Store: s, Handle: c.handle, Logger: discardLogger()}
+func newPool(q *memQueue, s *memStore, workers int, h Handler) *Pool {
+	return &Pool{Queue: q, Store: s, Handle: h, Logger: discardLogger(), Workers: workers, DrainTimeout: time.Second}
+}
 
-	runUntil(t, w, "job1 completed", func() bool { return s.get("job1") == "completed" })
-
-	if c.count("job1") != 1 {
-		t.Errorf("handler ran %d times, want 1", c.count("job1"))
+// start runs p in the background and returns a function that stops it
+// (cancels its context, the SIGTERM equivalent) and waits for Run to return.
+func start(t *testing.T, p *Pool) (stop func()) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- p.Run(ctx) }()
+	var once sync.Once
+	stop = func() {
+		once.Do(func() {
+			cancel()
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Errorf("Run: %v", err)
+				}
+			case <-time.After(10 * time.Second):
+				t.Error("Run did not return within 10s of stopping")
+			}
+		})
 	}
-	if _, processing := q.lists(); len(processing) != 0 {
-		t.Errorf("processing list = %v after completion, want empty", processing)
+	t.Cleanup(stop)
+	return stop
+}
+
+func eventually(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("after 5s: %s", what)
+		}
+		time.Sleep(time.Millisecond)
 	}
 }
 
-// The same ID twice (at-least-once delivery) runs the job once.
-func TestWorkerSkipsADuplicateID(t *testing.T) {
-	q := &memQueue{pending: []string{"dup", "dup", "last"}}
-	s := newMemStore("dup", "last")
-	c := &counter{}
-	w := &Worker{Queue: q, Store: s, Handle: c.handle, Logger: discardLogger()}
+func TestPoolCompletesAndAcks(t *testing.T) {
+	q, s, c := &memQueue{pending: []string{"job1"}}, newMemStore("job1"), &counter{}
+	start(t, newPool(q, s, 2, c.handle))
 
-	runUntil(t, w, "every ID handled", func() bool {
+	eventually(t, "job1 completed and acknowledged", func() bool {
+		_, processing := q.lists()
+		return s.get("job1") == "completed" && len(processing) == 0
+	})
+	if c.count("job1") != 1 {
+		t.Errorf("handler ran %d times, want 1", c.count("job1"))
+	}
+}
+
+// With 4 workers, 4 jobs run at the same time: each handler waits until all
+// four have started. With fewer workers this would never finish.
+func TestPoolRunsJobsConcurrently(t *testing.T) {
+	ids := []string{"a", "b", "c", "d"}
+	q, s := &memQueue{pending: slices.Clone(ids)}, newMemStore(ids...)
+
+	var started sync.WaitGroup
+	started.Add(len(ids))
+	allStarted := make(chan struct{})
+	go func() { started.Wait(); close(allStarted) }()
+
+	start(t, newPool(q, s, len(ids), func(ctx context.Context, _ string) error {
+		started.Done()
+		select {
+		case <-allStarted:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}))
+
+	eventually(t, "all four jobs completed together", func() bool {
+		for _, id := range ids {
+			if s.get(id) != "completed" {
+				return false
+			}
+		}
+		return true
+	})
+}
+
+// The same ID twice (at-least-once delivery), taken by different workers:
+// the job runs once.
+func TestPoolRunsADuplicateIDOnce(t *testing.T) {
+	q, s, c := &memQueue{pending: []string{"dup", "dup", "last"}}, newMemStore("dup", "last"), &counter{}
+	start(t, newPool(q, s, 3, c.handle))
+
+	eventually(t, "every ID handled", func() bool {
 		pending, processing := q.lists()
 		return s.get("last") == "completed" && len(pending) == 0 && len(processing) == 0
 	})
@@ -189,45 +254,97 @@ func TestWorkerSkipsADuplicateID(t *testing.T) {
 	}
 }
 
-func TestWorkerMarksAFailingJobFailed(t *testing.T) {
-	q := &memQueue{pending: []string{"bad"}}
-	s := newMemStore("bad")
-	w := &Worker{Queue: q, Store: s, Logger: discardLogger(),
-		Handle: func(context.Context, string) error { return errors.New("boom") }}
+func TestPoolMarksAFailingJobFailed(t *testing.T) {
+	q, s := &memQueue{pending: []string{"bad"}}, newMemStore("bad")
+	start(t, newPool(q, s, 1, func(context.Context, string) error { return errors.New("boom") }))
 
-	runUntil(t, w, "bad marked failed", func() bool { return s.get("bad") == "failed" })
-	if _, processing := q.lists(); len(processing) != 0 {
-		t.Errorf("processing list = %v, want empty: the failure was recorded", processing)
+	eventually(t, "bad marked failed and acknowledged", func() bool {
+		_, processing := q.lists()
+		return s.get("bad") == "failed" && len(processing) == 0
+	})
+}
+
+// SIGTERM stops new claims but lets an active job finish. The active job's
+// context must stay alive, and a job queued after the stop is never taken.
+func TestStopLetsTheActiveJobFinish(t *testing.T) {
+	q, s := &memQueue{pending: []string{"active"}}, newMemStore("active", "later")
+
+	inJob := make(chan struct{})
+	release := make(chan struct{})
+	var ctxErrAtEnd error
+	p := newPool(q, s, 1, func(ctx context.Context, _ string) error {
+		close(inJob)
+		<-release
+		ctxErrAtEnd = ctx.Err()
+		return nil
+	})
+	p.DrainTimeout = 5 * time.Second
+	stop := start(t, p)
+
+	<-inJob
+	stopped := make(chan struct{})
+	go func() { stop(); close(stopped) }()
+	time.Sleep(20 * time.Millisecond) // the stop signal is out; the job is still running
+	q.add("later")
+	close(release)
+	<-stopped
+
+	if ctxErrAtEnd != nil {
+		t.Fatalf("the active job's context was cancelled (%v): SIGTERM must not cancel running jobs", ctxErrAtEnd)
+	}
+	if got := s.get("active"); got != "completed" {
+		t.Errorf("active job status = %s, want completed", got)
+	}
+	if got := s.get("later"); got != "queued" {
+		t.Errorf("a job queued after the stop has status %s, want queued: it must not be taken", got)
 	}
 }
 
-// A worker stopped mid-job leaves the ID in processing. The next worker puts
-// it back and runs the job to the end.
-func TestWorkerRecoversAJobLeftMidWay(t *testing.T) {
-	q := &memQueue{pending: []string{"long"}}
-	s := newMemStore("long")
+// A job still running when the drain timeout ends is cancelled, records
+// nothing, and keeps its ID in the processing list for the next start.
+func TestDrainTimeoutCancelsAndKeepsTheJob(t *testing.T) {
+	q, s := &memQueue{pending: []string{"slow"}}, newMemStore("slow")
+	inJob := make(chan struct{})
+	p := newPool(q, s, 1, func(ctx context.Context, _ string) error {
+		close(inJob)
+		<-ctx.Done() // only returns once cancelled
+		return ctx.Err()
+	})
+	p.DrainTimeout = 50 * time.Millisecond
+	stop := start(t, p)
 
-	started := make(chan struct{})
-	first := &Worker{Queue: q, Store: s, Logger: discardLogger(),
-		Handle: func(ctx context.Context, _ string) error {
-			close(started)
-			<-ctx.Done() // the "crash": stopped before finishing
-			return ctx.Err()
-		}}
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() { done <- first.Run(ctx) }()
-	<-started
-	cancel()
-	if err := <-done; err != nil {
-		t.Fatal(err)
+	<-inJob
+	began := time.Now()
+	stop()
+	if took := time.Since(began); took < 50*time.Millisecond {
+		t.Errorf("Run returned after %v, before the 50ms drain timeout", took)
 	}
-
-	if _, processing := q.lists(); !slices.Equal(processing, []string{"long"}) {
-		t.Fatalf("processing list after the crash = %v, want [long]", processing)
+	if got := s.get("slow"); got != "processing" {
+		t.Errorf("status after the drain timeout = %s, want processing (nothing recorded)", got)
 	}
+	if _, processing := q.lists(); !slices.Equal(processing, []string{"slow"}) {
+		t.Errorf("processing list = %v, want [slow]: the ID must survive for the next start", processing)
+	}
+}
 
+// Startup recovery: a job a stopped process left 'processing' (in PostgreSQL
+// and in Redis's processing list) is reset, re-queued and run to the end.
+func TestStartupRecoveryRunsLeftoverJobs(t *testing.T) {
+	q := &memQueue{processing: []string{"leftover"}}
+	s := newMemStore()
+	s.status["leftover"] = "processing"
 	c := &counter{}
-	second := &Worker{Queue: q, Store: s, Handle: c.handle, Logger: discardLogger()}
-	runUntil(t, second, "long completed after restart", func() bool { return s.get("long") == "completed" })
+	start(t, newPool(q, s, 2, c.handle))
+
+	eventually(t, "leftover completed after recovery", func() bool { return s.get("leftover") == "completed" })
+	if c.count("leftover") != 1 {
+		t.Errorf("leftover ran %d times, want 1", c.count("leftover"))
+	}
+}
+
+func TestPoolNeedsAWorker(t *testing.T) {
+	err := newPool(&memQueue{}, newMemStore(), 0, (&counter{}).handle).Run(context.Background())
+	if err == nil {
+		t.Fatal("Run with 0 workers succeeded, want an error")
+	}
 }
