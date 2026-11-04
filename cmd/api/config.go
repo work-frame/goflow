@@ -36,6 +36,10 @@ type config struct {
 	// SimulatedWork is how long each placeholder job takes. Not read from
 	// the environment; tests shorten it.
 	SimulatedWork time.Duration
+	// LogIPHeaders logs, for every request, each place a client IP address
+	// could come from (GOFLOW_LOG_IP_HEADERS=on). A diagnostic for finding
+	// out which one a host's proxies make trustworthy; off by default.
+	LogIPHeaders bool
 }
 
 // loadConfig reads the API settings through getenv (os.Getenv in production,
@@ -112,6 +116,14 @@ func loadConfig(getenv func(string) string) (config, error) {
 		cfg.RegistrationOpen = true
 	default:
 		errs = append(errs, fmt.Errorf(`GOFLOW_REGISTRATION must be "open" or "closed", got %q`, reg))
+	}
+
+	switch v := getenv("GOFLOW_LOG_IP_HEADERS"); v {
+	case "", "off":
+	case "on":
+		cfg.LogIPHeaders = true
+	default:
+		errs = append(errs, fmt.Errorf(`GOFLOW_LOG_IP_HEADERS must be "on" or "off", got %q`, v))
 	}
 
 	if err := errors.Join(errs...); err != nil {

@@ -63,6 +63,9 @@ func main() {
 // then shuts down gracefully. If ready is not nil, it is called with the bound
 // address once the server is listening. cfg is trusted: loadConfig validates it.
 func run(ctx context.Context, logger *slog.Logger, cfg config, ready func(addr string)) error {
+	if cfg.LogIPHeaders {
+		logger.Warn("GOFLOW_LOG_IP_HEADERS is on: every request logs its forwarding headers; turn it off when the check is done")
+	}
 	// Never log cfg.DatabaseURL or cfg.RedisURL: they can contain passwords.
 	logger.Info("starting", "addr", cfg.Addr, "bcrypt_cost", cfg.BcryptCost,
 		"registration_open", cfg.RegistrationOpen, "queue_enabled", cfg.RedisURL != "", "workers", cfg.Workers)
@@ -197,6 +200,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg config, ready func(addr s
 		Logger:   logger,
 
 		RegistrationClosed: !cfg.RegistrationOpen,
+		LogIPHeaders:       cfg.LogIPHeaders,
 	}
 	// Only a real relay goes into the interface. Assigning a nil *relay.Relay
 	// would make deps.Relay != nil (an interface holding a nil pointer is not

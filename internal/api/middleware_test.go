@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"encoding/json"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -113,5 +114,77 @@ func TestLogRequestsWritesOneLinePerRequest(t *testing.T) {
 	}
 	if strings.Contains(line, "secret") {
 		t.Errorf("log line leaked the query string: %s", line)
+	}
+}
+
+// ipSourcesLine runs one request through a router with LogIPHeaders set
+// as given and returns the "client ip sources" log line, or nil.
+func ipSourcesLine(t *testing.T, on bool, headers map[string][]string) map[string]any {
+	t.Helper()
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logs, nil))
+	router := NewRouter(Deps{Jobs: newTestStore(), DB: okPinger, Logger: logger, LogIPHeaders: on})
+
+	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	req.RemoteAddr = "10.0.0.7:41234"
+	for name, values := range headers {
+		for _, v := range values {
+			req.Header.Add(name, v)
+		}
+	}
+	router.ServeHTTP(httptest.NewRecorder(), req)
+
+	for _, line := range strings.Split(strings.TrimSpace(logs.String()), "\n") {
+		var m map[string]any
+		if err := json.Unmarshal([]byte(line), &m); err != nil {
+			t.Fatalf("log line %q: %v", line, err)
+		}
+		if m["msg"] == "client ip sources" {
+			return m
+		}
+	}
+	return nil
+}
+
+func TestIPSourcesAreLoggedWhenOn(t *testing.T) {
+	m := ipSourcesLine(t, true, map[string][]string{
+		"X-Forwarded-For":  {"1.2.3.4, 203.0.113.9", "198.51.100.1"}, // two header lines
+		"Cf-Connecting-Ip": {"203.0.113.9"},
+	})
+	if m == nil {
+		t.Fatal("no client ip sources line")
+	}
+	want := map[string]string{
+		"remote_addr":      "10.0.0.7:41234",
+		"X-Forwarded-For":  "1.2.3.4, 203.0.113.9 | 198.51.100.1",
+		"CF-Connecting-IP": "203.0.113.9",
+		"path":             "/readyz",
+	}
+	for k, v := range want {
+		if m[k] != v {
+			t.Errorf("%s = %v, want %q", k, m[k], v)
+		}
+	}
+	if _, ok := m["True-Client-IP"]; ok {
+		t.Error("True-Client-IP logged although the request had none")
+	}
+	if id, _ := m["request_id"].(string); len(id) != 16 {
+		t.Errorf("request_id = %v, want the request's ID", m["request_id"])
+	}
+}
+
+func TestIPSourcesAreNotLoggedByDefault(t *testing.T) {
+	if m := ipSourcesLine(t, false, map[string][]string{"X-Forwarded-For": {"1.2.3.4"}}); m != nil {
+		t.Fatalf("logged %v with LogIPHeaders off", m)
+	}
+}
+
+// A client controls these headers and can send up to 1 MB of them. Each
+// logged value is capped, so nobody can fill the logs through this line.
+func TestIPSourcesAreCapped(t *testing.T) {
+	m := ipSourcesLine(t, true, map[string][]string{"X-Forwarded-For": {strings.Repeat("9", 100_000)}})
+	got, _ := m["X-Forwarded-For"].(string)
+	if len(got) > maxLoggedHeader+len("...(cut)") || !strings.HasSuffix(got, "...(cut)") {
+		t.Fatalf("logged %d characters, want at most %d and a ...(cut) marker", len(got), maxLoggedHeader+len("...(cut)"))
 	}
 }
