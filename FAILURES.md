@@ -516,6 +516,18 @@ Each case was reproduced on a real machine (Arch Linux, Go 1.27, PostgreSQL 17) 
   ```
 - **Why:** a job title is user input, and here it became markup: the browser created a real `<img>` and requested `/x` from our server. The attacker's code in `onerror` didn't run only because the second layer, the Content-Security-Policy, refused it. With `'unsafe-inline'` in the policy, it would have run with full access to `sessionStorage` and the 24-hour token. One layer failed and the other held; neither should be the only one. Escaping is the fix, the policy is the seatbelt. The test runs without a browser, so `check.sh` catches the mistake before anyone deploys it.
 
+## 38. Logged header values are capped
+
+- **Safeguard:** the `client ip sources` diagnostic (`GOFLOW_LOG_IP_HEADERS=on`) logs each forwarding header through `truncate(..., maxLoggedHeader)`: at most 200 bytes and a `...(cut)` marker.
+- **Removed:** the cap. Each header value was logged in full.
+- **Caught by:** `TestIPSourcesAreCapped`, which sends a 100,000-character `X-Forwarded-For`.
+- **Observed:**
+  ```text
+  --- FAIL: TestIPSourcesAreCapped (0.00s)
+      middleware_test.go:188: logged 100000 characters, want at most 208 and a ...(cut) marker
+  ```
+- **Why:** these headers come from the client, and Go's server accepts up to 1 MB of them per request. Without the cap, every request could write a megabyte of attacker-chosen text into the logs: a cheap way to fill a free plan's log storage and bury the lines that matter. Anything logged from a request needs a size limit, the same reason the request log never records query strings or bodies.
+
 ## Experiment: the naive dual write loses a job
 
 Not a removed safeguard but the design of Task 22, run live on 2 November 2026 to see the failure Task 23 fixes. `POST /api/v1/jobs` saved the job in PostgreSQL, then pushed its ID to Redis, with nothing tying the two together.
