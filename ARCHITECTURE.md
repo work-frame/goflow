@@ -1,6 +1,6 @@
 # Architecture
 
-This describes GoFlow at the end of Phase 7. It changes as each phase lands.
+This describes GoFlow at the end of Phase 8. It changes as each phase lands.
 
 ## Overview
 
@@ -186,6 +186,23 @@ every API instance: SUBSCRIBE goflow:events ─► events.Hub ─► only the ow
 - **Long-lived responses.** The server's 10-second read and write timeouts are lifted for each stream with `http.ResponseController`, which reaches the connection through the middleware's `Unwrap` methods. A heartbeat comment every 25 seconds keeps proxies from closing a quiet stream; it's outbound, so it doesn't keep a free Render instance awake. `Shutdown` waits for open connections, so `RegisterOnShutdown(hub.Close)` ends every stream the moment shutdown starts.
 - **Without Redis,** the ticket and stream endpoints answer `503` and nothing else changes.
 
+### Planned: delivery health (Phase 10)
+
+Not built yet. This is the requirement Phase 10 must meet, written down now so it isn't lost.
+
+**The problem.** A healthy browser-to-API connection doesn't prove a healthy API-to-Redis connection. Today the dashboard's dot reports only whether its SSE stream is open. If the API loses its Redis subscription, the stream stays open, events stop, and the dot still says `live` until the subscription returns and `resync` repairs the list. Resync repairs missed events; nothing detects that they stopped.
+
+**Requirements:**
+
+1. **The API monitors its own Redis subscription.** Health means "a message published now would reach this API's hub", not "the TCP connection is open". The check must not depend on job activity, since a quiet system and a broken one look the same from the outside.
+2. **Loss and recovery are both detected.** The API notices that the subscription stopped working within a set time (proposed: 10 seconds, to be confirmed in Phase 10) and notices when it works again. go-redis only reports resubscriptions, so detecting the loss needs GoFlow's own check, for example a canary message the API publishes to itself every few seconds and expects back.
+3. **Every connected stream is told.** On loss, the hub broadcasts `{"type":"paused"}` to every open stream; on recovery, `{"type":"resumed"}`. After `resumed` the client reloads its list, as after `resync`, because events published during the pause are gone. A stream opened while delivery is paused gets `paused` right after `ready`. Like `resync`, these messages carry no job data, so they may go to every user.
+4. **The dashboard's dot reports the whole pipeline.** Three states, not two: `live` (stream open and delivery healthy), `paused` (stream open, delivery degraded: the list may be stale), and `offline`/`reconnecting` (stream closed). An open stream alone never shows `live`.
+5. **A test proves degraded delivery is reported while the stream stays open.** With an SSE stream open against a real Redis, the test breaks only the API's subscription (for example `CLIENT KILL TYPE pubsub`), asserts that the stream receives `paused` within the target time **without ending**, then lets the subscription recover and asserts `resumed`. The dashboard's handling of `paused` and `resumed` needs its own check in a browser (a headless-browser test, which `check.sh` doesn't run yet), or as a function the page and a test share.
+
+Until then: the [known limitation](#known-limitations) stands.
+
+
 ### Errors
 
 All errors are `{"error": "..."}`.
@@ -369,6 +386,7 @@ Everything runs with the race detector (`./scripts/check.sh`). [FAILURES.md](FAI
 - Idempotency keys never expire on their own; they're deleted with their job.
 - A session ending (logout, password change) doesn't close streams it opened: they run until they drop or the server restarts. A ticket can't be issued without a live session, and a stream only carries its owner's job changes.
 - The dashboard keeps the session token where its own script can read it (`sessionStorage`). The policy and text-only rendering make injected script very unlikely to run, but if one ever did, it could act as the user in that tab until the token expires. An `HttpOnly` cookie would hide the token from scripts, at the cost of CSRF protection on every request (considered for a later phase).
+- **The live dot can say `live` while events are paused.** If the API loses its Redis subscription (a Key Value restart), the browser's stream to the API stays open, so the page can't tell: events simply stop until the subscription returns and every stream gets `resync`. Nothing is lost, since the page then reloads from PostgreSQL, but for up to a minute or so the page shows `live` over a list that isn't moving. go-redis reports a resubscription but not the drop itself. Resync *repairs* missed events; it doesn't *detect* that events stopped. The dot measures the browser's connection to the API, not the whole path from the database to the browser. Fix planned for Phase 10: see [Planned: delivery health](#planned-delivery-health-phase-10).
 - The dashboard has no sign-up form: accounts are created with registration open, as in [DEPLOYMENT.md](DEPLOYMENT.md).
 - Plain `redis://` is accepted for single-label private-network names (Render's internal Key Value host): that traffic is unencrypted inside the provider's network.
 - No rate limit on login or password change (Phase 9). Closed registration limits who has an account meanwhile.

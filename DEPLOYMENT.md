@@ -198,6 +198,16 @@ After the deploys that bring migration 9 and the dashboard:
 3. **Live:** create `flaky:1` and `fail:permanent`. Without a refresh, `flaky:1` should go to `retrying` and then `completed`, and `fail:permanent` to `dead`. Click **Retry** on the dead one: it goes back to `pending` and ends `dead` again.
 4. **Headers:** `curl -sI https://goflow-api-hewh.onrender.com/` shows the `Content-Security-Policy` line.
 
+Result on 4 November 2026, about 00:52 WAT (deploy `d1b69ad`, built in 33.7 s):
+
+| Check | Result |
+|---|---|
+| Open https://goflow-api-hewh.onrender.com/ and log in | The page loaded all 10 jobs from Neon, newest first; the dot said `live`; the theme followed the system's dark mode |
+| `flaky:1` created in the page | Went through its statuses on screen without a refresh and ended `completed 2/3` |
+| `fail:permanent.` (typed with a trailing full stop) | Ran as a plain `fail`, since test titles must match exactly: retried, then `dead 3/3`. Correct for the title it was given |
+| `curl -sI` on `/` | `content-security-policy: default-src 'none'; script-src 'self'; ...` and `x-content-type-options: nosniff` |
+| Migration 9 | Every job query reads `version`, so the list loading at all shows it applied |
+
 ## Rolling back
 
 Render keeps previous deploys. In the dashboard: `goflow-api` → **Deploys** → pick the last good one → **Rollback**. A rollback doesn't undo migrations, so a migration must keep working with the code before it (add columns before using them, drop them a release later).
