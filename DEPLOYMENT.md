@@ -208,6 +208,24 @@ Result on 4 November 2026, about 00:52 WAT (deploy `d1b69ad`, built in 33.7 s):
 | `curl -sI` on `/` | `content-security-policy: default-src 'none'; script-src 'self'; ...` and `x-content-type-options: nosniff` |
 | Migration 9 | Every job query reads `version`, so the list loading at all shows it applied |
 
+## Finding the real client IP (Task 37)
+
+Rate limiting by IP (Phase 9) needs the client's real address. On Render a request passes through Cloudflare and Render's proxy, so the connection's own address (`remote_addr`) is a proxy's, and the client's address is in a header. Which header can be trusted isn't documented by Render. Community sources say `X-Forwarded-For` is appended to, not replaced, so a client can put a fake address at its start, and that Cloudflare's `True-Client-IP`/`CF-Connecting-IP` are set by the proxy. Those sources are old, so this checks it live. A header the client can fake is worse than none: an attacker would send a new fake address with every request and never hit a per-IP limit.
+
+1. **Turn the diagnostic on.** Render dashboard → `goflow-api` → **Environment** → add `GOFLOW_LOG_IP_HEADERS` = `on` → save and deploy. The start of the log then says `GOFLOW_LOG_IP_HEADERS is on`.
+2. **Send two requests** from your own machine, one plain and one with made-up values in every header (these addresses are reserved for documentation and belong to nobody):
+   ```bash
+   curl -s -o /dev/null https://goflow-api-hewh.onrender.com/readyz
+   curl -s -o /dev/null -H 'X-Forwarded-For: 192.0.2.1' -H 'True-Client-IP: 192.0.2.2' -H 'CF-Connecting-IP: 192.0.2.3' -H 'X-Real-IP: 192.0.2.4' https://goflow-api-hewh.onrender.com/readyz
+   ```
+3. **Read the two `client ip sources` lines with `path=/readyz`** in Render's logs (Render's own health checks add lines for `/healthz`; skip those). For each header, compare the two lines:
+   - your real address in both lines: the proxy sets that header itself and ignores yours. **Trustworthy.**
+   - `192.0.2.x` in the second line: the client chose it. **Never trust it.**
+   - your address after the fake one (`192.0.2.1, <you>`): appended to. Only the entries the proxies added, counted from the right, could be used.
+4. **Turn it off:** remove `GOFLOW_LOG_IP_HEADERS` (or set it to `off`) and deploy again. Every request's forwarding headers in the log are noise, and addresses are personal data.
+
+Your public IP address appears in those lines. It isn't a secret like a password, but if you share the lines, you can replace it with `MYIP` everywhere: the comparison only needs to know where it appears.
+
 ## Rolling back
 
 Render keeps previous deploys. In the dashboard: `goflow-api` → **Deploys** → pick the last good one → **Rollback**. A rollback doesn't undo migrations, so a migration must keep working with the code before it (add columns before using them, drop them a release later).

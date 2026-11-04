@@ -181,3 +181,46 @@ func jsonMuxErrors(next http.Handler) http.Handler {
 		next.ServeHTTP(&muxErrorWriter{ResponseWriter: w}, r)
 	})
 }
+
+// ipHeaders are the request headers proxies use to pass on the client's
+// address. Which of them a host fills in, and which ones it lets a client
+// fake, differs from host to host and isn't always documented.
+var ipHeaders = []string{"X-Forwarded-For", "True-Client-IP", "CF-Connecting-IP", "X-Real-IP", "Forwarded"}
+
+// maxLoggedHeader caps each logged header value. A client can send up to
+// 1 MB of headers; logging all of it on every request would let anyone
+// fill the logs.
+const maxLoggedHeader = 200
+
+// logIPSources writes one log line per request with RemoteAddr and every
+// header in ipHeaders, as received. It is a diagnostic: compare a normal
+// request with one that sends made-up values, and the header that keeps
+// the real address is the one the host's proxy sets itself.
+func logIPSources(logger *slog.Logger, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attrs := []slog.Attr{
+			slog.String("request_id", RequestID(r.Context())),
+			slog.String("path", r.URL.Path),
+			slog.String("remote_addr", r.RemoteAddr),
+		}
+		for _, name := range ipHeaders {
+			// Values, not Get: a proxy may add a second header line instead
+			// of appending to the first, and that difference matters here.
+			values := r.Header.Values(name)
+			if len(values) == 0 {
+				continue
+			}
+			attrs = append(attrs, slog.String(name, truncate(strings.Join(values, " | "), maxLoggedHeader)))
+		}
+		logger.LogAttrs(r.Context(), slog.LevelInfo, "client ip sources", attrs...)
+		next.ServeHTTP(w, r)
+	})
+}
+
+// truncate shortens s to at most n bytes, marking that it was cut.
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "...(cut)"
+}

@@ -43,6 +43,7 @@ go build -o bin/worker ./cmd/worker   # job worker
 | `GOFLOW_ADDR` | `:8080` | Address to listen on. Use `:0` for any free port. |
 | `GOFLOW_BCRYPT_COST` | `12` | bcrypt cost for password hashes, 10 to 14. Each step doubles the time per hash. The server refuses to start outside this range. |
 | `GOFLOW_REGISTRATION` | `closed` | `open` lets anyone create an account with `POST /api/v1/auth/register`; `closed` answers `403`. |
+| `GOFLOW_LOG_IP_HEADERS` | `off` | `on` adds a `client ip sources` log line per request: the connection's address and the `X-Forwarded-For`, `True-Client-IP`, `CF-Connecting-IP`, `X-Real-IP` and `Forwarded` headers, each capped at 200 characters. A diagnostic for finding out which one a host makes trustworthy ([DEPLOYMENT.md](DEPLOYMENT.md#finding-the-real-client-ip-task-37)); turn it off afterwards. |
 | `PORT` | none | Port to listen on, as set by hosting platforms such as Render. Used only when `GOFLOW_ADDR` is not set. |
 | `GOFLOW_REDIS_URL` | none (queue off) | Redis for the job queue, e.g. `redis://127.0.0.1:6379/0`. A Redis on another machine must use `rediss://` (TLS), except a single-label private-network name such as Render's `red-abc123`. Without it, new jobs stay `pending` in the outbox until a server with Redis starts. |
 | `GOFLOW_WORKERS` | `0` | Job workers the API runs itself, 0 to 32. Needs `GOFLOW_REDIS_URL`. Only one API instance may run workers. |

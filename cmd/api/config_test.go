@@ -45,22 +45,26 @@ func TestLoadConfigDefaults(t *testing.T) {
 	if cfg.Workers != 0 {
 		t.Errorf("Workers = %d, want 0: the API runs no workers unless asked", cfg.Workers)
 	}
+	if cfg.LogIPHeaders {
+		t.Error("LogIPHeaders is on by default; it's a diagnostic")
+	}
 }
 
 func TestLoadConfigReadsEverySetting(t *testing.T) {
 	cfg, err := loadConfig(env(map[string]string{
-		"GOFLOW_ADDR":         "127.0.0.1:9000",
-		"GOFLOW_DATABASE_URL": testDBURL,
-		"GOFLOW_BCRYPT_COST":  "11",
-		"GOFLOW_REGISTRATION": "open",
-		"GOFLOW_REDIS_URL":    sampleRedisURL,
-		"GOFLOW_WORKERS":      "3",
+		"GOFLOW_ADDR":           "127.0.0.1:9000",
+		"GOFLOW_DATABASE_URL":   testDBURL,
+		"GOFLOW_BCRYPT_COST":    "11",
+		"GOFLOW_REGISTRATION":   "open",
+		"GOFLOW_REDIS_URL":      sampleRedisURL,
+		"GOFLOW_WORKERS":        "3",
+		"GOFLOW_LOG_IP_HEADERS": "on",
 	}))
 	if err != nil {
 		t.Fatalf("loadConfig: %v", err)
 	}
 	want := config{Addr: "127.0.0.1:9000", DatabaseURL: testDBURL, RedisURL: sampleRedisURL, BcryptCost: 11, RegistrationOpen: true,
-		Workers: 3, SimulatedWork: 5 * time.Second}
+		Workers: 3, SimulatedWork: 5 * time.Second, LogIPHeaders: true}
 	if cfg != want {
 		t.Errorf("config = %+v, want %+v", cfg, want)
 	}
@@ -81,6 +85,7 @@ func TestLoadConfigRejectsBadSettings(t *testing.T) {
 		{"bad registration value", map[string]string{"GOFLOW_DATABASE_URL": testDBURL, "GOFLOW_REGISTRATION": "yes"}, []string{`"open" or "closed", got "yes"`}},
 		{"bad port", map[string]string{"GOFLOW_DATABASE_URL": testDBURL, "PORT": "http"}, []string{`PORT must be a port number, got "http"`}},
 		{"workers without Redis", map[string]string{"GOFLOW_DATABASE_URL": testDBURL, "GOFLOW_WORKERS": "2"}, []string{"GOFLOW_WORKERS needs GOFLOW_REDIS_URL"}},
+		{"bad IP header logging value", map[string]string{"GOFLOW_DATABASE_URL": testDBURL, "GOFLOW_LOG_IP_HEADERS": "true"}, []string{`"on" or "off", got "true"`}},
 		{"too many workers", map[string]string{"GOFLOW_DATABASE_URL": testDBURL, "GOFLOW_REDIS_URL": sampleRedisURL, "GOFLOW_WORKERS": "33"}, []string{`from 0 to 32, got "33"`}},
 	}
 	for _, tc := range tests {

@@ -75,6 +75,11 @@ type Deps struct {
 	// is open so tests stay short; production sets it from GOFLOW_REGISTRATION,
 	// which defaults to closed.
 	RegistrationClosed bool
+
+	// LogIPHeaders adds one "client ip sources" log line per request: the
+	// connection's address and every header a proxy might put the client's
+	// address in. For finding out which one to trust (Phase 9); off normally.
+	LogIPHeaders bool
 }
 
 // NewRouter returns the HTTP handler for the whole API, wrapped in middleware.
@@ -111,6 +116,9 @@ func NewRouter(d Deps) http.Handler {
 	handler = jsonMuxErrors(handler)
 	handler = recoverPanics(d.Logger, handler)
 	handler = logRequests(d.Logger, handler)
+	if d.LogIPHeaders {
+		handler = logIPSources(d.Logger, handler)
+	}
 	handler = withRequestID(handler)
 	return handler
 }
