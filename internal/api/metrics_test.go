@@ -111,3 +111,18 @@ func TestHealthChecksAreLoggedOnlyWhenTheyFail(t *testing.T) {
 		t.Error("/readyz stopped being logged")
 	}
 }
+
+func TestRefusedRequestsAreCountedByRule(t *testing.T) {
+	m := metrics.New()
+	f := newLimitedFixture(t, "")
+	f.router = NewRouter(Deps{
+		Users: f.users, Sessions: f.sessions, Hasher: testHasher, Logger: discardLogger(), DB: okPinger, Jobs: newTestStore(),
+		Limiter: newMemoryLimiter(), Metrics: m, MetricsToken: metricsToken,
+	})
+	for range loginPerEmail.Limit + 2 {
+		f.loginFrom(t, "198.51.100.1:1", "dan@example.com", "wrong password!", nil)
+	}
+	if body := scrapeText(t, f.router); !strings.Contains(body, `goflow_rate_limited_total{rule="login_email"} 2`) {
+		t.Fatalf("rate-limited requests not counted:\n%s", body)
+	}
+}

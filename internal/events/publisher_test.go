@@ -157,3 +157,20 @@ func TestPublisherKeepsGoingAfterErrors(t *testing.T) {
 	p.JobChanged(context.Background(), testJob("alice", "queued"))
 	waitForSent(t, s, 2) // the second was still tried after the first failed
 }
+
+func TestPublisherCountsWhatReachedRedis(t *testing.T) {
+	s := &recordingSender{}
+	p := NewPublisher(s, slog.New(slog.DiscardHandler))
+	stop := p.Start(context.Background())
+	defer stop()
+	p.JobChanged(context.Background(), testJob("alice", "pending"))
+	p.JobChanged(context.Background(), testJob("alice", "queued"))
+	waitForSent(t, s, 2)
+	deadline := time.Now().Add(time.Second)
+	for p.Published() != 2 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if p.Published() != 2 {
+		t.Errorf("Published() = %d, want 2", p.Published())
+	}
+}

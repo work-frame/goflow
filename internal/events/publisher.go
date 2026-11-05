@@ -33,11 +33,12 @@ type Sender interface {
 // go into a buffer, one goroutine publishes them in order, and when the
 // buffer is full new events are dropped and counted.
 type Publisher struct {
-	send    Sender
-	channel string
-	logger  *slog.Logger
-	queue   chan []byte
-	dropped atomic.Int64
+	send      Sender
+	channel   string
+	logger    *slog.Logger
+	queue     chan []byte
+	dropped   atomic.Int64
+	published atomic.Int64
 }
 
 // NewPublisher returns a Publisher for Channel. Call Start before use;
@@ -70,6 +71,9 @@ func (p *Publisher) enqueue(userID string, m Message) {
 	}
 }
 
+// Published reports how many events reached Redis.
+func (p *Publisher) Published() int64 { return p.published.Load() }
+
 // Dropped reports how many events were dropped because the buffer was full.
 func (p *Publisher) Dropped() int64 { return p.dropped.Load() }
 
@@ -99,6 +103,9 @@ func (p *Publisher) Start(ctx context.Context) (stop func()) {
 				case err == nil && failing:
 					failing = false
 					p.logger.Info("events: publishing again")
+				}
+				if err == nil {
+					p.published.Add(1)
 				}
 			}
 		}

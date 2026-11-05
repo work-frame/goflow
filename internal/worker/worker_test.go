@@ -731,3 +731,36 @@ func TestPoolRunsAFlakyJobToCompletion(t *testing.T) {
 		t.Errorf("attempts = %d, want 3", s.attemptsOf("f"))
 	}
 }
+
+// Observe hears every attempt that ended, with its outcome, after the
+// outcome is saved.
+func TestObserveHearsEachOutcome(t *testing.T) {
+	q, s := &memQueue{pending: []string{"ok", "flaky", "bad"}}, newMemStore("ok", "flaky", "bad")
+	var mu sync.Mutex
+	heard := map[string]string{}
+	p := newPool(q, s, 1, func(_ context.Context, r Run) error {
+		switch r.JobID {
+		case "flaky":
+			return errors.New("try again")
+		case "bad":
+			return Permanent(errors.New("never"))
+		}
+		return nil
+	})
+	p.Backoff = func(int) time.Duration { return time.Hour } // flaky stays retrying
+	p.Observe = func(outcome string, took time.Duration) {
+		mu.Lock()
+		defer mu.Unlock()
+		heard[outcome] += "x" // one x per observation
+		if took < 0 {
+			t.Errorf("%s: negative duration %v", outcome, took)
+		}
+	}
+	start(t, p)
+
+	eventually(t, "three outcomes observed", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return heard["completed"] == "x" && heard["retry"] == "x" && heard["dead"] == "x"
+	})
+}

@@ -35,13 +35,16 @@ type Metrics struct {
 	HTTPRequests *prometheus.CounterVec
 	// HTTPDuration records how long requests took, by route pattern.
 	HTTPDuration *prometheus.HistogramVec
+
+	goflowMetrics
 }
 
 // New returns the API's metrics, plus Go's own (goroutines, memory, GC)
 // and the process's (CPU, open files).
 func New() *Metrics {
 	m := &Metrics{
-		registry: prometheus.NewRegistry(),
+		registry:      prometheus.NewRegistry(),
+		goflowMetrics: newGoflowMetrics(),
 		HTTPRequests: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "goflow_http_requests_total",
 			Help: "Finished HTTP requests, by route pattern and status code.",
@@ -57,6 +60,9 @@ func New() *Metrics {
 	m.registry.MustRegister(
 		m.HTTPRequests,
 		m.HTTPDuration,
+		m.JobStatusChanges,
+		m.AttemptDuration,
+		m.RateLimited,
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 	)

@@ -133,3 +133,17 @@ func TestHubCloseEndsStreamsAndRefusesNewOnes(t *testing.T) {
 		t.Error("Subscribe after Close returned ok = true")
 	}
 }
+
+func TestHubCountsOpenStreams(t *testing.T) {
+	h := NewHub()
+	_, un1 := subscribe(t, h, "alice")
+	subscribe(t, h, "alice")
+	subscribe(t, h, "bob")
+	if n := h.Streams(); n != 3 {
+		t.Fatalf("Streams() = %d, want 3", n)
+	}
+	un1()
+	if n := h.Streams(); n != 2 {
+		t.Errorf("after one left: %d, want 2", n)
+	}
+}

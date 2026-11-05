@@ -95,6 +95,14 @@ func (l *Limiter) Allow(ctx context.Context, rule Rule, subject string) Decision
 	return Decision{Allowed: false, RetryAfter: ttl}
 }
 
+// Degraded reports whether the last attempt to count in Redis failed, so
+// limits are being counted in this process's memory.
+func (l *Limiter) Degraded() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.degraded
+}
+
 // noteShared logs when the shared counter starts failing and when it
 // recovers, not on every attempt in between.
 func (l *Limiter) noteShared(err error) {

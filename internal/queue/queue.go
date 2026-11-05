@@ -187,6 +187,19 @@ func (q *Queue) PromoteDue(ctx context.Context, now time.Time, limit int) (int, 
 	return n, nil
 }
 
+// Sizes reports how many job IDs wait in the pending list, sit in the
+// processing list, and wait in the delayed set, in one round trip.
+func (q *Queue) Sizes(ctx context.Context) (pending, processing, delayed int64, err error) {
+	pipe := q.rdb.Pipeline()
+	p := pipe.LLen(ctx, q.key)
+	pr := pipe.LLen(ctx, q.processing)
+	d := pipe.ZCard(ctx, q.delayed)
+	if _, err := pipe.Exec(ctx); err != nil {
+		return 0, 0, 0, fmt.Errorf("queue: sizes: %w", err)
+	}
+	return p.Val(), pr.Val(), d.Val(), nil
+}
+
 // Len reports how many job IDs are waiting.
 func (q *Queue) Len(ctx context.Context) (int64, error) {
 	n, err := q.rdb.LLen(ctx, q.key).Result()

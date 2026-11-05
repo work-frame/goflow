@@ -51,6 +51,9 @@ func (h *handler) limited(w http.ResponseWriter, r *http.Request, rule ratelimit
 	if seconds < 1 {
 		seconds = 1
 	}
+	if h.metrics != nil {
+		h.metrics.RateLimited.WithLabelValues(rule.Name).Inc()
+	}
 	// The rule's name, never the subject: no emails or addresses in logs.
 	h.logger.Warn("rate limited", "request_id", RequestID(r.Context()), "rule", rule.Name, "retry_after_s", seconds)
 	w.Header().Set("Retry-After", strconv.Itoa(seconds))
