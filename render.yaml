@@ -45,6 +45,12 @@ services:
       # Never X-Forwarded-For: its first entry is whatever the client sent.
       - key: GOFLOW_CLIENT_IP_HEADER
         value: CF-Connecting-IP
+      # Protects GET /metrics. Render generates a random value once; read it
+      # in the dashboard (Environment) when you want to look at the metrics.
+      # Nothing polls /metrics on its own: a poller would keep this free
+      # instance awake all month (Phase 10 decision).
+      - key: GOFLOW_METRICS_TOKEN
+        generateValue: true
 
   # Redis-compatible queue (Valkey). Free: no persistence, so a restart
   # empties the lists; the API's reconciler re-sends stuck jobs.

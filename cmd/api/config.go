@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/work-frame/goflow/internal/auth"
+	"github.com/work-frame/goflow/internal/metrics"
 	"github.com/work-frame/goflow/internal/urlcheck"
 )
 
@@ -44,6 +45,9 @@ type config struct {
 	// read from the environment: tests set a fresh one per server, so
 	// counters from one run can't refuse logins in the next.
 	RateLimitPrefix string
+	// MetricsToken protects GET /metrics (GOFLOW_METRICS_TOKEN). Empty: no
+	// /metrics route at all. A secret: never log it.
+	MetricsToken string
 	// ClientIPHeader is the header a trusted proxy sets to the client's
 	// address (GOFLOW_CLIENT_IP_HEADER). Empty: use the connection's address.
 	ClientIPHeader string
@@ -135,6 +139,15 @@ func loadConfig(getenv func(string) string) (config, error) {
 		errs = append(errs, errors.New("GOFLOW_CLIENT_IP_HEADER can't be X-Forwarded-For: clients can put any address at its start"))
 	default:
 		errs = append(errs, fmt.Errorf(`GOFLOW_CLIENT_IP_HEADER must be empty, "CF-Connecting-IP" or "True-Client-IP", got %q`, v))
+	}
+
+	// A short token could be guessed, and /metrics isn't rate-limited.
+	if t := getenv("GOFLOW_METRICS_TOKEN"); t != "" {
+		if len(t) < metrics.MinTokenLength {
+			errs = append(errs, fmt.Errorf("GOFLOW_METRICS_TOKEN must be at least %d characters (for example: openssl rand -base64 32)", metrics.MinTokenLength))
+		} else {
+			cfg.MetricsToken = t
+		}
 	}
 
 	switch v := getenv("GOFLOW_LOG_IP_HEADERS"); v {

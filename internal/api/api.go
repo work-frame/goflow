@@ -10,6 +10,7 @@ import (
 
 	"github.com/work-frame/goflow/internal/auth"
 	"github.com/work-frame/goflow/internal/job"
+	"github.com/work-frame/goflow/internal/metrics"
 	"github.com/work-frame/goflow/internal/web"
 )
 
@@ -84,6 +85,11 @@ type Deps struct {
 	// connection's address, the only safe choice without such a proxy.
 	ClientIPHeader string
 
+	// Metrics, when set, records every request. nil: nothing recorded.
+	Metrics *metrics.Metrics
+	// MetricsToken protects GET /metrics. Empty: the route doesn't exist.
+	MetricsToken string
+
 	// LogIPHeaders adds one "client ip sources" log line per request: the
 	// connection's address and every header a proxy might put the client's
 	// address in. For finding out which one to trust (Phase 9); off normally.
@@ -93,7 +99,7 @@ type Deps struct {
 // NewRouter returns the HTTP handler for the whole API, wrapped in middleware.
 //
 // Request flow, outermost first:
-// withRequestID → logRequests → recoverPanics → jsonMuxErrors → mux → handler
+// withRequestID → logRequests → recordMetrics → recoverPanics → jsonMuxErrors → mux → handler
 func NewRouter(d Deps) http.Handler {
 	h := &handler{store: d.Jobs, relay: d.Relay, live: d.Live, heartbeat: d.StreamHeartbeat, users: d.Users, sessions: d.Sessions, hasher: d.Hasher, db: d.DB, logger: d.Logger, registrationClosed: d.RegistrationClosed, limiter: d.Limiter, clientIPHeader: d.ClientIPHeader}
 	h.prepareDummyHash()
@@ -119,10 +125,17 @@ func NewRouter(d Deps) http.Handler {
 	// No requireSession: a browser's EventSource can't send the
 	// Authorization header, so the stream authenticates with a ticket.
 	mux.HandleFunc("GET /api/v1/events", h.streamEvents)
+	if d.Metrics != nil && d.MetricsToken != "" {
+		mux.Handle("GET /metrics", d.Metrics.Handler(d.MetricsToken))
+	}
 
 	var handler http.Handler = mux
 	handler = jsonMuxErrors(handler)
 	handler = recoverPanics(d.Logger, handler)
+	if d.Metrics != nil {
+		// Outside recoverPanics, so a panic counts as the 500 it became.
+		handler = recordMetrics(d.Metrics, handler)
+	}
 	handler = logRequests(d.Logger, handler)
 	if d.LogIPHeaders {
 		handler = logIPSources(d.Logger, handler)

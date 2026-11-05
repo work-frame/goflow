@@ -15,6 +15,7 @@ I'm building it to learn production Go: the standard library first, then HTTP, P
 - **Phase 7 (done):** failed jobs retry with exponential backoff and jitter, up to 3 attempts, then become `dead`; permanent errors skip the retries. Each attempt has a 15-second limit. A dead job can be re-run with fresh attempts (`goflow job retry <id>`), and an `Idempotency-Key` header makes a repeated create return the first job instead of a second one.
 - **Phase 8 (done):** live job status. Every status change is announced over Server-Sent Events (`GET /api/v1/events`) to the job's owner, opened with a 30-second single-use ticket. A dashboard at `/` logs in, lists your jobs and updates them live, and creates, retries and deletes jobs.
 - **Phase 9 (done):** rate limits. Login is limited per email and per client address, password changes and stream tickets per account, with counters in Redis (in memory while Redis is down). On Render the client address comes from Cloudflare's `CF-Connecting-IP`, chosen by experiment ([DEPLOYMENT.md](DEPLOYMENT.md#finding-the-real-client-ip-task-37)).
+- **Phase 10 (in progress):** metrics. `GET /metrics` serves Prometheus metrics behind a token: requests by route, status and duration, plus Go's own. Passing health checks are no longer logged. Next: job, queue, event and rate-limit metrics, then the live-update health check.
 
 ## Requirements
 
@@ -44,6 +45,7 @@ go build -o bin/worker ./cmd/worker   # job worker
 | `GOFLOW_ADDR` | `:8080` | Address to listen on. Use `:0` for any free port. |
 | `GOFLOW_BCRYPT_COST` | `12` | bcrypt cost for password hashes, 10 to 14. Each step doubles the time per hash. The server refuses to start outside this range. |
 | `GOFLOW_REGISTRATION` | `closed` | `open` lets anyone create an account with `POST /api/v1/auth/register`; `closed` answers `403`. |
+| `GOFLOW_METRICS_TOKEN` | none | Turns on `GET /metrics` and is the bearer token it requires; at least 32 characters (`openssl rand -base64 32`). Without it there is no `/metrics` route. A secret: never commit it. |
 | `GOFLOW_CLIENT_IP_HEADER` | none | The header a trusted proxy puts the client's address in, for per-address rate limits: `CF-Connecting-IP` (Render, behind Cloudflare) or `True-Client-IP`. Empty: the connection's address. Never set it without such a proxy in front: then any header is whatever the client wants. `X-Forwarded-For` is refused, because its first entry is the client's own claim. |
 | `GOFLOW_LOG_IP_HEADERS` | `off` | `on` adds a `client ip sources` log line per request: the connection's address and the `X-Forwarded-For`, `True-Client-IP`, `CF-Connecting-IP`, `X-Real-IP` and `Forwarded` headers, each capped at 200 characters. A diagnostic for finding out which one a host makes trustworthy ([DEPLOYMENT.md](DEPLOYMENT.md#finding-the-real-client-ip-task-37)); turn it off afterwards. |
 | `PORT` | none | Port to listen on, as set by hosting platforms such as Render. Used only when `GOFLOW_ADDR` is not set. |
@@ -58,6 +60,7 @@ The server stops on `Ctrl+C` or `SIGTERM`, finishing in-flight requests first (u
 |---|---|---|---|
 | `GET` | `/healthz` | `200 {"status":"ok"}`: the process is alive | |
 | `GET` | `/readyz` | `200`: the database answers within 2 s. Redis isn't checked: jobs wait in the outbox while it's down | `503` |
+| `GET` | `/metrics` | `200`, Prometheus text format (needs `Authorization: Bearer <GOFLOW_METRICS_TOKEN>`) | `401`, `404` when no token is configured |
 | `POST` | `/api/v1/auth/register` | `201` + user (`id`, `email`, `created_at`) | `400`, `409` email taken, `413`, `415` |
 | `POST` | `/api/v1/auth/login` | `200 {"token","expires_at"}` | `400`, `401` invalid email or password, `429` too many attempts |
 | `POST` | `/api/v1/auth/logout` | `204` (needs token) | `401` |
@@ -259,6 +262,7 @@ internal/events/       live updates: publishing job changes, routing them to the
 internal/web/          the dashboard: index.html, app.js and style.css, embedded, with their security headers
 internal/job/          Job type, validation, pagination rules
 internal/queue/        Redis list of job IDs waiting for a worker
+internal/metrics/      Prometheus metrics and the token-protected /metrics handler
 internal/ratelimit/    fixed-window rate limits, counted in Redis or, as a fallback, in memory
 internal/relay/        background loop: outbox (PostgreSQL) to queue (Redis)
 internal/worker/       pool of goroutines that take job IDs off the queue and run the jobs

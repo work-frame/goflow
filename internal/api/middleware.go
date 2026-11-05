@@ -7,8 +7,11 @@ import (
 	"log/slog"
 	"net/http"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"time"
+
+	"github.com/work-frame/goflow/internal/metrics"
 )
 
 // ctxKey is unexported, so no other package can create a key that collides with ours.
@@ -100,6 +103,11 @@ func logRequests(logger *slog.Logger, next http.Handler) http.Handler {
 		status := rec.status
 		if status == 0 {
 			status = http.StatusOK // handler wrote nothing; net/http sends 200
+		}
+		// Render checks /healthz every 5 seconds: 17,000 lines a day that
+		// say nothing. A failing check is still logged.
+		if r.URL.Path == "/healthz" && status < 400 {
+			return
 		}
 		level := slog.LevelInfo
 		if status >= 500 {
@@ -223,4 +231,38 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "...(cut)"
+}
+
+// streamRoute is left out of the duration histogram: an event stream lasts
+// as long as its browser tab, and its hours would drown every real request.
+const streamRoute = "GET /api/v1/events"
+
+// recordMetrics counts every finished request and records how long it took,
+// by the route pattern the mux matched.
+//
+// The pattern comes from r.Pattern, which the mux sets on this same
+// *http.Request (recoverPanics and jsonMuxErrors pass r on unchanged). A
+// middleware that replaced r with r.WithContext between here and the mux
+// would hide it, and every request would count as "unmatched".
+func recordMetrics(m *metrics.Metrics, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		rec := &statusRecorder{ResponseWriter: w}
+		next.ServeHTTP(rec, r)
+
+		status := rec.status
+		if status == 0 {
+			status = http.StatusOK
+		}
+		route := r.Pattern
+		if route == "" {
+			// No route matched: a 404 or 405 for a path someone made up.
+			// Labelling by path would let anyone create time series at will.
+			route = "unmatched"
+		}
+		m.HTTPRequests.WithLabelValues(route, strconv.Itoa(status)).Inc()
+		if route != streamRoute {
+			m.HTTPDuration.WithLabelValues(route).Observe(time.Since(start).Seconds())
+		}
+	})
 }
