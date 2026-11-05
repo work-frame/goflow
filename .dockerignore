@@ -1,0 +1,10 @@
+# What `docker build` may see, as an allowlist: everything is left out,
+# then only what the build needs is let back in. A denylist would let in
+# every file nobody thought of: .env, .git, bin/, a key file left in the
+# folder. Render also copies secret files into the build folder; they stay
+# out the same way.
+*
+!go.mod
+!go.sum
+!cmd
+!internal

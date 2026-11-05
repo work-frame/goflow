@@ -12,8 +12,10 @@ import (
 
 // DatabaseTLS refuses a database on another machine unless the URL asks
 // for an encrypted connection. Without it the database password and every row
-// would cross the internet in plain text. A database on this machine
-// (localhost, 127.0.0.1, ::1) may skip TLS, as the development container does.
+// would cross the internet in plain text. Two kinds of host may skip TLS:
+// this machine (localhost, 127.0.0.1, ::1), and a single-label name such as
+// the Compose service "postgres", which only exists inside a private network
+// (see isPrivateNetworkName). Neon's host has dots, so it always needs TLS.
 // Errors never include the URL: it contains the password.
 func DatabaseTLS(raw string) error {
 	u, err := url.Parse(raw)
@@ -21,7 +23,7 @@ func DatabaseTLS(raw string) error {
 		return errors.New("GOFLOW_DATABASE_URL must look like postgres://user:password@host/database")
 	}
 	host := u.Hostname()
-	if isThisMachine(host) {
+	if isThisMachine(host) || isPrivateNetworkName(host) {
 		return nil
 	}
 	switch u.Query().Get("sslmode") {
@@ -69,9 +71,10 @@ func isThisMachine(host string) bool {
 // place the connection can go.
 //
 // Plain redis:// is accepted there because that is what Render's private
-// network offers (its Key Value TLS is for external connections only). The
-// traffic stays inside the provider's network; it is still unencrypted, so
-// this trusts the provider's network isolation.
+// network offers (its Key Value TLS is for external connections only), and
+// since Phase 11 a database without TLS too: Docker Compose's network,
+// where the API reaches PostgreSQL as "postgres". The traffic stays inside
+// that network; it is still unencrypted, so this trusts its isolation.
 func isPrivateNetworkName(host string) bool {
 	return host != "" && !strings.Contains(host, ".") && !strings.Contains(host, ":") && net.ParseIP(host) == nil
 }

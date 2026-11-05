@@ -39,9 +39,13 @@ func TestDatabaseTLS(t *testing.T) {
 		{"postgres://u:pw@localhost/db", true},
 		{"postgres://u:pw@db.example.com/db?sslmode=verify-full", true},
 		{"postgres://u:pw@db.example.com/db", false},
-		// Single-label names get no exception for the database: GoFlow's
-		// database is outside the host's private network (Neon).
-		{"postgres://u:pw@dbhost/db", false},
+		// A single-label name only exists inside a private network: the
+		// Compose service "postgres" (Phase 11). Neon's host has dots.
+		{"postgres://u:pw@postgres:5432/db?sslmode=disable", true},
+		{"postgres://u:pw@dbhost/db", true},
+		{"postgres://u:pw@ep-cool-name-123.eu-central-1.aws.neon.tech/db?sslmode=disable", false},
+		// A remote IP address is not a name, private or not.
+		{"postgres://u:pw@10.0.0.5/db", false},
 	}
 	for _, tc := range tests {
 		if err := DatabaseTLS(tc.url); (err == nil) != tc.ok {
