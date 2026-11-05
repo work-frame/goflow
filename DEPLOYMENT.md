@@ -253,6 +253,17 @@ curl -s -D - -o /dev/null -X POST -H 'Content-Type: application/json' -d '{"emai
 
 Expect `429` and a `retry-after` of up to 900 seconds. These attempts also count against your own address (30 per 15 minutes), so wait or log in from the dashboard afterwards to see that your real account still works: its email has its own counter.
 
+Result on 5 November 2026, about 14:13 UTC (deploy `a5314fc`):
+
+| Check | Result |
+|---|---|
+| 11 wrong logins for `nobody@example.com` | `401` ten times, then `429` |
+| A 12th | `HTTP/2 429`, `retry-after: 871`: the window started with the first attempt, about 29 s earlier, and refused attempts don't move it |
+| `rate limited` in the logs | `rule=login_email retry_after_s=873` and `871`, no email, no address |
+| `client_ip_header` in the `starting` lines | `""` at 14:08:32, then `CF-Connecting-IP` at 14:09:15 and after a restart at 14:31:24 |
+
+**The 43-second gap.** Merging changed both the code and `render.yaml`, and Render deployed them separately: first the code (Auto-Deploy), then the Blueprint sync with the new setting. For 43 seconds the new code ran without `GOFLOW_CLIENT_IP_HEADER`, so every user's login counted against one address, Render's local proxy `[::1]`. The per-email limit worked throughout, so no guess got through; the risk was only that 30 logins from anyone could have blocked everyone's logins until that window ended. Lesson for settings that change behaviour: add the setting in one deploy and the code that needs it in the next, or make the code safe without it.
+
 ## Rolling back
 
 Render keeps previous deploys. In the dashboard: `goflow-api` → **Deploys** → pick the last good one → **Rollback**. A rollback doesn't undo migrations, so a migration must keep working with the code before it (add columns before using them, drop them a release later).
