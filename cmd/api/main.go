@@ -16,6 +16,7 @@ import (
 	"github.com/work-frame/goflow/internal/auth"
 	"github.com/work-frame/goflow/internal/database"
 	"github.com/work-frame/goflow/internal/events"
+	"github.com/work-frame/goflow/internal/metrics"
 	"github.com/work-frame/goflow/internal/queue"
 	"github.com/work-frame/goflow/internal/ratelimit"
 	"github.com/work-frame/goflow/internal/relay"
@@ -68,7 +69,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg config, ready func(addr s
 		logger.Warn("GOFLOW_LOG_IP_HEADERS is on: every request logs its forwarding headers; turn it off when the check is done")
 	}
 	// Never log cfg.DatabaseURL or cfg.RedisURL: they can contain passwords.
-	logger.Info("starting", "addr", cfg.Addr, "bcrypt_cost", cfg.BcryptCost, "client_ip_header", cfg.ClientIPHeader,
+	logger.Info("starting", "addr", cfg.Addr, "bcrypt_cost", cfg.BcryptCost, "client_ip_header", cfg.ClientIPHeader, "metrics_enabled", cfg.MetricsToken != "",
 		"registration_open", cfg.RegistrationOpen, "queue_enabled", cfg.RedisURL != "", "workers", cfg.Workers)
 
 	// Connect before opening the port: an instance that can't reach its database
@@ -213,6 +214,8 @@ func run(ctx context.Context, logger *slog.Logger, cfg config, ready func(addr s
 		RegistrationClosed: !cfg.RegistrationOpen,
 		LogIPHeaders:       cfg.LogIPHeaders,
 		Limiter:            limiter,
+		Metrics:            metrics.New(),
+		MetricsToken:       cfg.MetricsToken,
 		ClientIPHeader:     cfg.ClientIPHeader,
 	}
 	// Only a real relay goes into the interface. Assigning a nil *relay.Relay

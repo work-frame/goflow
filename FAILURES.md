@@ -542,6 +542,23 @@ Each case was reproduced on a real machine (Arch Linux, Go 1.27, PostgreSQL 17) 
   ```
 - **Why:** the limit became an oracle. Send 11 wrong passwords for any email: `429` means someone has an account with it, `401` means nobody does. Task 17 made every login failure look and take the same time precisely so attackers can't list accounts (case 20); a limit counted in the wrong place undid that in eleven requests. The moved line still "worked": real accounts were protected, and every test about guessing passwords passed. Only a test comparing the two answers side by side notices.
 
+## 40. Requests are counted by route, not by path
+
+- **Safeguard:** `recordMetrics` labels each request with `r.Pattern`, the route the mux matched (`GET /api/v1/jobs/{id}`), and puts every request that matched nothing under `unmatched`.
+- **Removed:** the label taken from `r.URL.Path`, the path as the client sent it.
+- **Caught by:** `TestRequestsAreCountedByRoutePattern`.
+- **Observed:**
+  ```text
+  --- FAIL: TestRequestsAreCountedByRoutePattern (0.01s)
+      metrics_test.go:58: metrics lack goflow_http_requests_total{code="200",route="GET /api/v1/jobs/{id}"} 3
+      metrics_test.go:58: metrics lack goflow_http_requests_total{code="404",route="unmatched"} 50
+      ...
+      metrics_test.go:63: metrics contain a path or ID: "69efb80df3c1ef797e858680bf1fc655"
+      metrics_test.go:63: metrics contain a path or ID: "/random/"
+      metrics_test.go:63: metrics contain a path or ID: "does-not-exist"
+  ```
+- **Why:** every distinct label value is a separate time series, kept in memory until the process restarts. With paths as labels, each job ID is a new series, and so is every URL anyone makes up: 50 made-up paths in the test were 50 series. An attacker needs no account to send a million different paths, and the server would hold a million counters and histograms. A hosted collector would refuse them past its series limit (about 10,000 on Grafana Cloud's free plan). The route pattern has a fixed number of values: one per route in the code, plus `unmatched`. Every label must come from a small, fixed set the code decides, never from the request.
+
 ## Experiment: the naive dual write loses a job
 
 Not a removed safeguard but the design of Task 22, run live on 2 November 2026 to see the failure Task 23 fixes. `POST /api/v1/jobs` saved the job in PostgreSQL, then pushed its ID to Redis, with nothing tying the two together.

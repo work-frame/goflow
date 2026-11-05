@@ -138,6 +138,7 @@ Every storage call gets `context.WithTimeout(r.Context(), 3s)`: it stops when th
 |---|---|---|
 | `GET` | `/healthz` | `200`: the process is alive (checks nothing else) |
 | `GET` | `/readyz` | `200`: the database answers a ping within 2 s, else `503` |
+| `GET` | `/metrics` | `200`, Prometheus text, with the metrics token; `401` without; absent (`404`) when no token is set |
 | `POST` | `/api/v1/auth/register` | `201` + user, or `403` when registration is closed |
 | `POST` | `/api/v1/auth/login` | `200` + `{"token", "expires_at"}`, `Cache-Control: no-store` |
 | `POST` | `/api/v1/auth/logout` | `204`: this session ends |
@@ -304,6 +305,17 @@ A handler is the function that does a job's work (`worker.Handler`). The pool ca
 
 These are a contract, not something the pool enforces. Tests for each job type should check them: a cancelled context makes the handler return, a second run is harmless.
 
+## Metrics: `internal/metrics`
+
+`GET /metrics` serves Prometheus's text format: GoFlow's own metrics plus Go's (goroutines, memory, GC) and the process's (CPU, open files).
+
+- **Updated where things happen, never computed when read.** A middleware counts each finished request and records its duration. Reading `/metrics` only formats numbers already in memory: it never touches PostgreSQL, so polling it can't keep Neon awake. (It does keep a free Render instance awake, like any request; that's why nothing polls it yet.)
+- **Labelled by route pattern, never by path.** The label is the pattern the mux matched (`GET /api/v1/jobs/{id}`, from `r.Pattern`), so every job ID shares one time series. Requests that matched no route are all `unmatched`. A path label would give anyone who sends made-up URLs a new series per request, until the monitoring service's limit or the server's memory runs out (FAILURES.md, case 40). The middleware sits outside `recoverPanics`, so a panic counts as the `500` it became, and right where the mux's `r` is the same request: a `r.WithContext` in between would hide the pattern.
+- **Event streams** are counted but kept out of the duration histogram: a stream lasts as long as its browser tab.
+- **Behind a token.** `GOFLOW_METRICS_TOKEN` (at least 32 characters; Render generates one) is compared in constant time via SHA-256, so neither its content nor its length leaks through timing. Without a token the route doesn't exist. The numbers show how busy GoFlow is and how it fails: nobody else's business.
+- **Own registry.** Each `metrics.New()` has its own registry, not Prometheus's global one, so tests can start any number of servers.
+- **Quieter logs.** Passing `/healthz` checks (Render, every 5 seconds: about 17,000 lines a day) aren't logged any more; a failing one still is.
+
 ## Rate limits: `internal/ratelimit`
 
 Fixed windows: the first attempt for a subject starts a window (15 minutes for login), every attempt adds one, and past the limit the answer is `429` with `Retry-After` until the window ends.
@@ -378,6 +390,7 @@ Everything runs with the race detector (`./scripts/check.sh`). [FAILURES.md](FAI
 | Events are published after commit, in the background, and may be lost | They are hints. The client's snapshot after `ready`, `resync`, and reloading after a reconnect cover every loss; PostgreSQL never depends on them |
 | A per-job `version`, raised by every `UPDATE`, orders a job's changes | Row locks make it follow commit order. Timestamps from `now()` follow transaction start, can tie, and depend on the database's clock |
 | Dashboard: plain JavaScript embedded in the API, token in `sessionStorage`, strict CSP | No build step or third-party code to trust; same origin; the token survives a refresh but not the tab. The policy and text-only rendering stand between an injected title and the token |
+| Prometheus metrics behind a token, read by hand for now | The standard format with labels and histograms; no hosted collector, because polling would keep the free instance awake all month |
 | Rate limits in fixed windows, counted in Redis with an in-memory fallback; `429` + `Retry-After`, no lockouts | Shared across instances and restarts; still limited when Redis is down; nobody can lock another user out for good |
 | Client address from `CF-Connecting-IP` on Render, chosen by experiment | Cloudflare refuses requests that send it; `X-Forwarded-For` keeps whatever the client put first |
 | Single-use 30-second tickets for streams | Keeps the 24-hour session token out of URLs, which end up in logs and history |
@@ -406,6 +419,7 @@ Everything runs with the race detector (`./scripts/check.sh`). [FAILURES.md](FAI
 - **The per-email login limit can be used against its owner.** Anyone who knows your email can send 10 wrong passwords and make you wait up to 15 minutes to log in. That's the price of stopping distributed guessing of one account; a lockout would have been worse (it never ends by itself). Possible softening later: let a client that has logged in successfully from the same address before skip the per-email limit.
 - **While Redis is down, limits are per process and reset on restart.** On Render's single free instance that means a restart (every 15 idle minutes) gives a fresh allowance until Redis is back.
 - After the bcrypt cost changes, response time can tell old accounts from unknown emails until each user logs in once.
-- A failed readiness check is logged twice, and every `/healthz` check from Render is logged (Phase 10).
+- A failed readiness check is logged twice (Phase 10).
+- `/metrics` is read by hand (`curl` with the token), not collected. Counters start from zero at every restart, and a free instance restarts after 15 idle minutes, so they show "since this instance started", not history. A collector would keep the instance awake around the clock.
 - The CLI keeps one saved login at a time: logging in to another API replaces it.
 - Hosting is free tier: the first request after idle waits for the server and database to wake ([DEPLOYMENT.md](DEPLOYMENT.md)).

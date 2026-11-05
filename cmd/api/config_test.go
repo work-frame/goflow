@@ -71,12 +71,14 @@ func TestLoadConfigReadsEverySetting(t *testing.T) {
 		"GOFLOW_WORKERS":          "3",
 		"GOFLOW_LOG_IP_HEADERS":   "on",
 		"GOFLOW_CLIENT_IP_HEADER": "CF-Connecting-IP",
+		"GOFLOW_METRICS_TOKEN":    "a-metrics-token-of-at-least-32-characters",
 	}))
 	if err != nil {
 		t.Fatalf("loadConfig: %v", err)
 	}
 	want := config{Addr: "127.0.0.1:9000", DatabaseURL: testDBURL, RedisURL: sampleRedisURL, BcryptCost: 11, RegistrationOpen: true,
-		Workers: 3, SimulatedWork: 5 * time.Second, LogIPHeaders: true, ClientIPHeader: "CF-Connecting-IP"}
+		Workers: 3, SimulatedWork: 5 * time.Second, LogIPHeaders: true, ClientIPHeader: "CF-Connecting-IP",
+		MetricsToken: "a-metrics-token-of-at-least-32-characters"}
 	if cfg != want {
 		t.Errorf("config = %+v, want %+v", cfg, want)
 	}
@@ -100,6 +102,7 @@ func TestLoadConfigRejectsBadSettings(t *testing.T) {
 		{"bad IP header logging value", map[string]string{"GOFLOW_DATABASE_URL": testDBURL, "GOFLOW_LOG_IP_HEADERS": "true"}, []string{`"on" or "off", got "true"`}},
 		{"X-Forwarded-For as client IP header", map[string]string{"GOFLOW_DATABASE_URL": testDBURL, "GOFLOW_CLIENT_IP_HEADER": "X-Forwarded-For"}, []string{"can't be X-Forwarded-For"}},
 		{"unknown client IP header", map[string]string{"GOFLOW_DATABASE_URL": testDBURL, "GOFLOW_CLIENT_IP_HEADER": "X-Real-IP"}, []string{`"CF-Connecting-IP" or "True-Client-IP", got "X-Real-IP"`}},
+		{"short metrics token", map[string]string{"GOFLOW_DATABASE_URL": testDBURL, "GOFLOW_METRICS_TOKEN": "short"}, []string{"at least 32 characters"}},
 		{"too many workers", map[string]string{"GOFLOW_DATABASE_URL": testDBURL, "GOFLOW_REDIS_URL": sampleRedisURL, "GOFLOW_WORKERS": "33"}, []string{`from 0 to 32, got "33"`}},
 	}
 	for _, tc := range tests {

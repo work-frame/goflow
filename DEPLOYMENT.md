@@ -113,7 +113,7 @@ Almost all of the 0.6–0.8 s is distance: each CLI command opens a new TLS conn
 | Neon free: 100 compute-hours a month; can't stay awake for free | A query every few seconds would use the month up in about 2.5 weeks, then suspend the database | The relay never polls while healthy; the reconciler runs hourly. Watch Neon's usage page |
 | Free services can't set a shutdown delay | Render rejects `maxShutdownDelaySeconds` on the free plan, so the time between `SIGTERM` and `SIGKILL` is Render's to choose. The pool drains for 20 s; a job cut off sooner records nothing | The next start resets it and runs it again. Set the delay on a paid instance |
 | Workers inside the API | One API instance only (startup recovery resets `processing` jobs); jobs run on the API's tenth of a CPU | A paid background worker and leases (Phase 12) before more instances |
-| Render health checks every 5 s are logged | About 17,000 log lines a day of `/healthz` | Phase 10: skip request logs for `/healthz` |
+| Metrics aren't collected, only read by hand | No history or alerts; counters restart with the instance | A collector (Grafana Cloud's free plan, or Prometheus in Docker) when the instance is paid and always on anyway |
 
 ## Queue and workers (Task 27)
 
@@ -263,6 +263,24 @@ Result on 5 November 2026, about 14:13 UTC (deploy `a5314fc`):
 | `client_ip_header` in the `starting` lines | `""` at 14:08:32, then `CF-Connecting-IP` at 14:09:15 and after a restart at 14:31:24 |
 
 **The 43-second gap.** Merging changed both the code and `render.yaml`, and Render deployed them separately: first the code (Auto-Deploy), then the Blueprint sync with the new setting. For 43 seconds the new code ran without `GOFLOW_CLIENT_IP_HEADER`, so every user's login counted against one address, Render's local proxy `[::1]`. The per-email limit worked throughout, so no guess got through; the risk was only that 30 logins from anyone could have blocked everyone's logins until that window ended. Lesson for settings that change behaviour: add the setting in one deploy and the code that needs it in the next, or make the code safe without it.
+
+## Metrics (Task 40)
+
+The Blueprint sync creates `GOFLOW_METRICS_TOKEN` with a random value. To look at the metrics (paste each block on its own):
+
+1. Copy the token from Render: `goflow-api` → **Environment** → `GOFLOW_METRICS_TOKEN` → reveal and copy. Don't paste it into a chat or a screenshot.
+2. Read it into your shell without echo:
+   ```bash
+   read -s "MT?Metrics token: " && echo && echo ${#MT}
+   ```
+   It should print a length of 32 or more (Render generates 44).
+3. Fetch GoFlow's own metrics, the token sent on stdin so it isn't in the process list:
+   ```bash
+   printf 'Authorization: Bearer %s\n' "$MT" | curl -s -H @- https://goflow-api-hewh.onrender.com/metrics | grep '^goflow_'
+   ```
+4. `unset MT` when done.
+
+Without the token the answer is `401`. Each read is one request, so it wakes a sleeping instance like any other; counters start from zero whenever the instance restarts.
 
 ## Rolling back
 
