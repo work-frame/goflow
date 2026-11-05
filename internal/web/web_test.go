@@ -7,6 +7,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/work-frame/goflow/internal/events"
 )
 
 func serve(t *testing.T, method, path string) *httptest.ResponseRecorder {
@@ -111,6 +113,38 @@ func TestScriptNeverTurnsTextIntoHTML(t *testing.T) {
 	// The session token travels in a header only. A URL ends up in logs.
 	if strings.Contains(js, "token=") {
 		t.Error("app.js puts something called token in a URL")
+	}
+}
+
+// Every message type the server can send has a case in app.js, and the
+// two that matter most do the right thing: "paused" shows the paused dot,
+// "resumed" reloads the list (events sent during the pause are gone). A
+// browser test would be better; check.sh has none yet, so this reads the
+// source.
+func TestScriptHandlesEveryMessageType(t *testing.T) {
+	js := read(t, "static/app.js")
+	for _, typ := range []string{events.TypeReady, events.TypeChanged, events.TypeDeleted, events.TypeResync, events.TypePaused, events.TypeResumed} {
+		if !strings.Contains(js, `case "`+typ+`":`) {
+			t.Errorf("app.js has no case for %q messages", typ)
+		}
+	}
+	caseBody := func(typ string) string {
+		m := regexp.MustCompile(`(?s)case "` + typ + `":(.*?)break;`).FindStringSubmatch(js)
+		if m == nil {
+			return ""
+		}
+		return m[1]
+	}
+	if !strings.Contains(caseBody(events.TypePaused), `setLive("paused"`) {
+		t.Error(`app.js: "paused" doesn't set the paused state`)
+	}
+	for _, typ := range []string{events.TypeReady, events.TypeResync, events.TypeResumed} {
+		if !strings.Contains(caseBody(typ), "loadAll") {
+			t.Errorf("app.js: %q doesn't reload the list", typ)
+		}
+	}
+	if !strings.Contains(read(t, "static/style.css"), ".live.paused") {
+		t.Error("style.css has no style for the paused dot")
 	}
 }
 

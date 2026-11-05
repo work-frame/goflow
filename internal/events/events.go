@@ -34,6 +34,13 @@ const (
 	// TypeResync tells the client that events may have been lost (the
 	// server's Redis subscription dropped and came back): load the list again.
 	TypeResync = "resync"
+	// TypePaused tells the client that events have stopped reaching the
+	// server: the stream is open, but the list may go stale until
+	// TypeResumed. See health.go.
+	TypePaused = "paused"
+	// TypeResumed tells the client that events flow again. Those sent
+	// during the pause are gone, so the client loads the list again.
+	TypeResumed = "resumed"
 )
 
 // Message is what a client receives, one per SSE "data:" line.
@@ -47,9 +54,13 @@ type Message struct {
 
 // envelope is what travels through Redis: the client's message plus the
 // owner it's for. The owner never reaches the client.
+//
+// A canary (see health.go) carries only Canary, the ID of the hub that
+// sent it, and never reaches any client.
 type envelope struct {
-	UserID  string          `json:"user_id"`
-	Message json.RawMessage `json:"message"`
+	UserID  string          `json:"user_id,omitempty"`
+	Message json.RawMessage `json:"message,omitempty"`
+	Canary  string          `json:"canary,omitempty"`
 }
 
 // encoded returns m as JSON. Message only holds strings and a job, so

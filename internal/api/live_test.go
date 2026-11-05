@@ -26,6 +26,7 @@ type fakeLive struct {
 	unsubscribed chan struct{}
 	closed       bool
 	subscribed   chan struct{}
+	paused       bool
 }
 
 // newFakeLive returns a fakeLive whose Redis subscription is already live.
@@ -36,6 +37,12 @@ func newFakeLive() *fakeLive {
 }
 
 func (f *fakeLive) Subscribed() <-chan struct{} { return f.subscribed }
+
+func (f *fakeLive) Paused() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.paused
+}
 
 func (f *fakeLive) IssueTicket(_ context.Context, userID string) (string, error) {
 	f.mu.Lock()
@@ -317,5 +324,42 @@ func TestReadyWaitsForTheRedisSubscription(t *testing.T) {
 			t.Fatalf("after the subscription: %s, want ready", got)
 		}
 		return
+	}
+}
+
+// A stream that opens while events aren't reaching the API must not look
+// healthy: "paused" comes right after "ready", and the stream stays open
+// for the "resumed" that ends it.
+func TestStreamOpenedDuringAPauseSaysSo(t *testing.T) {
+	live := newFakeLive()
+	live.paused = true
+	live.addTicket("gft_alice", "alice")
+	srv := httptest.NewServer(NewRouter(Deps{Jobs: newTestStore(), Live: live, DB: okPinger, Logger: discardLogger()}))
+	t.Cleanup(srv.Close) // after the streams' own cleanups: Close waits for open handlers
+
+	s := openStream(t, srv.URL, "gft_alice")
+	for _, want := range []string{`{"type":"ready"}`, `{"type":"paused"}`} {
+		if got := s.next(t); got != want {
+			t.Fatalf("got %s, want %s", got, want)
+		}
+	}
+	live.msgs <- []byte(`{"type":"resumed"}`)
+	if got := s.next(t); got != `{"type":"resumed"}` {
+		t.Errorf("got %s, want resumed on the same stream", got)
+	}
+}
+
+// When delivery works, "ready" is all a new stream hears.
+func TestStreamOpenedWhileHealthyIsNotPaused(t *testing.T) {
+	live := newFakeLive()
+	live.addTicket("gft_alice", "alice")
+	srv := httptest.NewServer(NewRouter(Deps{Jobs: newTestStore(), Live: live, DB: okPinger, Logger: discardLogger()}))
+	t.Cleanup(srv.Close)
+
+	s := openStream(t, srv.URL, "gft_alice")
+	s.next(t) // ready
+	live.msgs <- []byte(`{"type":"deleted","id":"j1"}`)
+	if got := s.next(t); got != `{"type":"deleted","id":"j1"}` {
+		t.Errorf("second message %s, want the event (no paused)", got)
 	}
 }

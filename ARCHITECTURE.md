@@ -1,6 +1,6 @@
 # Architecture
 
-This describes GoFlow at the end of Phase 9. It changes as each phase lands.
+This describes GoFlow at the end of Phase 9, with Phase 10's metrics and delivery health. It changes as each phase lands.
 
 ## Overview
 
@@ -180,29 +180,32 @@ every API instance: SUBSCRIBE goflow:events ─► events.Hub ─► only the ow
 - **Publishing never slows the real work.** `events.Publisher` encodes the event, puts it in a buffer and returns. One goroutine sends to Redis, in order, with a 2-second limit per message. When Redis hangs, the buffer fills and new events are dropped and counted. A Redis outage can't delay a job's creation or a worker's result.
 - **Routing by owner, in the hub.** Every API instance subscribes once to one channel. The `Hub` hands each message only to the streams of the job's owner (`user_id` from the Redis envelope, which never reaches the client). This is the same rule as `WHERE user_id = $n` in SQL, applied to events (FAILURES.md, case 35).
 - **A slow client is dropped, not waited for.** Delivery never blocks. A stream more than 64 messages behind is closed; its client reconnects and reloads.
-- **No gap between the snapshot and the stream.** The handler subscribes to the hub, waits until the API's Redis subscription is live, and only then sends `ready`. The client loads its jobs after `ready`, so any change committed after that read arrives as an event. When the Redis subscription drops and comes back, every stream gets `resync`, because messages published in between are gone.
+- **No gap between the snapshot and the stream.** The handler subscribes to the hub, waits until the API's Redis subscription is live, and only then sends `ready`. The client loads its jobs after `ready`, so any change committed after that read arrives as an event. When the Redis subscription drops and comes back, every stream gets `resync`, because messages published in between are gone. A longer break is reported while it lasts: see [Delivery health](#delivery-health).
 - **Order isn't guaranteed; `version` decides.** The relay and a worker announce from different goroutines (or processes), so `processing` can arrive before `queued`. A client keeps an event only if its `version` is higher than its copy's. `queued` is often skipped altogether: the relay pushes the ID before it marks the job queued, and a fast worker claims it first.
 - **Why a version, not `updated_at`.** Every `UPDATE` of a job sets `version = version + 1` in the same statement (migration 0009). PostgreSQL's row lock makes updates of one row take turns, so versions follow commit order exactly. `updated_at` can't: `now()` is the time the transaction *started*, so a transaction that starts first, waits for the row lock and commits second writes the older time on the newer state, and two changes can get the same time. `TestEveryJobUpdateBumpsTheVersion` reads the package's source and fails if any `UPDATE jobs` forgets the version (FAILURES.md, case 36).
 - **Tickets, not tokens, in the URL.** `EventSource` can't send an `Authorization` header. `POST /api/v1/events/ticket` (with the session) returns `gft_` + 32 random bytes; Redis stores its SHA-256 hash for 30 seconds (`SET NX EX`), and the stream redeems it with `GETDEL`, so it works exactly once, even with two requests racing. A ticket in a proxy log is already spent. Our own request log never records query strings.
 - **Long-lived responses.** The server's 10-second read and write timeouts are lifted for each stream with `http.ResponseController`, which reaches the connection through the middleware's `Unwrap` methods. A heartbeat comment every 25 seconds keeps proxies from closing a quiet stream; it's outbound, so it doesn't keep a free Render instance awake. `Shutdown` waits for open connections, so `RegisterOnShutdown(hub.Close)` ends every stream the moment shutdown starts.
 - **Without Redis,** the ticket and stream endpoints answer `503` and nothing else changes.
 
-### Planned: delivery health (Phase 10)
+### Delivery health
 
-Not built yet. This is the requirement Phase 10 must meet, written down now so it isn't lost.
+An open stream proves only that the browser reaches the API. Whether job events reach the API is a separate question, and before Phase 10 nothing asked it: if the API lost its Redis subscription, events stopped, the stream stayed open and the dot said `live` over a list that wasn't moving. Resync *repaired* missed events once the subscription came back; nothing *detected* that they had stopped. The requirement was written down at the end of Phase 8 and built in Task 42 (`internal/events/health.go`):
 
-**The problem.** A healthy browser-to-API connection doesn't prove a healthy API-to-Redis connection. Today the dashboard's dot reports only whether its SSE stream is open. If the API loses its Redis subscription, the stream stays open, events stop, and the dot still says `live` until the subscription returns and `resync` repairs the list. Resync repairs missed events; nothing detects that they stopped.
+```text
+every 2 s   events.Watch ─► PUBLISH goflow:events {"canary":"<this hub's ID>"}
+            events.Listen ◄── the same channel ◄── Redis
+              own canary back ─► hub.heard(): last heard = now
+            no canary back for 8 s ─► hub.check(): paused ─► {"type":"paused"} to every stream
+            next canary back ─► {"type":"resumed"} to every stream ─► clients reload from PostgreSQL
+```
 
-**Requirements:**
+1. **Health means "a message published now reaches this hub".** The API publishes a canary to the same channel job events use, every 2 seconds, whether or not any job is moving: a quiet system and a broken one look the same from outside. Only a canary that came **back** counts. A successful `PUBLISH` proves Redis took the message, not that this API's subscription delivered it (FAILURES.md, case 42). Each hub has a random ID and counts only its own canaries, since every API instance publishes on the same channel.
+2. **Loss within 10 seconds, recovery at the next canary.** No canary back for 8 seconds, checked every 2, is a pause: reported 8–10 seconds after the break. The first canary that comes back ends it. go-redis re-subscribing isn't enough: during a pause, a resubscription sends nothing, and `resumed` follows with the first canary through it. A drop that go-redis repairs in a fraction of a second (a killed connection) never becomes a pause; streams get the usual `resync` (`TestShortRedisDropIsOnlyAResync`).
+3. **Every stream is told, and none is closed.** The hub broadcasts `{"type":"paused"}` and `{"type":"resumed"}` to every open stream; like `resync`, they carry no job data. The state changes and the message is queued under the hub's lock, and a new stream checks `Paused()` after it has subscribed: one that opens during a pause gets `paused` right after `ready`, and can't miss a change that comes after its check (at worst it hears `paused` twice).
+4. **The dot reports the whole path.** Three states: `live` (stream open, events arriving), `paused` (stream open, events not reaching the server: the list may be stale) and `offline`/`reconnecting` (stream closed). After `resumed` the page reloads its list, as after `resync`.
+5. **Tested with the stream open.** `TestLiveDeliveryPausesWhileRedisIsAway` runs the real server with its Redis behind a small TCP proxy, opens a stream, cuts the proxy, and expects `paused` (about 1 s after the cut with the test's 100 ms / 1 s timings) **without the stream ending**, `goflow_event_delivery_ok 0`, then `resumed` once the proxy is back. The requirement suggested `CLIENT KILL TYPE pubsub`; it isn't used because it disconnects every subscriber on the shared test Redis, other test packages' included, and because go-redis reconnects within about 100 ms, so it produces a `resync`, never a pause. The proxy breaks only this server's connections. The page's side is checked by `TestScriptHandlesEveryMessageType` (every message type has a case; `paused` sets the paused state; `ready`, `resync` and `resumed` reload), and was checked once in a headless Chromium: Redis cut, the dot said `paused: updates delayed` 8.3 s later on the same stream; a job created meanwhile wasn't shown; Redis back, `live` 0.2 s later, and the job appeared.
 
-1. **The API monitors its own Redis subscription.** Health means "a message published now would reach this API's hub", not "the TCP connection is open". The check must not depend on job activity, since a quiet system and a broken one look the same from the outside.
-2. **Loss and recovery are both detected.** The API notices that the subscription stopped working within a set time (proposed: 10 seconds, to be confirmed in Phase 10) and notices when it works again. go-redis only reports resubscriptions, so detecting the loss needs GoFlow's own check, for example a canary message the API publishes to itself every few seconds and expects back.
-3. **Every connected stream is told.** On loss, the hub broadcasts `{"type":"paused"}` to every open stream; on recovery, `{"type":"resumed"}`. After `resumed` the client reloads its list, as after `resync`, because events published during the pause are gone. A stream opened while delivery is paused gets `paused` right after `ready`. Like `resync`, these messages carry no job data, so they may go to every user.
-4. **The dashboard's dot reports the whole pipeline.** Three states, not two: `live` (stream open and delivery healthy), `paused` (stream open, delivery degraded: the list may be stale), and `offline`/`reconnecting` (stream closed). An open stream alone never shows `live`.
-5. **A test proves degraded delivery is reported while the stream stays open.** With an SSE stream open against a real Redis, the test breaks only the API's subscription (for example `CLIENT KILL TYPE pubsub`), asserts that the stream receives `paused` within the target time **without ending**, then lets the subscription recover and asserts `resumed`. The dashboard's handling of `paused` and `resumed` needs its own check in a browser (a headless-browser test, which `check.sh` doesn't run yet), or as a function the page and a test share.
-
-Until then: the [known limitation](#known-limitations) stands.
-
+The cost: one `PUBLISH` every 2 seconds per API instance, about 43,000 a day. Render's Key Value docs mention no command quota (only memory and connections). On a plan that does (Upstash's free plan: 500,000 a month), the canary alone would need 1.3 million, so the interval would have to grow.
 
 ### Errors
 
@@ -323,6 +326,7 @@ These are a contract, not something the pool enforces. Tests for each job type s
   | `goflow_event_streams` | gauge | open event streams on this instance |
   | `goflow_rate_limited_total{rule}` | counter | each `429` |
   | `goflow_rate_limit_fallback` | gauge | 1 while limits are counted in memory because Redis is unreachable |
+  | `goflow_event_delivery_ok` | gauge | 1 while this API's canaries come back, 0 while live delivery is paused (Task 42) |
 
   Unknown and zero are different answers. A graph that drops to zero during an outage says "nothing waiting"; a gap says "we don't know", which is the truth.
 - **Behind a token.** `GOFLOW_METRICS_TOKEN` (at least 32 characters; Render generates one) is compared in constant time via SHA-256, so neither its content nor its length leaks through timing. Without a token the route doesn't exist. The numbers show how busy GoFlow is and how it fails: nobody else's business.
@@ -349,7 +353,8 @@ Three files embedded with `//go:embed` and served by the API at `/`, `/app.js` a
 - **The token lives in `sessionStorage`.** It survives a refresh and is gone when the tab closes. It goes only in the `Authorization` header; the event stream gets a 30-second ticket instead. A `401` from any call logs the page out.
 - **A strict Content-Security-Policy on every file:** `default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'`. Only `/app.js` runs: no inline scripts, no `onclick=` attributes, no `eval`. `fetch` and `EventSource` can reach only this origin, so even a script that got in couldn't send the token elsewhere. Plus `X-Content-Type-Options: nosniff` and `Referrer-Policy: no-referrer`.
 - **Server text is never HTML.** Every element is built with `createElement` and filled with `textContent`. A job titled `<img src=x onerror=alert(1)>` shows as those characters. `TestScriptNeverTurnsTextIntoHTML` fails if `app.js` ever uses `innerHTML` and its relatives, and `TestPageHasNoInlineCode` keeps the HTML free of anything the policy would have to allow (FAILURES.md, case 37).
-- **Keeping its copy right.** The page holds jobs in a `Map`. An event replaces a job only if its `version` is higher. After `ready`, `resync` or any reconnect it reloads every page of `GET /api/v1/jobs`: jobs it had before the reload that the database no longer has are removed, and jobs that arrived by event during the reload are kept. Deleted IDs are remembered, so a late `changed` event can't bring one back.
+- **Keeping its copy right.** The page holds jobs in a `Map`. An event replaces a job only if its `version` is higher. After `ready`, `resync`, `resumed` or any reconnect it reloads every page of `GET /api/v1/jobs`: jobs it had before the reload that the database no longer has are removed, and jobs that arrived by event during the reload are kept. Deleted IDs are remembered, so a late `changed` event can't bring one back.
+- **Three states for the dot.** `live`, `paused: updates delayed` (the server says events stopped reaching it; the stream stays open) and `offline`/`reconnecting`. An open stream alone never shows `live`: see [Delivery health](#delivery-health).
 - **Reconnecting.** `EventSource` retries on its own, but with the same, already used ticket, so the page closes it on any error, gets a new ticket and reconnects, waiting 1 s, then doubling to 30 s. Without Redis (`503` for the ticket) it shows the list from the database and says live updates are unavailable.
 
 Checked in a headless Chromium against a local API with PostgreSQL, Redis and 2 workers: login (and a wrong password), four jobs reaching `completed`/`dead` live, retry and delete, a refresh keeping the session, and an API restart (the page showed `offline`, came back `live`, and showed a job created while it was away). The policy reported no violations.
@@ -371,7 +376,7 @@ Checked in a headless Chromium against a local API with PostgreSQL, Redis and 2 
 | `internal/api` | Handlers with fakes: an adapter over `MemoryStore`, an always-failing store, and a spy that records the context it was given |
 | `internal/cli` | A fake API with 2 jobs per page, plus failure and deadline doubles |
 | `internal/client` | **Contract tests** against the real `api.NewRouter`, served by `httptest.NewServer` |
-| `internal/events` | The hub and the publisher with fakes for Redis: owner-only delivery, slow clients dropped, publishing that never blocks, tickets working once and stored as hashes |
+| `internal/events` | The hub and the publisher with fakes for Redis: owner-only delivery, slow clients dropped, publishing that never blocks, tickets working once and stored as hashes, and delivery health with each half of the canary's path broken on its own |
 | `internal/database` | Real PostgreSQL. `TestMain` migrates one template database per run, and each test copies it |
 | `cmd/api` | End to end: the real server on `127.0.0.1:0`, including jobs surviving a restart, sign-up, sessions, and settings validation |
 
@@ -406,6 +411,7 @@ Everything runs with the race detector (`./scripts/check.sh`). [FAILURES.md](FAI
 | Prometheus metrics behind a token, read by hand for now | The standard format with labels and histograms; no hosted collector, because polling would keep the free instance awake all month |
 | Rate limits in fixed windows, counted in Redis with an in-memory fallback; `429` + `Retry-After`, no lockouts | Shared across instances and restarts; still limited when Redis is down; nobody can lock another user out for good |
 | Client address from `CF-Connecting-IP` on Render, chosen by experiment | Cloudflare refuses requests that send it; `X-Forwarded-For` keeps whatever the client put first |
+| Delivery health by canary: the API publishes to itself every 2 s; 8 s without one back is a pause | Only a message that came back proves the path works, and it doesn't depend on job activity. 10 s to notice is quick for a person watching and slow enough that a reconnect go-redis repairs in 100 ms is never reported |
 | Single-use 30-second tickets for streams | Keeps the 24-hour session token out of URLs, which end up in logs and history |
 | CLI goes through the API | One set of rules; no back door around authentication |
 | Interfaces defined by the code that uses them, only once a second implementation exists | `JobStore` and `Pinger` each have a real and a test implementation |
@@ -426,7 +432,7 @@ Everything runs with the race detector (`./scripts/check.sh`). [FAILURES.md](FAI
 - Idempotency keys never expire on their own; they're deleted with their job.
 - A session ending (logout, password change) doesn't close streams it opened: they run until they drop or the server restarts. A ticket can't be issued without a live session, and a stream only carries its owner's job changes.
 - The dashboard keeps the session token where its own script can read it (`sessionStorage`). The policy and text-only rendering make injected script very unlikely to run, but if one ever did, it could act as the user in that tab until the token expires. An `HttpOnly` cookie would hide the token from scripts, at the cost of CSRF protection on every request (considered for a later phase).
-- **The live dot can say `live` while events are paused.** If the API loses its Redis subscription (a Key Value restart), the browser's stream to the API stays open, so the page can't tell: events simply stop until the subscription returns and every stream gets `resync`. Nothing is lost, since the page then reloads from PostgreSQL, but for up to a minute or so the page shows `live` over a list that isn't moving. go-redis reports a resubscription but not the drop itself. Resync *repairs* missed events; it doesn't *detect* that events stopped. The dot measures the browser's connection to the API, not the whole path from the database to the browser. Fix planned for Phase 10: see [Planned: delivery health](#planned-delivery-health-phase-10).
+- **The dot needs 8–10 seconds to notice a pause.** Until then it still says `live` over a list that has stopped moving. Nothing is lost either way: the page reloads from PostgreSQL on `resumed`. A shorter timeout would report brief network hiccups as pauses.
 - The dashboard has no sign-up form: accounts are created with registration open, as in [DEPLOYMENT.md](DEPLOYMENT.md).
 - Plain `redis://` is accepted for single-label private-network names (Render's internal Key Value host): that traffic is unencrypted inside the provider's network.
 - **The per-email login limit can be used against its owner.** Anyone who knows your email can send 10 wrong passwords and make you wait up to 15 minutes to log in. That's the price of stopping distributed guessing of one account; a lockout would have been worse (it never ends by itself). Possible softening later: let a client that has logged in successfully from the same address before skip the per-email limit.

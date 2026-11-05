@@ -103,6 +103,21 @@ func (m *Metrics) WatchLimiter(degraded func() bool) {
 	}))
 }
 
+// WatchDelivery reports whether job events reach this API (1) or
+// delivery is paused because its canaries stopped coming back (0). See
+// events/health.go.
+func (m *Metrics) WatchDelivery(ok func() bool) {
+	m.registry.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+		Name: "goflow_event_delivery_ok",
+		Help: "1 while job events reach this API, 0 while live delivery is paused (no canary back for 8 s).",
+	}, func() float64 {
+		if ok() {
+			return 1
+		}
+		return 0
+	}))
+}
+
 // queueCollector asks Redis for the queue's sizes at the moment /metrics
 // is read.
 type queueCollector struct {

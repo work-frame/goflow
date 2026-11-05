@@ -2,6 +2,8 @@ package events
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"log/slog"
 	"sync"
@@ -26,6 +28,13 @@ type Hub struct {
 
 	subscribed     chan struct{} // closed once the Redis subscription is first live
 	subscribedOnce sync.Once
+
+	// Delivery health (health.go), guarded by mu.
+	id        string    // this hub's name on its canaries
+	live      bool      // the Redis subscription has been live at least once
+	lastHeard time.Time // when this hub's own canary last came back
+	paused    bool      // streams were told "paused" and not "resumed" since
+	pausedAt  time.Time
 }
 
 type stream struct {
@@ -34,7 +43,9 @@ type stream struct {
 
 // NewHub returns an empty Hub.
 func NewHub() *Hub {
-	return &Hub{streams: make(map[string]map[*stream]struct{}), subscribed: make(chan struct{})}
+	b := make([]byte, 8)
+	rand.Read(b) // never fails (crypto/rand, Go 1.24+)
+	return &Hub{streams: make(map[string]map[*stream]struct{}), subscribed: make(chan struct{}), id: hex.EncodeToString(b)}
 }
 
 // Subscribed is closed once the hub's Redis subscription has been live at
@@ -43,7 +54,13 @@ func NewHub() *Hub {
 func (h *Hub) Subscribed() <-chan struct{} { return h.subscribed }
 
 func (h *Hub) markSubscribed() {
-	h.subscribedOnce.Do(func() { close(h.subscribed) })
+	h.subscribedOnce.Do(func() {
+		h.mu.Lock()
+		h.live = true
+		h.lastHeard = time.Now() // the first canary gets a full timeout to arrive
+		h.mu.Unlock()
+		close(h.subscribed)
+	})
 }
 
 // Subscribe opens a stream of userID's events. msgs closes when the hub
@@ -110,6 +127,11 @@ func (h *Hub) Deliver(userID string, msg []byte) {
 func (h *Hub) Broadcast(msg []byte) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	h.broadcastLocked(msg)
+}
+
+// broadcastLocked must be called with h.mu held.
+func (h *Hub) broadcastLocked(msg []byte) {
 	for userID, set := range h.streams {
 		for s := range set {
 			h.send(userID, s, msg)
@@ -146,7 +168,12 @@ type Listener interface {
 
 // Listen feeds the hub from Redis until ctx ends or stop is called. Every
 // time the Redis subscription is (re)established, every stream is told to
-// resync: messages published while it was down are lost.
+// resync: messages published while it was down are lost. During a pause
+// (health.go) it says nothing: "resumed" follows with the next canary,
+// and makes clients reload anyway.
+//
+// The hub's own canaries come back here too. They go to no stream; they
+// only tell the hub that delivery works.
 func Listen(ctx context.Context, l Listener, h *Hub, logger *slog.Logger) (stop func()) {
 	ctx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
@@ -158,11 +185,27 @@ func Listen(ctx context.Context, l Listener, h *Hub, logger *slog.Logger) (stop 
 			err := l.Listen(ctx, Channel,
 				func() {
 					h.markSubscribed()
-					h.Broadcast(resync)
+					if !h.Paused() {
+						h.Broadcast(resync)
+					}
 				},
 				func(b []byte) {
 					var e envelope
-					if err := json.Unmarshal(b, &e); err != nil || e.UserID == "" {
+					if err := json.Unmarshal(b, &e); err != nil {
+						logger.Warn("events: ignoring a malformed message")
+						return
+					}
+					if e.Canary != "" {
+						// Another API instance's canary proves nothing about
+						// this one: only our own counts.
+						if e.Canary == h.id {
+							if pausedFor, resumed := h.heard(time.Now()); resumed {
+								logger.Info("events: live delivery resumed", "paused_for", pausedFor.Round(time.Millisecond))
+							}
+						}
+						return
+					}
+					if e.UserID == "" {
 						logger.Warn("events: ignoring a malformed message")
 						return
 					}

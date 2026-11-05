@@ -51,6 +51,11 @@ type config struct {
 	// ClientIPHeader is the header a trusted proxy sets to the client's
 	// address (GOFLOW_CLIENT_IP_HEADER). Empty: use the connection's address.
 	ClientIPHeader string
+	// CanaryInterval and CanaryTimeout time the live-delivery check
+	// (events.Watch). Not read from the environment: zero means
+	// events.CanaryInterval and events.CanaryTimeout. Tests shorten them.
+	CanaryInterval time.Duration
+	CanaryTimeout  time.Duration
 }
 
 // loadConfig reads the API settings through getenv (os.Getenv in production,
