@@ -113,6 +113,7 @@ Almost all of the 0.6–0.8 s is distance: each CLI command opens a new TLS conn
 | Neon free: 100 compute-hours a month; can't stay awake for free | A query every few seconds would use the month up in about 2.5 weeks, then suspend the database | The relay never polls while healthy; the reconciler runs hourly. Watch Neon's usage page |
 | Free services can't set a shutdown delay | Render rejects `maxShutdownDelaySeconds` on the free plan, so the time between `SIGTERM` and `SIGKILL` is Render's to choose. The pool drains for 20 s; a job cut off sooner records nothing | The next start resets it and runs it again. Set the delay on a paid instance |
 | Workers inside the API | One API instance only (startup recovery resets `processing` jobs); jobs run on the API's tenth of a CPU | A paid background worker and leases (Phase 12) before more instances |
+| The live-delivery canary publishes every 2 seconds | About 43,000 Redis commands a day; outbound only, so it doesn't keep the instance awake | Render's Key Value docs mention no command quota. Lengthen the interval on a per-command plan |
 | Metrics aren't collected, only read by hand | No history or alerts; counters restart with the instance | A collector (Grafana Cloud's free plan, or Prometheus in Docker) when the instance is paid and always on anyway |
 
 ## Queue and workers (Task 27)
@@ -285,6 +286,28 @@ After Task 41 the same command also shows jobs (`goflow_job_status_changes_total
 Result on 5 November 2026 (deploy `1b77b10`, Task 40): without the token, `{"error":"a metrics token is required"}` and `401`; with it, `goflow_http_requests_total` for `GET /healthz` (31 checks in about 2.5 minutes, 1.1 ms in total), `GET /{$}` (the dashboard) and the refused `GET /metrics`, and no path, ID or email anywhere.
 
 Without the token the answer is `401`. Each read is one request, so it wakes a sleeping instance like any other; counters start from zero whenever the instance restarts.
+
+Result on 5 November 2026 (deploy `857ea6d`, Task 41), after one `flaky:1` job created in the dashboard:
+
+| Line | Value | Why |
+|---|---|---|
+| `goflow_job_status_changes_total` | pending 1, processing 2, retrying 1, completed 1; no `queued` | one failed attempt, one success; a worker claimed the job before the relay marked it queued |
+| `goflow_job_attempt_duration_seconds` | `retry`: 1 attempt, 7 µs; `completed`: 1 attempt, 1.001 s | `flaky` fails at once and succeeds after 1 s of work |
+| `goflow_events_published_total` / `_dropped_total` | 5 / 0 | one event per status change |
+| `goflow_event_streams` | 1 | the dashboard tab |
+| `goflow_queue_jobs` | 0, 0, 0 | finished; the scrape reached Key Value |
+| `goflow_rate_limit_fallback` | 0 | the limiter counts in Redis |
+
+`process_start_time_seconds` showed an instance 64 seconds old: the free instance had spun down after 15 idle minutes, and the login woke a new one. An earlier read on the old instance had shown no job lines at all.
+
+## Delivery health (Task 42)
+
+After the deploy, with the dashboard open:
+
+1. The dot says `live`, and the metrics (as above) include `goflow_event_delivery_ok 1`.
+2. In Render's logs there is no `live delivery paused` line. If Key Value ever restarts, you'll see `events: live delivery paused; streams stay open and reload when it resumes` about 8 seconds into the outage, the dot turns to `paused: updates delayed`, and then `events: live delivery resumed` with how long it lasted.
+
+There is no safe way to cut Render's Key Value off on purpose, so the pause itself was tested locally (see ARCHITECTURE.md, Delivery health): the dot said `paused` 8.3 seconds after Redis went away, on the same stream, and `live` 0.2 seconds after it came back.
 
 ## Rolling back
 

@@ -21,6 +21,11 @@ type LiveEvents interface {
 	// Subscribed is closed once events can arrive at all (the API's Redis
 	// subscription has been live once).
 	Subscribed() <-chan struct{}
+	// Paused reports that events have stopped reaching this API (its
+	// canaries don't come back). Streams are told "paused" and, later,
+	// "resumed" through Subscribe's channel; one that opens during a pause
+	// must say so itself.
+	Paused() bool
 }
 
 // defaultHeartbeat is how often an idle stream sends an SSE comment line.
@@ -29,8 +34,12 @@ type LiveEvents interface {
 // traffic, so it doesn't keep a free Render instance awake.
 const defaultHeartbeat = 25 * time.Second
 
-// readyMessage is the first message on every stream.
-var readyMessage = []byte(`{"type":"` + events.TypeReady + `"}`)
+// readyMessage is the first message on every stream. pausedMessage
+// follows it at once if the stream opens while delivery is paused.
+var (
+	readyMessage  = []byte(`{"type":"` + events.TypeReady + `"}`)
+	pausedMessage = []byte(`{"type":"` + events.TypePaused + `"}`)
+)
 
 type ticketResponse struct {
 	Ticket    string `json:"ticket"`
@@ -64,7 +73,8 @@ func (h *handler) createTicket(w http.ResponseWriter, r *http.Request) {
 // streamEvents is GET /api/v1/events?ticket=...: a Server-Sent Events
 // stream of the ticket owner's job changes. Each message is one JSON
 // object on a "data:" line (see events.Message), and the first is always
-// {"type":"ready"}.
+// {"type":"ready"}. If events aren't reaching the API at that moment,
+// {"type":"paused"} comes right after it.
 //
 // The order matters: the stream subscribes to the hub, and waits until the
 // API's Redis subscription is live, BEFORE it sends "ready"; the client
@@ -167,6 +177,14 @@ waiting:
 	}
 	if err := send(readyMessage); err != nil {
 		return
+	}
+	// Checked after subscribing, so no change is lost: a pause or resume
+	// that happens from here on also arrives on msgs. At worst the client
+	// hears "paused" twice.
+	if h.live.Paused() {
+		if err := send(pausedMessage); err != nil {
+			return
+		}
 	}
 
 	for {

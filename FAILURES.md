@@ -574,6 +574,20 @@ Each case was reproduced on a real machine (Arch Linux, Go 1.27, PostgreSQL 17) 
   ```
 - **Why:** zero is a claim, "nothing is waiting", and during a Redis outage it's exactly the wrong one. Jobs are still being created and saved to the outbox; nothing reaches Redis. A graph or an alert on queue depth would show a calm, empty queue at the moment the system is stuck. A missing value shows up as a gap, which is what a monitoring system needs to say "no data" and alert on that instead. The same rule as the dashboard's dot in Phase 10's requirement: never report a healthy-looking state you haven't measured.
 
+## 42. Only a canary that came back proves delivery
+
+- **Safeguard:** `events.Watch` publishes a canary every 2 seconds and ignores whether `PUBLISH` succeeded. Only `Listen` receiving the hub's own canary through the subscription counts as "delivery works".
+- **Removed:** that rule. A successful `PUBLISH` counted as a canary that came back.
+- **Caught by:** `TestAPublishThatNeverArrivesIsAPause` and `TestOnlyTheHubsOwnCanariesCount`. The e2e test `TestLiveDeliveryPausesWhileRedisIsAway` still passed: with Redis unreachable, `PUBLISH` fails too, so the broken rule happened to give the right answer there.
+- **Observed:**
+  ```text
+  --- FAIL: TestAPublishThatNeverArrivesIsAPause (1.00s)
+      health_test.go:155: no pause within 1s: PUBLISH succeeded but no canary came back, and delivery still counts as working
+  --- FAIL: TestOnlyTheHubsOwnCanariesCount (1.00s)
+      health_test.go:178: no pause within 1s: only another hub's canaries came back, and delivery still counts as working
+  ```
+- **Why:** `PUBLISH` succeeding means Redis took the message. It says nothing about whether this API's subscription is alive: a half-open subscriber connection, or a subscription that never came back after a reconnect, still lets every `PUBLISH` succeed while no event reaches the hub. That's exactly the failure the check exists for, the dot saying `live` over a list that has stopped moving. Measure at the end of the path, where the result is used, not at the step you happen to control. It's also why the fakes break each half of the path on its own: a test that only cuts everything at once (like the e2e one) can't tell the right rule from a wrong one that agrees with it in that one case.
+
 ## Experiment: the naive dual write loses a job
 
 Not a removed safeguard but the design of Task 22, run live on 2 November 2026 to see the failure Task 23 fixes. `POST /api/v1/jobs` saved the job in PostgreSQL, then pushed its ID to Redis, with nothing tying the two together.

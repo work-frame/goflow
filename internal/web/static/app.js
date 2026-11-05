@@ -8,7 +8,12 @@
 //     is gone when the tab closes. It is sent only in the Authorization
 //     header, never in a URL. The event stream gets a 30-second ticket instead.
 //   - PostgreSQL is the truth. Live events only update what the page shows;
-//     after "ready", "resync" or any reconnect, the page reloads the list.
+//     after "ready", "resync", "resumed" or any reconnect, the page reloads
+//     the list.
+//   - The dot has three states: live (stream open, events arriving),
+//     paused (stream open, but the server says events stopped reaching it,
+//     so the list may be stale) and offline/reconnecting (stream closed).
+//     An open stream alone never shows "live".
 "use strict";
 
 const TOKEN_KEY = "goflow.token";
@@ -149,6 +154,16 @@ async function connect() {
         handle(loadAll, $("jobs-error"));
         break;
       case "resync":
+        handle(loadAll, $("jobs-error"));
+        break;
+      case "paused":
+        // The stream is fine; the server's Redis subscription isn't. Keep
+        // the stream open and wait for "resumed".
+        setLive("paused", "paused: updates delayed");
+        break;
+      case "resumed":
+        // Events sent during the pause are gone: reload from PostgreSQL.
+        setLive("on", "live");
         handle(loadAll, $("jobs-error"));
         break;
       case "changed":

@@ -93,6 +93,8 @@ td.actions { white-space: nowrap; text-align: right; }
 .live.on { color: var(--ok); }
 .live.off { color: var(--bad); }
 .live.wait { color: var(--warn); }
+.live.paused { color: var(--warn); }
+.live.paused::before { content: "◌ "; }
 
 .error { color: var(--bad); }
 .muted { color: var(--muted); }

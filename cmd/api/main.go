@@ -143,6 +143,15 @@ func run(ctx context.Context, logger *slog.Logger, cfg config, ready func(addr s
 		m.WatchQueue(q.Sizes)
 		stopListening := events.Listen(ctx, q, hub, logger)
 		defer stopListening()
+		// Is the subscription actually delivering? A canary every 2 s, and
+		// streams told "paused" when none comes back for 8 s (health.go).
+		every, timeout := events.CanaryInterval, events.CanaryTimeout
+		if cfg.CanaryInterval > 0 {
+			every, timeout = cfg.CanaryInterval, cfg.CanaryTimeout
+		}
+		stopWatching := events.Watch(ctx, q, hub, logger, every, timeout)
+		defer stopWatching()
+		m.WatchDelivery(hub.DeliveryOK)
 		live = &events.Live{Tickets: events.NewTickets(q), Hub: hub}
 
 		counter = q

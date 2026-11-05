@@ -104,6 +104,9 @@ func (l *Live) RedeemTicket(ctx context.Context, ticket string) (string, error) 
 // Subscribed is closed once events can reach the hub (see Hub.Subscribed).
 func (l *Live) Subscribed() <-chan struct{} { return l.Hub.Subscribed() }
 
+// Paused reports whether live delivery is paused (see Hub.Paused).
+func (l *Live) Paused() bool { return l.Hub.Paused() }
+
 // Subscribe opens a stream of userID's events (see Hub.Subscribe).
 func (l *Live) Subscribe(userID string) (<-chan []byte, func(), bool) {
 	return l.Hub.Subscribe(userID)

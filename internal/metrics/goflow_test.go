@@ -94,6 +94,15 @@ func TestEventAndLimiterGauges(t *testing.T) {
 	expect(t, text(t, m), "goflow_rate_limit_fallback 0")
 }
 
+func TestDeliveryGauge(t *testing.T) {
+	m := New()
+	ok := true
+	m.WatchDelivery(func() bool { return ok })
+	expect(t, text(t, m), "goflow_event_delivery_ok 1")
+	ok = false
+	expect(t, text(t, m), "goflow_event_delivery_ok 0")
+}
+
 func grep(body, word string) string {
 	var out []string
 	for _, l := range strings.Split(body, "\n") {
