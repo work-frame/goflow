@@ -1,5 +1,7 @@
 # GoFlow's local stack (Phase 11): PostgreSQL, Valkey and the API built
 # from the Dockerfile. Start everything: docker compose up -d --build
+# With Prometheus and Grafana as well (opt-in, profile "monitoring"):
+#   docker compose --profile monitoring up -d --build
 #
 # Only for this machine. The passwords below are development defaults,
 # fine here and nowhere else; the hosted setup is in render.yaml.
@@ -49,6 +51,10 @@ services:
       GOFLOW_REDIS_URL: redis://valkey:6379/0
       GOFLOW_WORKERS: "2"
       GOFLOW_REGISTRATION: open # local only: create your development account
+      # Turns on /metrics for Prometheus (monitoring/prometheus.yml has the
+      # same value). A development value, not a secret: Render generates
+      # its own.
+      GOFLOW_METRICS_TOKEN: local-development-metrics-token-not-a-secret
     ports:
       - "127.0.0.1:8080:8080"
     depends_on:
@@ -59,6 +65,34 @@ services:
     # SIGTERM, then 30 s before SIGKILL: the worker pool drains for 20 s.
     stop_grace_period: 30s
 
+  # Opt-in: these two start only with --profile monitoring.
+  prometheus:
+    image: prom/prometheus:v3.15.1
+    profiles: ["monitoring"]
+    ports:
+      - "127.0.0.1:9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - promdata:/prometheus # the numbers survive a restart of the stack
+    depends_on:
+      - api
+
+  grafana:
+    image: grafana/grafana:13.2.3
+    profiles: ["monitoring"]
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      # Local only: anyone on this machine may look without logging in.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_SECURITY_ADMIN_PASSWORD: goflow # development default, port on 127.0.0.1 only
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/etc/grafana/dashboards:ro
+    depends_on:
+      - prometheus
+
 # Named like the containers DEVELOPMENT.md used to start by hand, so an
 # existing development database is picked up as it is.
 volumes:
@@ -66,3 +100,4 @@ volumes:
     name: goflow-pgdata
   redisdata:
     name: goflow-redisdata
+  promdata:

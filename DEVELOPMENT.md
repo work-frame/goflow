@@ -48,7 +48,23 @@ docker compose up -d --build
 docker compose logs -f api   # Ctrl+C stops following, not the API
 ```
 
-The API is then at `http://localhost:8080`, like one started with `go build`. Run one or the other: both want port 8080. `docker compose stop api` frees it; `docker compose down` stops the whole stack and keeps the volumes.
+The API is then at `http://localhost:8080`, like one started with `go build`. Run one or the other: both want port 8080. `docker compose stop api` frees it; `docker compose down` stops the whole stack and keeps the volumes. Never add `-v` to `down`: it deletes the volumes, your development database with them.
+
+### Watching it: Prometheus and Grafana
+
+Opt-in, with the profile `monitoring`:
+
+```bash
+docker compose --profile monitoring up -d --build
+```
+
+| URL | What |
+|---|---|
+| `http://localhost:9090/targets` | Prometheus: `goflow-api` should be **UP**, read every 15 s |
+| `http://localhost:3000` | Grafana: Dashboards → GoFlow → **GoFlow overview**. You can look without logging in; the admin login is `admin` / `goflow` (development only) |
+
+Compose gives the API a development metrics token, and [monitoring/prometheus.yml](monitoring/prometheus.yml) sends the same one (`TestPrometheusUsesTheAPIsMetricsToken` keeps them equal). The dashboard is a file, [monitoring/grafana/dashboards/goflow.json](monitoring/grafana/dashboards/goflow.json): change it there, not in the browser, where changes aren't saved. Create a few jobs (`flaky:1`, `flaky:3`, `sleep:5s`) in the dashboard at `http://localhost:8080` and the graphs fill in within a minute. `docker compose stop prometheus grafana` stops just the two; Prometheus keeps its numbers in the `promdata` volume.
+
 
 ### Environment
 

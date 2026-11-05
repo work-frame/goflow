@@ -1,0 +1,12 @@
+# Loads the dashboards in /etc/grafana/dashboards (monitoring/grafana/
+# dashboards in the repo). Edit the JSON file, not the copy in Grafana:
+# changes made in the browser aren't saved back.
+apiVersion: 1
+providers:
+  - name: goflow
+    folder: GoFlow
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    options:
+      path: /etc/grafana/dashboards
