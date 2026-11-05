@@ -85,6 +85,17 @@ func (h *Hub) removeLocked(userID string, s *stream) {
 	close(s.ch)
 }
 
+// Streams reports how many streams are open.
+func (h *Hub) Streams() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	n := 0
+	for _, set := range h.streams {
+		n += len(set)
+	}
+	return n
+}
+
 // Deliver gives msg to every open stream of userID. It never blocks.
 func (h *Hub) Deliver(userID string, msg []byte) {
 	h.mu.Lock()

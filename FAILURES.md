@@ -559,6 +559,21 @@ Each case was reproduced on a real machine (Arch Linux, Go 1.27, PostgreSQL 17) 
   ```
 - **Why:** every distinct label value is a separate time series, kept in memory until the process restarts. With paths as labels, each job ID is a new series, and so is every URL anyone makes up: 50 made-up paths in the test were 50 series. An attacker needs no account to send a million different paths, and the server would hold a million counters and histograms. A hosted collector would refuse them past its series limit (about 10,000 on Grafana Cloud's free plan). The route pattern has a fixed number of values: one per route in the code, plus `unmatched`. Every label must come from a small, fixed set the code decides, never from the request.
 
+## 41. An unreadable queue is reported as unknown, not empty
+
+- **Safeguard:** the queue collector asks Redis for the list sizes when `/metrics` is read, and if Redis doesn't answer within a second it sends no `goflow_queue_jobs` lines at all.
+- **Removed:** the early return. On an error the collector reported 0 for every list.
+- **Caught by:** `TestQueueSizesAreMissingWhenRedisFails`.
+- **Observed:**
+  ```text
+  --- FAIL: TestQueueSizesAreMissingWhenRedisFails (0.00s)
+      goflow_test.go:76: queue sizes reported while Redis was down:
+          goflow_queue_jobs{list="delayed"} 0
+          goflow_queue_jobs{list="pending"} 0
+          goflow_queue_jobs{list="processing"} 0
+  ```
+- **Why:** zero is a claim, "nothing is waiting", and during a Redis outage it's exactly the wrong one. Jobs are still being created and saved to the outbox; nothing reaches Redis. A graph or an alert on queue depth would show a calm, empty queue at the moment the system is stuck. A missing value shows up as a gap, which is what a monitoring system needs to say "no data" and alert on that instead. The same rule as the dashboard's dot in Phase 10's requirement: never report a healthy-looking state you haven't measured.
+
 ## Experiment: the naive dual write loses a job
 
 Not a removed safeguard but the design of Task 22, run live on 2 November 2026 to see the failure Task 23 fixes. `POST /api/v1/jobs` saved the job in PostgreSQL, then pushed its ID to Redis, with nothing tying the two together.

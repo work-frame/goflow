@@ -99,7 +99,11 @@ func run(ctx context.Context, logger *slog.Logger, cfg config, ready func(addr s
 	// Without Redis there are no live updates: notifier stays a nil
 	// interface and live a nil pointer, never assigned a nil value of
 	// another type (case 25).
-	var notifier database.Notifier
+	// Metrics are always on; /metrics is served only with a token. The
+	// stores report every job change to them, and with Redis also to the
+	// events publisher.
+	m := metrics.New()
+	var notifier database.Notifier = m
 	var live *events.Live
 	// Rate-limit counters go to Redis when there is one. counter stays a
 	// nil interface otherwise (case 25), and the limiter counts in memory.
@@ -133,8 +137,10 @@ func run(ctx context.Context, logger *slog.Logger, cfg config, ready func(addr s
 		pub := events.NewPublisher(q, logger)
 		stopPublisher := pub.Start(context.WithoutCancel(ctx))
 		defer stopPublisher()
-		notifier = pub
+		notifier = database.NotifyAll(m, pub)
 		hub := events.NewHub()
+		m.WatchEvents(pub.Published, pub.Dropped, hub.Streams)
+		m.WatchQueue(q.Sizes)
 		stopListening := events.Listen(ctx, q, hub, logger)
 		defer stopListening()
 		live = &events.Live{Tickets: events.NewTickets(q), Hub: hub}
@@ -164,6 +170,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg config, ready func(addr s
 				JobTimeout:   jobTimeout,
 				Logger:       logger,
 				Workers:      cfg.Workers,
+				Observe:      m.ObserveAttempt,
 				DrainTimeout: workerDrain,
 			}
 			// The pool stops taking jobs when ctx ends (SIGTERM), at the same
@@ -202,6 +209,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg config, ready func(addr s
 	if cfg.RateLimitPrefix != "" {
 		limiter = limiter.WithKeyPrefix(cfg.RateLimitPrefix)
 	}
+	m.WatchLimiter(limiter.Degraded)
 
 	deps := api.Deps{
 		Jobs:     database.NewJobStore(db).WithNotifier(notifier),
@@ -214,7 +222,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg config, ready func(addr s
 		RegistrationClosed: !cfg.RegistrationOpen,
 		LogIPHeaders:       cfg.LogIPHeaders,
 		Limiter:            limiter,
-		Metrics:            metrics.New(),
+		Metrics:            m,
 		MetricsToken:       cfg.MetricsToken,
 		ClientIPHeader:     cfg.ClientIPHeader,
 	}

@@ -232,3 +232,5 @@ func TestNoLimiterMeansNoLimits(t *testing.T) {
 		t.Fatalf("status %d, want 200", rec.Code)
 	}
 }
+
+func newMemoryLimiter() RateLimiter { return ratelimit.New(nil, discardLogger()) }

@@ -98,6 +98,17 @@ type Pool struct {
 	// context cancelled, and the attempt counts as failed ("timed out"), so
 	// it is retried like any other failure. Zero means no limit.
 	JobTimeout time.Duration
+	// Observe, if set, hears how each attempt ended ("completed", "retry"
+	// or "dead") and how long its handler ran, after the outcome is saved.
+	// The API uses it for metrics; cmd/worker has no metrics endpoint.
+	Observe func(outcome string, took time.Duration)
+}
+
+// observe reports an attempt's outcome to Observe, if set.
+func (p *Pool) observe(outcome string, took time.Duration) {
+	if p.Observe != nil {
+		p.Observe(outcome, took)
+	}
 }
 
 // Run recovers what a previous run left behind, starts the workers, and
@@ -245,6 +256,7 @@ func (p *Pool) process(ctx context.Context, log *slog.Logger, id string) {
 
 	start := time.Now()
 	err = p.runHandler(ctx, Run{JobID: id, Title: title, Attempt: attempt}, log)
+	took := time.Since(start)
 	if ctx.Err() != nil {
 		// Only after the drain timeout. Record nothing: the job stays
 		// processing and its ID stays in the processing list.
@@ -260,7 +272,8 @@ func (p *Pool) process(ctx context.Context, log *slog.Logger, id string) {
 			log.Warn("worker: couldn't record completion; the ID stays in processing", "err", err)
 			return
 		}
-		log.Info("worker: job completed", "duration", time.Since(start).Round(time.Millisecond))
+		log.Info("worker: job completed", "duration", took.Round(time.Millisecond))
+		p.observe("completed", took)
 
 	case IsPermanent(err) || attempt >= maxAttempts:
 		reason := "out of attempts"
@@ -272,11 +285,13 @@ func (p *Pool) process(ctx context.Context, log *slog.Logger, id string) {
 			return
 		}
 		log.Warn("worker: job dead", "reason", reason, "err", err)
+		p.observe("dead", took)
 
 	default:
 		if !p.retry(saveCtx, log, id, attempt, err) {
 			return // nothing recorded: keep the ID in processing
 		}
+		p.observe("retry", took)
 	}
 	p.ack(saveCtx, log, id)
 }

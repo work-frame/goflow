@@ -312,6 +312,19 @@ These are a contract, not something the pool enforces. Tests for each job type s
 - **Updated where things happen, never computed when read.** A middleware counts each finished request and records its duration. Reading `/metrics` only formats numbers already in memory: it never touches PostgreSQL, so polling it can't keep Neon awake. (It does keep a free Render instance awake, like any request; that's why nothing polls it yet.)
 - **Labelled by route pattern, never by path.** The label is the pattern the mux matched (`GET /api/v1/jobs/{id}`, from `r.Pattern`), so every job ID shares one time series. Requests that matched no route are all `unmatched`. A path label would give anyone who sends made-up URLs a new series per request, until the monitoring service's limit or the server's memory runs out (FAILURES.md, case 40). The middleware sits outside `recoverPanics`, so a panic counts as the `500` it became, and right where the mux's `r` is the same request: a `r.WithContext` in between would hide the pattern.
 - **Event streams** are counted but kept out of the duration histogram: a stream lasts as long as its browser tab.
+- **GoFlow's own metrics** (Task 41), each label from a fixed set:
+
+  | Metric | Type | Updated |
+  |---|---|---|
+  | `goflow_job_status_changes_total{status}` | counter | by the stores after each commit: `Metrics` is a `database.Notifier`, given to the stores together with the events publisher (`database.NotifyAll`), so no status change can be missed. `pending` includes re-runs; `deleted` counts deletions |
+  | `goflow_job_attempt_duration_seconds{outcome}` | histogram | by the worker pool (`Pool.Observe`) once an attempt's outcome is saved: `completed`, `retry` or `dead`. Workers in `cmd/worker` aren't measured: it has no `/metrics` |
+  | `goflow_queue_jobs{list}` | gauge | when `/metrics` is read: one Redis round trip (`LLEN`, `LLEN`, `ZCARD`) with a 1 s limit, never PostgreSQL. **Missing, not zero, when Redis doesn't answer** (FAILURES.md, case 41) |
+  | `goflow_events_published_total`, `goflow_events_dropped_total` | counter | by the events publisher |
+  | `goflow_event_streams` | gauge | open event streams on this instance |
+  | `goflow_rate_limited_total{rule}` | counter | each `429` |
+  | `goflow_rate_limit_fallback` | gauge | 1 while limits are counted in memory because Redis is unreachable |
+
+  Unknown and zero are different answers. A graph that drops to zero during an outage says "nothing waiting"; a gap says "we don't know", which is the truth.
 - **Behind a token.** `GOFLOW_METRICS_TOKEN` (at least 32 characters; Render generates one) is compared in constant time via SHA-256, so neither its content nor its length leaks through timing. Without a token the route doesn't exist. The numbers show how busy GoFlow is and how it fails: nobody else's business.
 - **Own registry.** Each `metrics.New()` has its own registry, not Prometheus's global one, so tests can start any number of servers.
 - **Quieter logs.** Passing `/healthz` checks (Render, every 5 seconds: about 17,000 lines a day) aren't logged any more; a failing one still is.

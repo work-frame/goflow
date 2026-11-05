@@ -54,3 +54,30 @@ func scanJobs(rows interface {
 	}
 	return out, rows.Err()
 }
+
+// NotifyAll returns a Notifier that tells every one of ns, in order. nil
+// entries are skipped. Stores take one Notifier; the API gives them the
+// events publisher and the metrics together.
+func NotifyAll(ns ...Notifier) Notifier {
+	var all multiNotifier
+	for _, n := range ns {
+		if n != nil {
+			all = append(all, n)
+		}
+	}
+	return all
+}
+
+type multiNotifier []Notifier
+
+func (m multiNotifier) JobChanged(ctx context.Context, j *job.Job) {
+	for _, n := range m {
+		n.JobChanged(ctx, j)
+	}
+}
+
+func (m multiNotifier) JobDeleted(ctx context.Context, userID, id string) {
+	for _, n := range m {
+		n.JobDeleted(ctx, userID, id)
+	}
+}

@@ -182,3 +182,16 @@ func TestStoresWithoutANotifier(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// NotifyAll tells every notifier, in order, and skips nil ones.
+func TestNotifyAllFansOut(t *testing.T) {
+	a, b := &recorder{}, &recorder{}
+	n := NotifyAll(a, nil, b)
+	n.JobChanged(context.Background(), &job.Job{ID: "j1", Status: job.StatusQueued})
+	n.JobDeleted(context.Background(), "u", "j1")
+	for name, r := range map[string]*recorder{"a": a, "b": b} {
+		if got := strings.Join(r.take(), " "); got != "queued:j1 deleted:j1" {
+			t.Errorf("%s heard %q", name, got)
+		}
+	}
+}

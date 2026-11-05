@@ -280,6 +280,10 @@ The Blueprint sync creates `GOFLOW_METRICS_TOKEN` with a random value. To look a
    ```
 4. `unset MT` when done.
 
+After Task 41 the same command also shows jobs (`goflow_job_status_changes_total`, `goflow_job_attempt_duration_seconds`), the queue (`goflow_queue_jobs{list="pending"}` and the others), live events and rate limits. Create a `flaky:1` job in the dashboard first, and its `retrying` and `completed` changes and both attempts appear.
+
+Result on 5 November 2026 (deploy `1b77b10`, Task 40): without the token, `{"error":"a metrics token is required"}` and `401`; with it, `goflow_http_requests_total` for `GET /healthz` (31 checks in about 2.5 minutes, 1.1 ms in total), `GET /{$}` (the dashboard) and the refused `GET /metrics`, and no path, ID or email anywhere.
+
 Without the token the answer is `401`. Each read is one request, so it wakes a sleeping instance like any other; counters start from zero whenever the instance restarts.
 
 ## Rolling back

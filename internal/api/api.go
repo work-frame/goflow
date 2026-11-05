@@ -101,7 +101,7 @@ type Deps struct {
 // Request flow, outermost first:
 // withRequestID → logRequests → recordMetrics → recoverPanics → jsonMuxErrors → mux → handler
 func NewRouter(d Deps) http.Handler {
-	h := &handler{store: d.Jobs, relay: d.Relay, live: d.Live, heartbeat: d.StreamHeartbeat, users: d.Users, sessions: d.Sessions, hasher: d.Hasher, db: d.DB, logger: d.Logger, registrationClosed: d.RegistrationClosed, limiter: d.Limiter, clientIPHeader: d.ClientIPHeader}
+	h := &handler{store: d.Jobs, relay: d.Relay, live: d.Live, heartbeat: d.StreamHeartbeat, users: d.Users, sessions: d.Sessions, hasher: d.Hasher, db: d.DB, logger: d.Logger, registrationClosed: d.RegistrationClosed, limiter: d.Limiter, clientIPHeader: d.ClientIPHeader, metrics: d.Metrics}
 	h.prepareDummyHash()
 
 	mux := http.NewServeMux()
@@ -159,6 +159,7 @@ type handler struct {
 
 	registrationClosed bool
 	limiter            RateLimiter // nil: no limits
+	metrics            *metrics.Metrics
 	clientIPHeader     string
 }
 
