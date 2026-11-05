@@ -98,6 +98,24 @@ func TestImageHoldsNoSettingsOrSecrets(t *testing.T) {
 	}
 }
 
+// Render builds and runs the Dockerfile (Task 45), with the same health
+// check as before. A buildCommand would mean Render is building the code
+// itself again, outside the image.
+func TestRenderRunsTheImage(t *testing.T) {
+	yaml := readRepoFile(t, "render.yaml")
+	api := yaml[:strings.Index(yaml, "- type: keyvalue")] // the goflow-api service
+	for _, want := range []string{"name: goflow-api", "runtime: docker", "dockerfilePath: ./Dockerfile", "healthCheckPath: /healthz"} {
+		if !strings.Contains(api, want) {
+			t.Errorf("render.yaml's goflow-api lacks %q", want)
+		}
+	}
+	for _, gone := range []string{"buildCommand:", "startCommand:", "runtime: go"} {
+		if strings.Contains(api, gone) {
+			t.Errorf("render.yaml's goflow-api still has %q: the Dockerfile builds and starts it", gone)
+		}
+	}
+}
+
 // The build folder is an allowlist: everything out, then only these back in.
 func TestDockerignoreIsAnAllowlist(t *testing.T) {
 	allowed := map[string]bool{"!go.mod": true, "!go.sum": true, "!cmd": true, "!internal": true}

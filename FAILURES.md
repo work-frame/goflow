@@ -611,6 +611,24 @@ Each case was reproduced on a real machine (Arch Linux, Go 1.27, PostgreSQL 17) 
   In the real image, `docker run` stops with `exec /usr/local/bin/api: no such file or directory`.
 - **Why:** with CGO on, Go's DNS resolver and user lookup call the system C library, so the binary is linked against it and names a loader, `/lib64/ld-linux-x86-64.so.2`, that the kernel must start first. distroless `static` has neither. The kernel reports the missing loader as "no such file or directory", about a file that is plainly there, which sends people looking in the wrong place. The static binary started and got as far as its own settings check. Nothing failed at build time: the mistake shows up only when the container starts, which is why a test reads the Dockerfile.
 
+## 44. Settings never enter the image
+
+- **Safeguard:** the Dockerfile declares no `ARG` and sets no `GOFLOW_` variable with `ENV`. Settings reach the container when it starts.
+- **Removed:** that rule, the convenient way. Two lines in the final stage turn a build argument into an image setting:
+  ```dockerfile
+  ARG GOFLOW_METRICS_TOKEN
+  ENV GOFLOW_METRICS_TOKEN=$GOFLOW_METRICS_TOKEN
+  ```
+- **Caught by:** `TestImageHoldsNoSettingsOrSecrets`, which reads the Dockerfile. The image builds and runs fine either way.
+- **Observed:**
+  ```text
+  --- FAIL: TestImageHoldsNoSettingsOrSecrets (0.00s)
+      image_test.go:90: Dockerfile declares "ARG GOFLOW_METRICS_TOKEN": build arguments end up in the image's history
+      image_test.go:93: Dockerfile sets "ENV GOFLOW_METRICS_TOKEN=$GOFLOW_METRICS_TOKEN": settings come from the environment at run time
+  ```
+  Built locally with a made-up value (`--build-arg GOFLOW_METRICS_TOKEN=a-fake-token-for-case-44`), `docker inspect --format '{{json .Config.Env}}'` lists it among the image's settings, where anyone who can pull the image can read it.
+- **Why:** on Render this needs no `--build-arg`: Render passes every environment variable of the service to the build as a build argument. With these two lines, each deploy would copy the real metrics token into the image's configuration and history. Nothing would look wrong: the token would even work. An image is a file that gets copied, cached and shared; a secret in it is as good as published to everyone who ever gets a copy. Settings belong to the running container, not to the image.
+
 ## Experiment: the naive dual write loses a job
 
 Not a removed safeguard but the design of Task 22, run live on 2 November 2026 to see the failure Task 23 fixes. `POST /api/v1/jobs` saved the job in PostgreSQL, then pushed its ID to Redis, with nothing tying the two together.

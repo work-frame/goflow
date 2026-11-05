@@ -12,7 +12,7 @@ goflow CLI ──HTTPS──► Render edge ──► goflow-api (Render, Frankf
 
 | Part | Where | Settings |
 |---|---|---|
-| API | Render web service `goflow-api`, free plan, region `frankfurt` | 0.1 CPU, 512 MB. Built and started from [`render.yaml`](render.yaml) |
+| API | Render web service `goflow-api`, free plan, region `frankfurt` | 0.1 CPU, 512 MB. Docker runtime since Task 45: Render builds the repo's [`Dockerfile`](Dockerfile), as set in [`render.yaml`](render.yaml) |
 | Database | Neon project `goflow`, branch `production`, AWS Europe Central 1 (Frankfurt) | Postgres 17, free plan, no IP restrictions |
 | Queue | Render Key Value `goflow-queue`, free plan, `frankfurt` | Valkey 8. `ipAllowList: []`: reachable only over Render's private network, at `redis://red-...:6379`. `maxmemoryPolicy: noeviction`. No persistence |
 | Workers | Inside `goflow-api` (`GOFLOW_WORKERS=2`) | Render's free plan has no background workers ($7/month). The workers sleep when the API sleeps; jobs wait in Redis meanwhile |
@@ -310,6 +310,20 @@ After the deploy, with the dashboard open:
 There is no safe way to cut Render's Key Value off on purpose, so the pause itself was tested locally (see ARCHITECTURE.md, Delivery health): the dot said `paused` 8.3 seconds after Redis went away, on the same stream, and `live` 0.2 seconds after it came back.
 
 Result on 5 November 2026 (deploy `fab1c24`): the dot said `live`, and `/metrics` showed `goflow_event_delivery_ok 1`, `goflow_event_streams 1` and `goflow_events_dropped_total 0`. `goflow_events_published_total` was `0` because no job had changed on that instance yet: canaries go straight to Redis and aren't counted as events.
+
+## The Docker runtime (Task 45)
+
+Since Task 45, Render builds the [`Dockerfile`](Dockerfile) and runs its image, the one `docker compose` runs locally, instead of building with its own Go toolchain. Nothing else changed: the health check, every setting and the Key Value queue are as before.
+
+- **Settings never enter the image.** Render passes each environment variable to the build as a build argument, so a Dockerfile `ARG GOFLOW_DATABASE_URL` would bake the database password into the image's history (FAILURES.md, case 44). The Dockerfile declares no `ARG`; `TestImageHoldsNoSettingsOrSecrets` fails if one appears. The settings reach the container when it starts.
+- **The switch.** Merging changes `runtime` in the Blueprint. Like in Task 38, the commit's auto-deploy may run before the Blueprint sync: then one deploy builds natively (still works), and the sync's deploy builds the image. A failed build leaves the previous instance serving.
+- **Checks after the switch:**
+  1. In the deploy's log: Docker build steps (`FROM golang:1.27-trixie`, `go mod download`, `go build`, `FROM gcr.io/distroless/static-debian13:nonroot`), then the build time.
+  2. In the runtime log: `starting`, `database connected`, `listening` on Render's `PORT` (10000), `worker pool started`.
+  3. The dashboard: log in, the dot says `live`.
+  4. A `flaky:1` job: `retrying`, then `completed 2/3`.
+  5. `/metrics` with the token, as in [Metrics](#metrics-task-40): `200`, `goflow_event_delivery_ok 1`, the job's status changes.
+- **Going back.** Revert the Task 45 commit (render.yaml back to `runtime: go`) and merge; or roll back to a pre-Task 45 deploy in the dashboard as below, though the next Blueprint sync would switch the runtime again.
 
 ## Rolling back
 
