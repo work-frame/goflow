@@ -39,6 +39,12 @@ services:
       # resets 'processing' jobs at startup.
       - key: GOFLOW_WORKERS
         value: "2"
+      # Rate limits count per client address. Cloudflare sits in front of
+      # Render and refuses any request that brings its own CF-Connecting-IP,
+      # so the value that arrives is Cloudflare's (Task 37's experiment).
+      # Never X-Forwarded-For: its first entry is whatever the client sent.
+      - key: GOFLOW_CLIENT_IP_HEADER
+        value: CF-Connecting-IP
 
   # Redis-compatible queue (Valkey). Free: no persistence, so a restart
   # empties the lists; the API's reconciler re-sends stuck jobs.

@@ -44,6 +44,9 @@ func (h *handler) createTicket(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "live updates are not available")
 		return
 	}
+	if h.limited(w, r, ticketsPerAccount, callerID(r)) {
+		return
+	}
 	ctx, cancel := dbContext(r)
 	defer cancel()
 

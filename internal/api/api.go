@@ -76,6 +76,14 @@ type Deps struct {
 	// which defaults to closed.
 	RegistrationClosed bool
 
+	// Limiter applies the rate limits. nil means no limits: tests that
+	// aren't about limits leave it out.
+	Limiter RateLimiter
+	// ClientIPHeader names the header a trusted proxy puts the client's
+	// address in ("CF-Connecting-IP" on Render). Empty means use the
+	// connection's address, the only safe choice without such a proxy.
+	ClientIPHeader string
+
 	// LogIPHeaders adds one "client ip sources" log line per request: the
 	// connection's address and every header a proxy might put the client's
 	// address in. For finding out which one to trust (Phase 9); off normally.
@@ -87,7 +95,7 @@ type Deps struct {
 // Request flow, outermost first:
 // withRequestID → logRequests → recoverPanics → jsonMuxErrors → mux → handler
 func NewRouter(d Deps) http.Handler {
-	h := &handler{store: d.Jobs, relay: d.Relay, live: d.Live, heartbeat: d.StreamHeartbeat, users: d.Users, sessions: d.Sessions, hasher: d.Hasher, db: d.DB, logger: d.Logger, registrationClosed: d.RegistrationClosed}
+	h := &handler{store: d.Jobs, relay: d.Relay, live: d.Live, heartbeat: d.StreamHeartbeat, users: d.Users, sessions: d.Sessions, hasher: d.Hasher, db: d.DB, logger: d.Logger, registrationClosed: d.RegistrationClosed, limiter: d.Limiter, clientIPHeader: d.ClientIPHeader}
 	h.prepareDummyHash()
 
 	mux := http.NewServeMux()
@@ -137,6 +145,8 @@ type handler struct {
 	logger    *slog.Logger
 
 	registrationClosed bool
+	limiter            RateLimiter // nil: no limits
+	clientIPHeader     string
 }
 
 // dbContext derives a storage context from the request: it ends when the client

@@ -126,3 +126,58 @@ func TestPutOnceExpires(t *testing.T) {
 		t.Fatalf("TakeOnce after expiry = found %v, %v; want not found", found, err)
 	}
 }
+
+func TestCountStartsAWindowAndExpires(t *testing.T) {
+	q := openTestQueue(t)
+	ctx := context.Background()
+	key := "goflow:test:" + t.Name()
+	t.Cleanup(func() { q.rdb.Del(ctx, key) })
+
+	n, ttl, err := q.Count(ctx, key, 300*time.Millisecond)
+	if err != nil || n != 1 || ttl <= 0 || ttl > 300*time.Millisecond {
+		t.Fatalf("first Count = %d, %v, %v; want 1 with up to 300ms left", n, ttl, err)
+	}
+	if n, _, _ := q.Count(ctx, key, 300*time.Millisecond); n != 2 {
+		t.Fatalf("second Count = %d, want 2", n)
+	}
+	time.Sleep(400 * time.Millisecond)
+	if n, _, _ := q.Count(ctx, key, 300*time.Millisecond); n != 1 {
+		t.Fatalf("Count after the window = %d, want 1: the counter must expire", n)
+	}
+}
+
+// Racing counts never lose an increment, and the counter always has an
+// expiry: a counter without one would never reset, a permanent lockout.
+func TestCountIsAtomic(t *testing.T) {
+	q := openTestQueue(t)
+	ctx := context.Background()
+	key := "goflow:test:" + t.Name()
+	t.Cleanup(func() { q.rdb.Del(ctx, key) })
+
+	const n = 50
+	seen := make(chan int64, n)
+	var wg sync.WaitGroup
+	for range n {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			c, _, err := q.Count(ctx, key, time.Minute)
+			if err != nil {
+				t.Error(err)
+			}
+			seen <- c
+		}()
+	}
+	wg.Wait()
+	close(seen)
+	got := map[int64]bool{}
+	for c := range seen {
+		got[c] = true
+	}
+	if len(got) != n {
+		t.Errorf("%d distinct counts from %d racing calls, want %d", len(got), n, n)
+	}
+	if ttl := q.rdb.PTTL(ctx, key).Val(); ttl <= 0 {
+		t.Errorf("PTTL = %v: the counter has no expiry", ttl)
+	}
+}

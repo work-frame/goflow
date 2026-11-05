@@ -17,6 +17,7 @@ import (
 	"github.com/work-frame/goflow/internal/database"
 	"github.com/work-frame/goflow/internal/events"
 	"github.com/work-frame/goflow/internal/queue"
+	"github.com/work-frame/goflow/internal/ratelimit"
 	"github.com/work-frame/goflow/internal/relay"
 	"github.com/work-frame/goflow/internal/worker"
 )
@@ -67,7 +68,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg config, ready func(addr s
 		logger.Warn("GOFLOW_LOG_IP_HEADERS is on: every request logs its forwarding headers; turn it off when the check is done")
 	}
 	// Never log cfg.DatabaseURL or cfg.RedisURL: they can contain passwords.
-	logger.Info("starting", "addr", cfg.Addr, "bcrypt_cost", cfg.BcryptCost,
+	logger.Info("starting", "addr", cfg.Addr, "bcrypt_cost", cfg.BcryptCost, "client_ip_header", cfg.ClientIPHeader,
 		"registration_open", cfg.RegistrationOpen, "queue_enabled", cfg.RedisURL != "", "workers", cfg.Workers)
 
 	// Connect before opening the port: an instance that can't reach its database
@@ -99,6 +100,9 @@ func run(ctx context.Context, logger *slog.Logger, cfg config, ready func(addr s
 	// another type (case 25).
 	var notifier database.Notifier
 	var live *events.Live
+	// Rate-limit counters go to Redis when there is one. counter stays a
+	// nil interface otherwise (case 25), and the limiter counts in memory.
+	var counter ratelimit.Counter
 	if cfg.RedisURL != "" {
 		queue.UseLogger(logger)
 		// New doesn't connect. An unreachable Redis must not stop the API:
@@ -133,6 +137,8 @@ func run(ctx context.Context, logger *slog.Logger, cfg config, ready func(addr s
 		stopListening := events.Listen(ctx, q, hub, logger)
 		defer stopListening()
 		live = &events.Live{Tickets: events.NewTickets(q), Hub: hub}
+
+		counter = q
 
 		outbox := database.NewOutboxStore(db).WithNotifier(notifier)
 		rl = relay.New(outbox, q, logger, relayRetry)
@@ -191,6 +197,11 @@ func run(ctx context.Context, logger *slog.Logger, cfg config, ready func(addr s
 		return err
 	}
 
+	limiter := ratelimit.New(counter, logger)
+	if cfg.RateLimitPrefix != "" {
+		limiter = limiter.WithKeyPrefix(cfg.RateLimitPrefix)
+	}
+
 	deps := api.Deps{
 		Jobs:     database.NewJobStore(db).WithNotifier(notifier),
 		Users:    database.NewUserStore(db),
@@ -201,6 +212,8 @@ func run(ctx context.Context, logger *slog.Logger, cfg config, ready func(addr s
 
 		RegistrationClosed: !cfg.RegistrationOpen,
 		LogIPHeaders:       cfg.LogIPHeaders,
+		Limiter:            limiter,
+		ClientIPHeader:     cfg.ClientIPHeader,
 	}
 	// Only a real relay goes into the interface. Assigning a nil *relay.Relay
 	// would make deps.Relay != nil (an interface holding a nil pointer is not

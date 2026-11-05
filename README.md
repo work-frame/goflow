@@ -14,6 +14,7 @@ I'm building it to learn production Go: the standard library first, then HTTP, P
 - **Phase 6 (done):** a pool of concurrent workers (`GOFLOW_WORKERS`) with graceful shutdown. On Render, the API runs the pool itself against a free Key Value queue ([DEPLOYMENT.md](DEPLOYMENT.md)). Jobs are created, queued and completed end to end in production; the work is still a 5-second placeholder.
 - **Phase 7 (done):** failed jobs retry with exponential backoff and jitter, up to 3 attempts, then become `dead`; permanent errors skip the retries. Each attempt has a 15-second limit. A dead job can be re-run with fresh attempts (`goflow job retry <id>`), and an `Idempotency-Key` header makes a repeated create return the first job instead of a second one.
 - **Phase 8 (done):** live job status. Every status change is announced over Server-Sent Events (`GET /api/v1/events`) to the job's owner, opened with a 30-second single-use ticket. A dashboard at `/` logs in, lists your jobs and updates them live, and creates, retries and deletes jobs.
+- **Phase 9 (in progress):** rate limits. Login is limited per email and per client address, password changes and stream tickets per account, with counters in Redis (in memory while Redis is down). On Render the client address comes from Cloudflare's `CF-Connecting-IP`, chosen by experiment ([DEPLOYMENT.md](DEPLOYMENT.md#finding-the-real-client-ip-task-37)).
 
 ## Requirements
 
@@ -43,6 +44,7 @@ go build -o bin/worker ./cmd/worker   # job worker
 | `GOFLOW_ADDR` | `:8080` | Address to listen on. Use `:0` for any free port. |
 | `GOFLOW_BCRYPT_COST` | `12` | bcrypt cost for password hashes, 10 to 14. Each step doubles the time per hash. The server refuses to start outside this range. |
 | `GOFLOW_REGISTRATION` | `closed` | `open` lets anyone create an account with `POST /api/v1/auth/register`; `closed` answers `403`. |
+| `GOFLOW_CLIENT_IP_HEADER` | none | The header a trusted proxy puts the client's address in, for per-address rate limits: `CF-Connecting-IP` (Render, behind Cloudflare) or `True-Client-IP`. Empty: the connection's address. Never set it without such a proxy in front: then any header is whatever the client wants. `X-Forwarded-For` is refused, because its first entry is the client's own claim. |
 | `GOFLOW_LOG_IP_HEADERS` | `off` | `on` adds a `client ip sources` log line per request: the connection's address and the `X-Forwarded-For`, `True-Client-IP`, `CF-Connecting-IP`, `X-Real-IP` and `Forwarded` headers, each capped at 200 characters. A diagnostic for finding out which one a host makes trustworthy ([DEPLOYMENT.md](DEPLOYMENT.md#finding-the-real-client-ip-task-37)); turn it off afterwards. |
 | `PORT` | none | Port to listen on, as set by hosting platforms such as Render. Used only when `GOFLOW_ADDR` is not set. |
 | `GOFLOW_REDIS_URL` | none (queue off) | Redis for the job queue, e.g. `redis://127.0.0.1:6379/0`. A Redis on another machine must use `rediss://` (TLS), except a single-label private-network name such as Render's `red-abc123`. Without it, new jobs stay `pending` in the outbox until a server with Redis starts. |
@@ -57,17 +59,17 @@ The server stops on `Ctrl+C` or `SIGTERM`, finishing in-flight requests first (u
 | `GET` | `/healthz` | `200 {"status":"ok"}`: the process is alive | |
 | `GET` | `/readyz` | `200`: the database answers within 2 s. Redis isn't checked: jobs wait in the outbox while it's down | `503` |
 | `POST` | `/api/v1/auth/register` | `201` + user (`id`, `email`, `created_at`) | `400`, `409` email taken, `413`, `415` |
-| `POST` | `/api/v1/auth/login` | `200 {"token","expires_at"}` | `400`, `401` invalid email or password |
+| `POST` | `/api/v1/auth/login` | `200 {"token","expires_at"}` | `400`, `401` invalid email or password, `429` too many attempts |
 | `POST` | `/api/v1/auth/logout` | `204` (needs token) | `401` |
 | `POST` | `/api/v1/auth/logout-all` | `200 {"sessions_ended":n}`, every device including this one (needs token) | `401` |
-| `POST` | `/api/v1/auth/password` | `200 {"sessions_ended":n}`, ends your other sessions (needs token) | `400`, `401`, `403` wrong current password |
+| `POST` | `/api/v1/auth/password` | `200 {"sessions_ended":n}`, ends your other sessions (needs token) | `400`, `401`, `403` wrong current password, `429` |
 | `GET` | `/api/v1/auth/me` | `200` + user (needs token) | `401` |
 | `POST` | `/api/v1/jobs` | `201` + job, `Location` header (needs token). With a repeated `Idempotency-Key`: `200` + the first job and `Idempotent-Replayed: true` | `400`, `401`, `413`, `415`, `422` key reused with a different title |
 | `GET` | `/api/v1/jobs` | `200 {"jobs":[...]}`, your jobs only (needs token) | `400` invalid `status` filter, `401` |
 | `GET` | `/api/v1/jobs/{id}` | `200` + job (needs token) | `401`, `404` |
 | `DELETE` | `/api/v1/jobs/{id}` | `204`, no body (needs token) | `401`, `404` |
 | `POST` | `/api/v1/jobs/{id}/retry` | `200` + job, back to `pending` with 0 attempts (needs token) | `401`, `404`, `409` job isn't `dead` or `failed` |
-| `POST` | `/api/v1/events/ticket` | `201 {"ticket","expires_in":30}`: opens one event stream, once, within 30 s (needs token) | `401`, `503` no Redis |
+| `POST` | `/api/v1/events/ticket` | `201 {"ticket","expires_in":30}`: opens one event stream, once, within 30 s (needs token) | `401`, `429`, `503` no Redis |
 | `GET` | `/api/v1/events?ticket=…` | `200`, a Server-Sent Events stream of your jobs' changes (see below) | `401` missing, unknown, expired or used ticket, `503` no Redis |
 
 `GET /api/v1/jobs` returns jobs oldest first, one page at a time:
@@ -162,6 +164,17 @@ Then create a job in a second terminal and watch it go by. Ctrl+C ends the strea
 - Send the login token as `Authorization: Bearer <token>`. It lasts 24 hours, and logout ends it immediately. The server stores only its SHA-256 hash.
 - `POST /api/v1/auth/password` takes `{"current_password": "...", "new_password": "..."}`. It keeps the session that made the change and ends all others. `logout-all` ends every session, this one included. The API deletes expired sessions every hour.
 
+### Rate limits
+
+| What | Limit | Counted per |
+|---|---|---|
+| `POST /api/v1/auth/login` | 30 per 15 minutes | client address (an IPv6 address counts as its whole /64 network) |
+| `POST /api/v1/auth/login` | 10 per 15 minutes | email, after trimming and lowercasing, registered or not |
+| `POST /api/v1/auth/password` | 5 per 15 minutes | account |
+| `POST /api/v1/events/ticket` | 30 per 5 minutes | account |
+
+Every attempt counts, successful or not. Past a limit the answer is `429 {"error":"too many attempts; try again in N seconds"}` with a `Retry-After: N` header, until the window that started with the first counted attempt ends. Nothing is locked: the limit clears by itself.
+
 ### Errors
 
 Every error response is JSON:
@@ -246,6 +259,7 @@ internal/events/       live updates: publishing job changes, routing them to the
 internal/web/          the dashboard: index.html, app.js and style.css, embedded, with their security headers
 internal/job/          Job type, validation, pagination rules
 internal/queue/        Redis list of job IDs waiting for a worker
+internal/ratelimit/    fixed-window rate limits, counted in Redis or, as a fallback, in memory
 internal/relay/        background loop: outbox (PostgreSQL) to queue (Redis)
 internal/worker/       pool of goroutines that take job IDs off the queue and run the jobs
 internal/urlcheck/     TLS rules for database and Redis URLs, shared by the API and the worker

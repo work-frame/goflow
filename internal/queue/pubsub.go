@@ -86,3 +86,26 @@ func (q *Queue) TakeOnce(ctx context.Context, key string) (value string, found b
 	}
 	return value, true, nil
 }
+
+// countScript adds one to KEYS[1] and, if that created it, makes it expire
+// after ARGV[1] milliseconds. It returns the count and the time left.
+// Redis runs a script as one step, so a counter can never exist without
+// its expiry, even if the process dies between the two commands.
+var countScript = redis.NewScript(`
+local n = redis.call('INCR', KEYS[1])
+if n == 1 then
+	redis.call('PEXPIRE', KEYS[1], ARGV[1])
+end
+return {n, redis.call('PTTL', KEYS[1])}
+`)
+
+// Count adds one to the counter at key, which disappears window after its
+// first count, and returns the new count and how long the counter has
+// left. It satisfies ratelimit.Counter.
+func (q *Queue) Count(ctx context.Context, key string, window time.Duration) (int64, time.Duration, error) {
+	res, err := countScript.Run(ctx, q.rdb, []string{key}, window.Milliseconds()).Int64Slice()
+	if err != nil {
+		return 0, 0, fmt.Errorf("queue: count: %w", err)
+	}
+	return res[0], time.Duration(res[1]) * time.Millisecond, nil
+}
