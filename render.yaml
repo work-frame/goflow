@@ -1,4 +1,5 @@
-# Render Blueprint for GoFlow (Phase 4, Task 21; queue and workers: Phase 6, Task 27).
+# Render Blueprint for GoFlow (Phase 4, Task 21; queue and workers: Phase 6,
+# Task 27; the container image: Phase 11, Task 45).
 #
 # This file is public on GitHub, so it holds no secrets. Values marked
 # "sync: false" are typed into the Render dashboard when the Blueprint is
@@ -6,11 +7,16 @@
 services:
   - type: web
     name: goflow-api
-    runtime: go
+    # Render builds the repo's Dockerfile and runs its ENTRYPOINT, the same
+    # image docker compose runs locally. No buildCommand or startCommand.
+    # Render passes every variable below to the build as a build argument;
+    # the Dockerfile declares none, so none of them reach the image
+    # (TestImageHoldsNoSettingsOrSecrets keeps it that way).
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
     region: frankfurt # next to the Neon database in AWS Frankfurt
     plan: free # 0.1 CPU, 512 MB; sleeps after 15 minutes without requests
-    buildCommand: go build -trimpath -o bin/api ./cmd/api
-    startCommand: ./bin/api
     # Liveness only: /readyz would also wait for the database, and a paused
     # free Neon database could make a fresh deploy look unhealthy.
     healthCheckPath: /healthz
