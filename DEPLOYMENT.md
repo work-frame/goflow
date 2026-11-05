@@ -309,6 +309,8 @@ After the deploy, with the dashboard open:
 
 There is no safe way to cut Render's Key Value off on purpose, so the pause itself was tested locally (see ARCHITECTURE.md, Delivery health): the dot said `paused` 8.3 seconds after Redis went away, on the same stream, and `live` 0.2 seconds after it came back.
 
+Result on 5 November 2026 (deploy `fab1c24`): the dot said `live`, and `/metrics` showed `goflow_event_delivery_ok 1`, `goflow_event_streams 1` and `goflow_events_dropped_total 0`. `goflow_events_published_total` was `0` because no job had changed on that instance yet: canaries go straight to Redis and aren't counted as events.
+
 ## Rolling back
 
 Render keeps previous deploys. In the dashboard: `goflow-api` → **Deploys** → pick the last good one → **Rollback**. A rollback doesn't undo migrations, so a migration must keep working with the code before it (add columns before using them, drop them a release later).

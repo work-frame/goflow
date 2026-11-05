@@ -1,6 +1,6 @@
 # Architecture
 
-This describes GoFlow at the end of Phase 9, with Phase 10's metrics and delivery health. It changes as each phase lands.
+This describes GoFlow at the end of Phase 10. It changes as each phase lands.
 
 ## Overview
 
@@ -378,7 +378,7 @@ Checked in a headless Chromium against a local API with PostgreSQL, Redis and 2 
 | `internal/client` | **Contract tests** against the real `api.NewRouter`, served by `httptest.NewServer` |
 | `internal/events` | The hub and the publisher with fakes for Redis: owner-only delivery, slow clients dropped, publishing that never blocks, tickets working once and stored as hashes, and delivery health with each half of the canary's path broken on its own |
 | `internal/database` | Real PostgreSQL. `TestMain` migrates one template database per run, and each test copies it |
-| `cmd/api` | End to end: the real server on `127.0.0.1:0`, including jobs surviving a restart, sign-up, sessions, and settings validation |
+| `cmd/api` | End to end: the real server on `127.0.0.1:0`, including jobs surviving a restart, sign-up, sessions, settings validation, `/metrics` after a job's whole life, and live delivery pausing and resuming with Redis behind a TCP proxy the test can cut |
 
 Everything runs with the race detector (`./scripts/check.sh`). [FAILURES.md](FAILURES.md) records what each safeguard prevents.
 
@@ -438,7 +438,7 @@ Everything runs with the race detector (`./scripts/check.sh`). [FAILURES.md](FAI
 - **The per-email login limit can be used against its owner.** Anyone who knows your email can send 10 wrong passwords and make you wait up to 15 minutes to log in. That's the price of stopping distributed guessing of one account; a lockout would have been worse (it never ends by itself). Possible softening later: let a client that has logged in successfully from the same address before skip the per-email limit.
 - **While Redis is down, limits are per process and reset on restart.** On Render's single free instance that means a restart (every 15 idle minutes) gives a fresh allowance until Redis is back.
 - After the bcrypt cost changes, response time can tell old accounts from unknown emails until each user logs in once.
-- A failed readiness check is logged twice (Phase 10).
+- A failed readiness check gives two log lines: the cause (`readiness check failed`, with the dependency) and the `503` request. Both carry the request ID. Kept as it is: merging them would need the request logger to know why a handler failed.
 - `/metrics` is read by hand (`curl` with the token), not collected. Counters start from zero at every restart, and a free instance restarts after 15 idle minutes, so they show "since this instance started", not history. A collector would keep the instance awake around the clock.
 - The CLI keeps one saved login at a time: logging in to another API replaces it.
 - Hosting is free tier: the first request after idle waits for the server and database to wake ([DEPLOYMENT.md](DEPLOYMENT.md)).
