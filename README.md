@@ -15,7 +15,8 @@ I'm building it to learn production Go: the standard library first, then HTTP, P
 - **Phase 7 (done):** failed jobs retry with exponential backoff and jitter, up to 3 attempts, then become `dead`; permanent errors skip the retries. Each attempt has a 15-second limit. A dead job can be re-run with fresh attempts (`goflow job retry <id>`), and an `Idempotency-Key` header makes a repeated create return the first job instead of a second one.
 - **Phase 8 (done):** live job status. Every status change is announced over Server-Sent Events (`GET /api/v1/events`) to the job's owner, opened with a 30-second single-use ticket. A dashboard at `/` logs in, lists your jobs and updates them live, and creates, retries and deletes jobs.
 - **Phase 9 (done):** rate limits. Login is limited per email and per client address, password changes and stream tickets per account, with counters in Redis (in memory while Redis is down). On Render the client address comes from Cloudflare's `CF-Connecting-IP`, chosen by experiment ([DEPLOYMENT.md](DEPLOYMENT.md#finding-the-real-client-ip-task-37)).
-- **Phase 10 (in progress):** metrics. `GET /metrics` serves Prometheus metrics behind a token: requests by route, status and duration, plus Go's own. Passing health checks are no longer logged. Jobs (status changes, attempt durations by outcome), the queue's sizes in Redis, live events and rate limits are measured too. The API checks its own live-update path with a canary every 2 seconds, and open streams (and the dashboard's dot) say `paused` within 10 seconds when job events stop reaching it, and `resumed` when they flow again. Next: closing Phase 10.
+- **Phase 10 (done):** observability. `GET /metrics` serves Prometheus metrics behind a token: requests by route pattern, jobs (status changes, attempt durations by outcome), the queue's sizes in Redis, live events, rate limits, and Go's own. They're read by hand for now, because a collector polling the free instance would keep it awake. The API also checks its own live-update path with a canary every 2 seconds: open streams and the dashboard's dot say `paused` within 10 seconds when job events stop reaching it, and `resumed` when they flow again. Passing health checks are no longer logged.
+- **Phase 11 (next):** Docker.
 
 ## Requirements
 
@@ -285,7 +286,7 @@ render.yaml            Render deployment (see DEPLOYMENT.md)
 7. Retries, backoff, dead letter queue (done)
 8. Live status updates and a dashboard (done: Server-Sent Events, not WebSocket)
 9. Rate limiting (done)
-10. Metrics and dashboards, including live-update health: the dashboard says `paused` when events stop flowing, not just when its connection drops ([how](ARCHITECTURE.md#delivery-health))
+10. Metrics and live-update health (done: Prometheus metrics behind a token, read by hand; the dashboard says `paused` when events stop flowing, not just when its connection drops ([how](ARCHITECTURE.md#delivery-health)))
 11. Docker
 12. Distributed workers
 13. Integration and load testing
