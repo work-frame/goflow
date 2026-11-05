@@ -367,6 +367,24 @@ Checked in a headless Chromium against a local API with PostgreSQL, Redis and 2 
 - `list` follows `next_cursor` until the last page.
 - The client turns a 404 `job not found` back into `job.ErrNotFound`, reports other non-success responses as `*client.APIError`, and reports network failures as ordinary wrapped errors.
 
+## Container image: `Dockerfile`, `compose.yaml`
+
+One image holds the API (its entry point) and the worker binary. It's built in two stages:
+
+```text
+golang:1.27-trixie                         gcr.io/distroless/static-debian13:nonroot
+  go.mod, go.sum ─► go mod download          /usr/local/bin/api     (entry point)
+  cmd/, internal/ ─► go build, CGO off  ───► /usr/local/bin/worker
+                                             CA certificates, time zones, user nonroot
+```
+
+- **Nothing in the image that GoFlow doesn't run.** The final stage has no compiler, no source, no shell and no package manager: about 2 MiB of base under two static binaries. Less software to patch, and nothing for an attacker to work with.
+- **Static, or it doesn't start.** `CGO_ENABLED=0`. The build image has a C compiler, so Go's default would link against the system C library, which the static base doesn't have; the container would fail with `exec /usr/local/bin/api: no such file or directory` (FAILURES.md, case 43). Migrations and the dashboard are embedded (`go:embed`), so the binary needs no other files.
+- **CA certificates come with the base.** `sslmode=verify-full` checks Neon's certificate against them; on `scratch` every connection would fail with `x509: certificate signed by unknown authority`.
+- **Not root.** The process runs as `nonroot`: a bug in GoFlow can't modify the image's files.
+- **No settings or secrets in the image.** No `ARG`, no `ENV GOFLOW_...`: every instruction is kept in the image's history, and Render passes each environment variable as a build argument. Settings arrive when the container starts. `.dockerignore` is an allowlist (`*`, then `go.mod`, `go.sum`, `cmd`, `internal`), so `.env`, `.git`, `bin/` and any stray key file never reach the build. `TestImageIsStaticAndRunsAsNonroot`, `TestImageHoldsNoSettingsOrSecrets`, `TestDockerignoreIsAnAllowlist` and `TestComposePublishesPortsOnLoopbackOnly` read the three files and keep these rules (check.sh can't run Docker).
+- **Compose for development.** PostgreSQL 17 (Neon's version), Valkey 8 (Key Value's) and the API, ports on `127.0.0.1` only, the API started only once both answer their health checks, and 30 seconds between `SIGTERM` and `SIGKILL` for the pool's 20-second drain. The API reaches the database as `postgres`: a single-label name that only exists on Compose's network, which is why `urlcheck` lets it skip TLS, as it already did for Render's private Key Value host.
+
 ## Testing
 
 | Layer | Approach |
@@ -391,7 +409,8 @@ Everything runs with the race detector (`./scripts/check.sh`). [FAILURES.md](FAI
 | Ownership checked in SQL (`WHERE id = $1 AND user_id = $2`); another user's job is `404` | A forgotten check in a handler can't leak data, and the response doesn't confirm the job exists |
 | The same `401` and the same time for every login failure | Response and timing can't reveal which emails have accounts |
 | Registration closed by default | A public server doesn't accept strangers until there is a reason to |
-| Remote database only over TLS (`verify-full`) | Passwords, hashes and session hashes never cross the internet in plain text |
+| Remote database only over TLS (`verify-full`); this machine and single-label private-network names excepted | Passwords, hashes and session hashes never cross the internet in plain text. A name without a dot (Compose's `postgres`) can't be resolved by public DNS, so the connection stays on a private network; Neon's host always needs TLS |
+| One image: two build stages, distroless static, non-root, static binaries | Only what runs is shipped; CA certificates for Neon included; no shell for an attacker; the same image locally and, next, on Render |
 | Redis as the queue, next to PostgreSQL | Workers wait on `BLMOVE` instead of polling the database, which also lets a sleeping free database stay asleep. The cost: a second system to run and secure, and the dual-write problem, which the outbox exists to solve. PostgreSQL alone (`FOR UPDATE SKIP LOCKED`) would have avoided it; Redis was chosen to learn the queue patterns |
 | Only job IDs travel through Redis | Nothing to serialize or keep in sync: the job lives in PostgreSQL, and a worker reads it by ID. Losing Redis's data loses no job, only "please run this" messages, which the outbox and `Recover` can resend |
 | At least once, never at most once | A job may run twice (a crash after the work, before `Complete`), but it is never silently dropped. Duplicates of finished jobs are skipped by `Claim`; handlers with outside effects (email, payments) must be idempotent, for example by passing the job ID as the provider's idempotency key |
@@ -434,7 +453,7 @@ Everything runs with the race detector (`./scripts/check.sh`). [FAILURES.md](FAI
 - The dashboard keeps the session token where its own script can read it (`sessionStorage`). The policy and text-only rendering make injected script very unlikely to run, but if one ever did, it could act as the user in that tab until the token expires. An `HttpOnly` cookie would hide the token from scripts, at the cost of CSRF protection on every request (considered for a later phase).
 - **The dot needs 8–10 seconds to notice a pause.** Until then it still says `live` over a list that has stopped moving. Nothing is lost either way: the page reloads from PostgreSQL on `resumed`. A shorter timeout would report brief network hiccups as pauses.
 - The dashboard has no sign-up form: accounts are created with registration open, as in [DEPLOYMENT.md](DEPLOYMENT.md).
-- Plain `redis://` is accepted for single-label private-network names (Render's internal Key Value host): that traffic is unencrypted inside the provider's network.
+- Plain `redis://`, and a database without TLS, are accepted for single-label private-network names (Render's internal Key Value host, Compose's `postgres`): that traffic is unencrypted inside the private network, so GoFlow trusts its isolation. A DNS search domain could in theory turn such a name into a public one; Compose's own DNS answers its service names first.
 - **The per-email login limit can be used against its owner.** Anyone who knows your email can send 10 wrong passwords and make you wait up to 15 minutes to log in. That's the price of stopping distributed guessing of one account; a lockout would have been worse (it never ends by itself). Possible softening later: let a client that has logged in successfully from the same address before skip the per-email limit.
 - **While Redis is down, limits are per process and reset on restart.** On Render's single free instance that means a restart (every 15 idle minutes) gives a fresh allowance until Redis is back.
 - After the bcrypt cost changes, response time can tell old accounts from unknown emails until each user logs in once.

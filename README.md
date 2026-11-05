@@ -16,11 +16,12 @@ I'm building it to learn production Go: the standard library first, then HTTP, P
 - **Phase 8 (done):** live job status. Every status change is announced over Server-Sent Events (`GET /api/v1/events`) to the job's owner, opened with a 30-second single-use ticket. A dashboard at `/` logs in, lists your jobs and updates them live, and creates, retries and deletes jobs.
 - **Phase 9 (done):** rate limits. Login is limited per email and per client address, password changes and stream tickets per account, with counters in Redis (in memory while Redis is down). On Render the client address comes from Cloudflare's `CF-Connecting-IP`, chosen by experiment ([DEPLOYMENT.md](DEPLOYMENT.md#finding-the-real-client-ip-task-37)).
 - **Phase 10 (done):** observability. `GET /metrics` serves Prometheus metrics behind a token: requests by route pattern, jobs (status changes, attempt durations by outcome), the queue's sizes in Redis, live events, rate limits, and Go's own. They're read by hand for now, because a collector polling the free instance would keep it awake. The API also checks its own live-update path with a canary every 2 seconds: open streams and the dashboard's dot say `paused` within 10 seconds when job events stop reaching it, and `resumed` when they flow again. Passing health checks are no longer logged.
-- **Phase 11 (next):** Docker.
+- **Phase 11 (in progress):** Docker. One image, built in two stages into a distroless static base and run as a non-root user, and a Compose stack (PostgreSQL, Valkey and the API) for development. Next: running the same image on Render.
 
 ## Requirements
 
 - Go 1.27 or newer
+- Docker with Compose, for the development stack
 
 ## Build
 
@@ -40,9 +41,15 @@ go build -o bin/worker ./cmd/worker   # job worker
 ./bin/api
 ```
 
+Or the whole stack in containers, the API built from the [Dockerfile](Dockerfile) (development settings, registration open; see [DEVELOPMENT.md](DEVELOPMENT.md#the-development-stack)):
+
+```bash
+docker compose up -d --build   # PostgreSQL, Valkey and the API at http://localhost:8080
+```
+
 | Variable | Default | Meaning |
 |---|---|---|
-| `GOFLOW_DATABASE_URL` | none (required) | PostgreSQL URL. A database on another machine must use `sslmode=verify-full` (or `require`); the server refuses to start otherwise. |
+| `GOFLOW_DATABASE_URL` | none (required) | PostgreSQL URL. A database on another machine must use `sslmode=verify-full` (or `require`); the server refuses to start otherwise. Two exceptions: this machine, and a single-label private-network name such as Compose's `postgres`. |
 | `GOFLOW_ADDR` | `:8080` | Address to listen on. Use `:0` for any free port. |
 | `GOFLOW_BCRYPT_COST` | `12` | bcrypt cost for password hashes, 10 to 14. Each step doubles the time per hash. The server refuses to start outside this range. |
 | `GOFLOW_REGISTRATION` | `closed` | `open` lets anyone create an account with `POST /api/v1/auth/register`; `closed` answers `403`. |
@@ -271,7 +278,10 @@ internal/relay/        background loop: outbox (PostgreSQL) to queue (Redis)
 internal/worker/       pool of goroutines that take job IDs off the queue and run the jobs
 internal/urlcheck/     TLS rules for database and Redis URLs, shared by the API and the worker
 cmd/worker/            worker entry point
-scripts/               development scripts
+scripts/               development scripts, and the SQL compose's PostgreSQL runs once
+Dockerfile             the container image: build stage, then distroless static
+.dockerignore          what the image build may see (an allowlist)
+compose.yaml           the development stack: PostgreSQL, Valkey, the API
 render.yaml            Render deployment (see DEPLOYMENT.md)
 ```
 

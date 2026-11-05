@@ -3,7 +3,7 @@
 ## Prerequisites
 
 - Go 1.27 or newer
-- Docker (for PostgreSQL)
+- Docker with Compose (PostgreSQL, Valkey, and the API's image)
 - `goimports`: `go install golang.org/x/tools/cmd/goimports@latest`
 - `jq`, and the GitHub CLI `gh` (`gh auth login` once)
 - `$(go env GOPATH)/bin` on your `PATH`
@@ -22,29 +22,33 @@ Install the Go extension (`golang.go`), **trust the workspace** (Restricted Mode
 
 Edits made with `sed` or heredocs in the terminal bypass the editor. Run `goimports -w <file>` after them.
 
-### PostgreSQL
+### The development stack
+
+PostgreSQL 17 and [Valkey](https://valkey.io) 8 (the open-source fork of Redis, and what Render's Key Value runs) come from [compose.yaml](compose.yaml):
 
 ```bash
-docker run -d --name goflow-postgres \
-  -e POSTGRES_USER=goflow -e POSTGRES_PASSWORD=goflow -e POSTGRES_DB=goflow \
-  -p 127.0.0.1:5432:5432 -v goflow-pgdata:/var/lib/postgresql/data \
-  postgres:17
-until docker exec goflow-postgres pg_isready -U goflow -q; do sleep 1; done
-docker exec goflow-postgres psql -U goflow -c 'CREATE DATABASE goflow_test'
+docker compose up -d --wait postgres valkey
 ```
 
-Bind to `127.0.0.1` only: Docker's port rules bypass most host firewalls. The container has no restart policy, so after a reboot run `docker start goflow-postgres`.
+`--wait` returns once both answer their health checks. Run it at the start of every session (it replaces `docker start goflow-postgres`); it does nothing when they're already up. Ports are published on `127.0.0.1` only: Docker's port rules bypass most host firewalls. The first start on an empty volume also creates `goflow_test` ([scripts/postgres-init.sql](scripts/postgres-init.sql)). Development uses Valkey database 0 and tests use database 1, like `goflow` and `goflow_test` in PostgreSQL.
 
-### Redis
-
-GoFlow uses [Valkey](https://valkey.io), the open-source fork of Redis. It speaks the same protocol and commands, and it's what Render's Key Value runs.
+**Moving from the containers started by hand (before Phase 11).** `goflow-postgres` and `goflow-redis` hold ports 5432 and 6379, and compose uses their volumes (`goflow-pgdata`, `goflow-redisdata`), so your data comes along. Stop them once, then start the stack:
 
 ```bash
-docker run -d --name goflow-redis -p 127.0.0.1:6379:6379 -v goflow-redisdata:/data valkey/valkey:8
-docker exec goflow-redis valkey-cli ping   # PONG
+docker stop goflow-postgres goflow-redis
+docker compose up -d --wait postgres valkey
 ```
 
-Development uses database 0 and tests use database 1 of the same server, like `goflow` and `goflow_test` in PostgreSQL. After a reboot run `docker start goflow-redis`.
+Compose then warns that the volumes "already exist but were not created by Docker Compose": expected, and the data is kept. The stopped containers do nothing; don't start them again while the stack runs. `docker rm goflow-postgres goflow-redis` deletes the two containers when you're sure, never the volumes.
+
+Everything at once, with the API built from the [Dockerfile](Dockerfile), two workers and registration open:
+
+```bash
+docker compose up -d --build
+docker compose logs -f api   # Ctrl+C stops following, not the API
+```
+
+The API is then at `http://localhost:8080`, like one started with `go build`. Run one or the other: both want port 8080. `docker compose stop api` frees it; `docker compose down` stops the whole stack and keeps the volumes.
 
 ### Environment
 
@@ -138,12 +142,12 @@ Run **one** worker process at a time. Its startup recovery resets every `process
 Look at the data directly:
 
 ```bash
-docker exec goflow-postgres psql -U goflow -c 'SELECT id, title, status FROM jobs'
-docker exec goflow-postgres psql -U goflow -c 'SELECT * FROM job_outbox'          # jobs not yet in Redis
-docker exec goflow-redis valkey-cli lrange goflow:jobs:pending 0 -1                # job IDs waiting
-docker exec goflow-redis valkey-cli lrange goflow:jobs:processing 0 -1             # taken, not finished
-docker exec goflow-redis valkey-cli zrange goflow:jobs:delayed 0 -1 withscores     # retries and when they're due (Unix ms)
-docker exec goflow-postgres psql -U goflow -c "SELECT id, status, attempts, next_attempt_at, last_error FROM jobs WHERE status IN ('retrying','dead')"
+docker compose exec postgres psql -U goflow -c 'SELECT id, title, status FROM jobs'
+docker compose exec postgres psql -U goflow -c 'SELECT * FROM job_outbox'          # jobs not yet in Redis
+docker compose exec valkey valkey-cli lrange goflow:jobs:pending 0 -1               # job IDs waiting
+docker compose exec valkey valkey-cli lrange goflow:jobs:processing 0 -1            # taken, not finished
+docker compose exec valkey valkey-cli zrange goflow:jobs:delayed 0 -1 withscores    # retries and when they're due (Unix ms)
+docker compose exec postgres psql -U goflow -c "SELECT id, status, attempts, next_attempt_at, last_error FROM jobs WHERE status IN ('retrying','dead')"
 ```
 
 ## Deploying

@@ -149,7 +149,7 @@ func TestLoadConfigUsesPORTFromTheHost(t *testing.T) {
 }
 
 // A database on another machine must be reached over TLS. One on this machine
-// (the development container) may skip it.
+// (the development container) or in a private network (Compose) may skip it.
 func TestLoadConfigRequiresTLSForRemoteDatabases(t *testing.T) {
 	tests := []struct {
 		url string
@@ -158,6 +158,7 @@ func TestLoadConfigRequiresTLSForRemoteDatabases(t *testing.T) {
 		{"postgres://u:pw@localhost:5432/db?sslmode=disable", true},
 		{"postgres://u:pw@127.0.0.1:5432/db?sslmode=disable", true},
 		{"postgres://u:pw@[::1]:5432/db", true},
+		{"postgres://u:pw@postgres:5432/db?sslmode=disable", true}, // Compose's network
 		{"postgres://u:pw@db.example.com/db?sslmode=verify-full", true},
 		{"postgres://u:pw@db.example.com/db?sslmode=require", true},
 		{"postgres://u:pw@db.example.com/db", false},

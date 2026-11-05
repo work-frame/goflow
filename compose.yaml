@@ -1,0 +1,68 @@
+# GoFlow's local stack (Phase 11): PostgreSQL, Valkey and the API built
+# from the Dockerfile. Start everything: docker compose up -d --build
+#
+# Only for this machine. The passwords below are development defaults,
+# fine here and nowhere else; the hosted setup is in render.yaml.
+#
+# Every port is published on 127.0.0.1 only. Docker's port rules bypass
+# most host firewalls, so 0.0.0.0 would open them to the whole network.
+name: goflow
+
+services:
+  postgres:
+    image: postgres:17 # the same major version as Neon
+    environment:
+      POSTGRES_USER: goflow
+      POSTGRES_PASSWORD: goflow
+      POSTGRES_DB: goflow
+    ports:
+      - "127.0.0.1:5432:5432" # go test and psql from the host
+    volumes:
+      - pgdata:/var/lib/postgresql/data # PostgreSQL 17's path (18 moved it)
+      - ./scripts/postgres-init.sql:/docker-entrypoint-initdb.d/goflow-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U goflow -d goflow"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  valkey:
+    image: valkey/valkey:8 # what Render's Key Value runs
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  api:
+    build: .
+    image: goflow:dev
+    environment:
+      # Service names, not localhost: inside its container, localhost is
+      # the API itself. Single-label names pass GoFlow's TLS check because
+      # they only exist on this private network (urlcheck).
+      GOFLOW_DATABASE_URL: postgres://goflow:goflow@postgres:5432/goflow?sslmode=disable
+      GOFLOW_REDIS_URL: redis://valkey:6379/0
+      GOFLOW_WORKERS: "2"
+      GOFLOW_REGISTRATION: open # local only: create your development account
+    ports:
+      - "127.0.0.1:8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      valkey:
+        condition: service_healthy
+    # SIGTERM, then 30 s before SIGKILL: the worker pool drains for 20 s.
+    stop_grace_period: 30s
+
+# Named like the containers DEVELOPMENT.md used to start by hand, so an
+# existing development database is picked up as it is.
+volumes:
+  pgdata:
+    name: goflow-pgdata
+  redisdata:
+    name: goflow-redisdata
