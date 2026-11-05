@@ -150,12 +150,24 @@ func (h *handler) login(w http.ResponseWriter, r *http.Request) {
 		writeRequestError(w, err)
 		return
 	}
+	// Per address first: it's the cheapest check, before any database or
+	// bcrypt work, and it counts malformed emails too.
+	if h.limited(w, r, loginPerIP, h.clientIP(r)) {
+		return
+	}
 
 	// A malformed email can't belong to anyone. Rejecting it fast reveals
 	// nothing, because the format rules are public.
 	email, err := auth.NormalizeEmail(req.Email)
 	if err != nil {
 		writeError(w, http.StatusUnauthorized, invalidCredentials)
+		return
+	}
+	// Per account, keyed by the normalized email, so " Dan@X.com" and
+	// "dan@x.com" share one counter. Counted BEFORE the lookup, for every
+	// email: counting only registered ones would let a 429 reveal which
+	// emails have accounts.
+	if h.limited(w, r, loginPerEmail, email) {
 		return
 	}
 
@@ -329,6 +341,9 @@ func (h *handler) changePassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s := currentSession(r.Context())
+	if h.limited(w, r, passwordPerAccount, s.user.ID) {
+		return
+	}
 
 	err := h.hasher.Compare(s.user.PasswordHash, req.CurrentPassword)
 	if errors.Is(err, auth.ErrWrongPassword) {

@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"strings"
 	"testing"
 	"time"
@@ -11,7 +13,13 @@ import (
 // testConfig is a valid config for tests. It uses bcrypt's minimum cost,
 // which loadConfig would refuse: tests skip loadConfig and call run directly.
 func testConfig(addr, dbURL string) config {
-	return config{Addr: addr, DatabaseURL: dbURL, BcryptCost: bcrypt.MinCost, RegistrationOpen: true, SimulatedWork: 10 * time.Millisecond}
+	// Every test server counts rate limits under its own keys: counters
+	// last 15 minutes in the shared test Redis, and the e2e tests all log
+	// in from 127.0.0.1.
+	b := make([]byte, 6)
+	rand.Read(b)
+	return config{Addr: addr, DatabaseURL: dbURL, BcryptCost: bcrypt.MinCost, RegistrationOpen: true, SimulatedWork: 10 * time.Millisecond,
+		RateLimitPrefix: "goflow:test:" + hex.EncodeToString(b) + ":rl:"}
 }
 
 // env turns a map into a getenv function.
@@ -48,23 +56,27 @@ func TestLoadConfigDefaults(t *testing.T) {
 	if cfg.LogIPHeaders {
 		t.Error("LogIPHeaders is on by default; it's a diagnostic")
 	}
+	if cfg.ClientIPHeader != "" {
+		t.Errorf("ClientIPHeader = %q by default; without a proxy that sets it, any header is the client's claim", cfg.ClientIPHeader)
+	}
 }
 
 func TestLoadConfigReadsEverySetting(t *testing.T) {
 	cfg, err := loadConfig(env(map[string]string{
-		"GOFLOW_ADDR":           "127.0.0.1:9000",
-		"GOFLOW_DATABASE_URL":   testDBURL,
-		"GOFLOW_BCRYPT_COST":    "11",
-		"GOFLOW_REGISTRATION":   "open",
-		"GOFLOW_REDIS_URL":      sampleRedisURL,
-		"GOFLOW_WORKERS":        "3",
-		"GOFLOW_LOG_IP_HEADERS": "on",
+		"GOFLOW_ADDR":             "127.0.0.1:9000",
+		"GOFLOW_DATABASE_URL":     testDBURL,
+		"GOFLOW_BCRYPT_COST":      "11",
+		"GOFLOW_REGISTRATION":     "open",
+		"GOFLOW_REDIS_URL":        sampleRedisURL,
+		"GOFLOW_WORKERS":          "3",
+		"GOFLOW_LOG_IP_HEADERS":   "on",
+		"GOFLOW_CLIENT_IP_HEADER": "CF-Connecting-IP",
 	}))
 	if err != nil {
 		t.Fatalf("loadConfig: %v", err)
 	}
 	want := config{Addr: "127.0.0.1:9000", DatabaseURL: testDBURL, RedisURL: sampleRedisURL, BcryptCost: 11, RegistrationOpen: true,
-		Workers: 3, SimulatedWork: 5 * time.Second, LogIPHeaders: true}
+		Workers: 3, SimulatedWork: 5 * time.Second, LogIPHeaders: true, ClientIPHeader: "CF-Connecting-IP"}
 	if cfg != want {
 		t.Errorf("config = %+v, want %+v", cfg, want)
 	}
@@ -86,6 +98,8 @@ func TestLoadConfigRejectsBadSettings(t *testing.T) {
 		{"bad port", map[string]string{"GOFLOW_DATABASE_URL": testDBURL, "PORT": "http"}, []string{`PORT must be a port number, got "http"`}},
 		{"workers without Redis", map[string]string{"GOFLOW_DATABASE_URL": testDBURL, "GOFLOW_WORKERS": "2"}, []string{"GOFLOW_WORKERS needs GOFLOW_REDIS_URL"}},
 		{"bad IP header logging value", map[string]string{"GOFLOW_DATABASE_URL": testDBURL, "GOFLOW_LOG_IP_HEADERS": "true"}, []string{`"on" or "off", got "true"`}},
+		{"X-Forwarded-For as client IP header", map[string]string{"GOFLOW_DATABASE_URL": testDBURL, "GOFLOW_CLIENT_IP_HEADER": "X-Forwarded-For"}, []string{"can't be X-Forwarded-For"}},
+		{"unknown client IP header", map[string]string{"GOFLOW_DATABASE_URL": testDBURL, "GOFLOW_CLIENT_IP_HEADER": "X-Real-IP"}, []string{`"CF-Connecting-IP" or "True-Client-IP", got "X-Real-IP"`}},
 		{"too many workers", map[string]string{"GOFLOW_DATABASE_URL": testDBURL, "GOFLOW_REDIS_URL": sampleRedisURL, "GOFLOW_WORKERS": "33"}, []string{`from 0 to 32, got "33"`}},
 	}
 	for _, tc := range tests {

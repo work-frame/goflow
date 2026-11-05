@@ -108,7 +108,7 @@ Almost all of the 0.6–0.8 s is distance: each CLI command opens a new TLS conn
 | Neon free compute suspends after 5 minutes idle | The next query waits for it to resume, and the pool's idle connections are gone (`database/sql` also closes them after 5 minutes idle) | Acceptable for testing |
 | 0.1 CPU | bcrypt cost 10 instead of 12 | Raise `GOFLOW_BCRYPT_COST` on a bigger instance; users are re-hashed at their next login |
 | One instance; no backups beyond Neon's 6-hour history | A bad deploy or a deleted row has no easy undo | Phase 14 (CI/CD) and a backup plan before real users |
-| No rate limit on login | Passwords can be guessed as fast as bcrypt allows | Phase 9. Closed registration limits who has an account meanwhile |
+| Rate limits count in memory while Key Value is down | A restart (every 15 idle minutes) resets them until Redis is back | Acceptable for a free setup; a paid Key Value with persistence keeps counters |
 | Free Key Value has no persistence | A restart empties both lists; queued jobs lose their IDs | The reconciler re-sends jobs `queued` for over 10 minutes, at start and hourly |
 | Neon free: 100 compute-hours a month; can't stay awake for free | A query every few seconds would use the month up in about 2.5 weeks, then suspend the database | The relay never polls while healthy; the reconciler runs hourly. Watch Neon's usage page |
 | Free services can't set a shutdown delay | Render rejects `maxShutdownDelaySeconds` on the free plan, so the time between `SIGTERM` and `SIGKILL` is Render's to choose. The pool drains for 20 s; a job cut off sooner records nothing | The next start resets it and runs it again. Set the delay on a paid instance |
@@ -224,7 +224,34 @@ Rate limiting by IP (Phase 9) needs the client's real address. On Render a reque
    - your address after the fake one (`192.0.2.1, <you>`): appended to. Only the entries the proxies added, counted from the right, could be used.
 4. **Turn it off:** remove `GOFLOW_LOG_IP_HEADERS` (or set it to `off`) and deploy again. Every request's forwarding headers in the log are noise, and addresses are personal data.
 
+**Result on 4 November 2026 (22:53 UTC, deploy `fddf341`).** Sending all four made-up headers at once got `403` from Cloudflare (`server: cloudflare`, `error code: 1000`): GoFlow never saw the request. One header at a time:
+
+| Header sent | Answer | What reached GoFlow | Verdict |
+|---|---|---|---|
+| `CF-Connecting-IP: 192.0.2.3` | `403` from Cloudflare | Nothing | A client can't send it. **Used** (`GOFLOW_CLIENT_IP_HEADER=CF-Connecting-IP` in `render.yaml`) |
+| `True-Client-IP: 192.0.2.2` | `200` | The real address: replaced | Trustworthy too |
+| `X-Forwarded-For: 192.0.2.1` | `200` | `192.0.2.1,<real>, 172.71.95.34, 10.195.74.76`: appended to | The client's fake stays first. The real address is third from the right, which breaks if a hop is added. Never used |
+| `X-Real-IP: 192.0.2.4` | `200` | Nothing: removed | Useless |
+
+The connection's own address was `[::1]:38350` for every request through Cloudflare: a local proxy on the instance, the same for everyone. Render's health checks reach `/healthz` directly from `10.231.26.255` with no forwarding headers. The diagnostic was turned off afterwards.
+
 Your public IP address appears in those lines. It isn't a secret like a password, but if you share the lines, you can replace it with `MYIP` everywhere: the comparison only needs to know where it appears.
+
+## Rate limits (Task 38)
+
+After the deploy, check from your machine (paste each block on its own):
+
+```bash
+for i in $(seq 1 11); do curl -s -o /dev/null -w "%{http_code} " -X POST -H 'Content-Type: application/json' -d '{"email":"nobody@example.com","password":"not the password"}' https://goflow-api-hewh.onrender.com/api/v1/auth/login; done; echo
+```
+
+Expect ten `401` and then `429`. Then:
+
+```bash
+curl -s -D - -o /dev/null -X POST -H 'Content-Type: application/json' -d '{"email":"nobody@example.com","password":"x"}' https://goflow-api-hewh.onrender.com/api/v1/auth/login | grep -i -E '^HTTP|retry-after'
+```
+
+Expect `429` and a `retry-after` of up to 900 seconds. These attempts also count against your own address (30 per 15 minutes), so wait or log in from the dashboard afterwards to see that your real account still works: its email has its own counter.
 
 ## Rolling back
 

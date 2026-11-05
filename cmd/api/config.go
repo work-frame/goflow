@@ -40,6 +40,13 @@ type config struct {
 	// could come from (GOFLOW_LOG_IP_HEADERS=on). A diagnostic for finding
 	// out which one a host's proxies make trustworthy; off by default.
 	LogIPHeaders bool
+	// RateLimitPrefix replaces the start of rate-limit keys in Redis. Not
+	// read from the environment: tests set a fresh one per server, so
+	// counters from one run can't refuse logins in the next.
+	RateLimitPrefix string
+	// ClientIPHeader is the header a trusted proxy sets to the client's
+	// address (GOFLOW_CLIENT_IP_HEADER). Empty: use the connection's address.
+	ClientIPHeader string
 }
 
 // loadConfig reads the API settings through getenv (os.Getenv in production,
@@ -116,6 +123,18 @@ func loadConfig(getenv func(string) string) (config, error) {
 		cfg.RegistrationOpen = true
 	default:
 		errs = append(errs, fmt.Errorf(`GOFLOW_REGISTRATION must be "open" or "closed", got %q`, reg))
+	}
+
+	// Only headers a proxy can be trusted to set. X-Forwarded-For is
+	// refused by name: Render and Cloudflare append to whatever the client
+	// sent, so its first entry is the client's own claim (Task 37).
+	switch v := getenv("GOFLOW_CLIENT_IP_HEADER"); v {
+	case "", "CF-Connecting-IP", "True-Client-IP":
+		cfg.ClientIPHeader = v
+	case "X-Forwarded-For":
+		errs = append(errs, errors.New("GOFLOW_CLIENT_IP_HEADER can't be X-Forwarded-For: clients can put any address at its start"))
+	default:
+		errs = append(errs, fmt.Errorf(`GOFLOW_CLIENT_IP_HEADER must be empty, "CF-Connecting-IP" or "True-Client-IP", got %q`, v))
 	}
 
 	switch v := getenv("GOFLOW_LOG_IP_HEADERS"); v {

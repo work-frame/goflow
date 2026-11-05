@@ -304,6 +304,17 @@ A handler is the function that does a job's work (`worker.Handler`). The pool ca
 
 These are a contract, not something the pool enforces. Tests for each job type should check them: a cancelled context makes the handler return, a second run is harmless.
 
+## Rate limits: `internal/ratelimit`
+
+Fixed windows: the first attempt for a subject starts a window (15 minutes for login), every attempt adds one, and past the limit the answer is `429` with `Retry-After` until the window ends.
+
+- **One atomic step in Redis.** A Lua script runs `INCR` and, when that created the key, `PEXPIRE`, and returns the count and the time left. A crash between a separate `INCR` and `EXPIRE` would leave a counter that never expires: a lockout nobody meant (`TestCountIsAtomic` checks every counter has an expiry). Keys are `goflow:rl:<rule>:<first 16 bytes of SHA-256 of the subject>`: Redis knows which limit a key is for, not whose email or address it is. Logs name the rule, never the subject.
+- **Redis down: count in memory.** The `Limiter` tries Redis on every attempt and falls back to a map in the process, logging the outage once and the recovery once. Logins stay available and limited, though per process and only until the next restart. The map is capped at 100,000 counters, swept of ended windows at most once a second, so inventing new emails can't exhaust memory.
+- **Counted before the work.** Login counts the client address first (before the database and bcrypt, and for malformed emails too), then the normalized email, then looks up the user. The email is counted **whether or not it's registered**: counting only real accounts would make `429` mean "this account exists" (FAILURES.md, case 39). Password changes count before the current-password check, tickets before Redis is asked for one.
+- **The client's address.** With `GOFLOW_CLIENT_IP_HEADER` empty, the connection's address. On Render it's `CF-Connecting-IP`: Task 37's experiment showed Cloudflare refuses any request that brings its own (`403`, error 1000), while it appends to `X-Forwarded-For`, keeping the client's fake first entry. Behind Render's local proxy the connection address is `[::1]` for everyone, so it can't be used there. A header that's missing or isn't an address falls back to the connection's address. IPv6 counts per /64, the block one customer usually gets.
+- **Throttle, never lock.** A lockout lets anyone lock a victim out for good with a few wrong passwords; a window clears by itself.
+- **Tests don't share counters.** The e2e servers get their own key prefix (`config.RateLimitPrefix`, not read from the environment), because every e2e test logs in from `127.0.0.1` and counters outlive a test run by 15 minutes.
+
 ## Dashboard: `internal/web`
 
 Three files embedded with `//go:embed` and served by the API at `/`, `/app.js` and `/style.css`; every other path is still the API's JSON 404. Plain JavaScript, no framework, no build step, nothing loaded from another site.
@@ -366,6 +377,8 @@ Everything runs with the race detector (`./scripts/check.sh`). [FAILURES.md](FAI
 | Events are published after commit, in the background, and may be lost | They are hints. The client's snapshot after `ready`, `resync`, and reloading after a reconnect cover every loss; PostgreSQL never depends on them |
 | A per-job `version`, raised by every `UPDATE`, orders a job's changes | Row locks make it follow commit order. Timestamps from `now()` follow transaction start, can tie, and depend on the database's clock |
 | Dashboard: plain JavaScript embedded in the API, token in `sessionStorage`, strict CSP | No build step or third-party code to trust; same origin; the token survives a refresh but not the tab. The policy and text-only rendering stand between an injected title and the token |
+| Rate limits in fixed windows, counted in Redis with an in-memory fallback; `429` + `Retry-After`, no lockouts | Shared across instances and restarts; still limited when Redis is down; nobody can lock another user out for good |
+| Client address from `CF-Connecting-IP` on Render, chosen by experiment | Cloudflare refuses requests that send it; `X-Forwarded-For` keeps whatever the client put first |
 | Single-use 30-second tickets for streams | Keeps the 24-hour session token out of URLs, which end up in logs and history |
 | CLI goes through the API | One set of rules; no back door around authentication |
 | Interfaces defined by the code that uses them, only once a second implementation exists | `JobStore` and `Pinger` each have a real and a test implementation |
@@ -389,7 +402,8 @@ Everything runs with the race detector (`./scripts/check.sh`). [FAILURES.md](FAI
 - **The live dot can say `live` while events are paused.** If the API loses its Redis subscription (a Key Value restart), the browser's stream to the API stays open, so the page can't tell: events simply stop until the subscription returns and every stream gets `resync`. Nothing is lost, since the page then reloads from PostgreSQL, but for up to a minute or so the page shows `live` over a list that isn't moving. go-redis reports a resubscription but not the drop itself. Resync *repairs* missed events; it doesn't *detect* that events stopped. The dot measures the browser's connection to the API, not the whole path from the database to the browser. Fix planned for Phase 10: see [Planned: delivery health](#planned-delivery-health-phase-10).
 - The dashboard has no sign-up form: accounts are created with registration open, as in [DEPLOYMENT.md](DEPLOYMENT.md).
 - Plain `redis://` is accepted for single-label private-network names (Render's internal Key Value host): that traffic is unencrypted inside the provider's network.
-- No rate limit on login or password change (Phase 9). Closed registration limits who has an account meanwhile.
+- **The per-email login limit can be used against its owner.** Anyone who knows your email can send 10 wrong passwords and make you wait up to 15 minutes to log in. That's the price of stopping distributed guessing of one account; a lockout would have been worse (it never ends by itself). Possible softening later: let a client that has logged in successfully from the same address before skip the per-email limit.
+- **While Redis is down, limits are per process and reset on restart.** On Render's single free instance that means a restart (every 15 idle minutes) gives a fresh allowance until Redis is back.
 - After the bcrypt cost changes, response time can tell old accounts from unknown emails until each user logs in once.
 - A failed readiness check is logged twice, and every `/healthz` check from Render is logged (Phase 10).
 - The CLI keeps one saved login at a time: logging in to another API replaces it.
