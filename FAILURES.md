@@ -588,6 +588,29 @@ Each case was reproduced on a real machine (Arch Linux, Go 1.27, PostgreSQL 17) 
   ```
 - **Why:** `PUBLISH` succeeding means Redis took the message. It says nothing about whether this API's subscription is alive: a half-open subscriber connection, or a subscription that never came back after a reconnect, still lets every `PUBLISH` succeed while no event reaches the hub. That's exactly the failure the check exists for, the dot saying `live` over a list that has stopped moving. Measure at the end of the path, where the result is used, not at the step you happen to control. It's also why the fakes break each half of the path on its own: a test that only cuts everything at once (like the e2e one) can't tell the right rule from a wrong one that agrees with it in that one case.
 
+## 43. The image's binaries are static
+
+- **Safeguard:** `ENV CGO_ENABLED=0` in the Dockerfile's build stage.
+- **Removed:** that line, so Go builds with its default. The `golang` image has a C compiler, so the default is CGO on.
+- **Caught by:** `TestImageIsStaticAndRunsAsNonroot`, which reads the Dockerfile (check.sh can't run Docker). The image itself still builds without complaint.
+- **Observed:**
+  ```text
+  --- FAIL: TestImageIsStaticAndRunsAsNonroot (0.00s)
+      image_test.go:57: Dockerfile builds without CGO_ENABLED=0: the binary would need a C library the final image doesn't have
+  ```
+  The same build outside Docker, and both binaries started in an empty root directory, the way distroless `static` has no C library:
+  ```text
+  $ file api-cgo api-static
+  api-cgo:    ELF 64-bit LSB executable, x86-64, dynamically linked, interpreter /lib64/ld-linux-x86-64.so.2
+  api-static: ELF 64-bit LSB executable, x86-64, statically linked
+  $ chroot emptyroot /api-cgo
+  chroot: failed to run command '/api-cgo': No such file or directory
+  $ chroot emptyroot /api-static
+  level=ERROR msg="invalid configuration" err="GOFLOW_DATABASE_URL is required"
+  ```
+  In the real image, `docker run` stops with `exec /usr/local/bin/api: no such file or directory`.
+- **Why:** with CGO on, Go's DNS resolver and user lookup call the system C library, so the binary is linked against it and names a loader, `/lib64/ld-linux-x86-64.so.2`, that the kernel must start first. distroless `static` has neither. The kernel reports the missing loader as "no such file or directory", about a file that is plainly there, which sends people looking in the wrong place. The static binary started and got as far as its own settings check. Nothing failed at build time: the mistake shows up only when the container starts, which is why a test reads the Dockerfile.
+
 ## Experiment: the naive dual write loses a job
 
 Not a removed safeguard but the design of Task 22, run live on 2 November 2026 to see the failure Task 23 fixes. `POST /api/v1/jobs` saved the job in PostgreSQL, then pushed its ID to Redis, with nothing tying the two together.
