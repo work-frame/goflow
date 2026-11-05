@@ -528,6 +528,20 @@ Each case was reproduced on a real machine (Arch Linux, Go 1.27, PostgreSQL 17) 
   ```
 - **Why:** these headers come from the client, and Go's server accepts up to 1 MB of them per request. Without the cap, every request could write a megabyte of attacker-chosen text into the logs: a cheap way to fill a free plan's log storage and bury the lines that matter. Anything logged from a request needs a size limit, the same reason the request log never records query strings or bodies.
 
+## 39. Unknown emails count against the login limit too
+
+- **Safeguard:** `login` counts the per-email limit right after normalizing the email and **before** looking the user up, so a registered email and one nobody owns run into the limit at the same attempt with the same answer.
+- **Removed:** the per-email check moved after a successful `GetByEmail`, so only registered emails were counted.
+- **Caught by:** `TestUnknownEmailsAreLimitedLikeRealOnes`.
+- **Observed:**
+  ```text
+  --- FAIL: TestUnknownEmailsAreLimitedLikeRealOnes (0.02s)
+      limits_test.go:100: 11th attempt: registered 429 {"error":"too many attempts; try again in 900 seconds"}
+          , unknown 401 {"error":"invalid email or password"}
+          ; must be identical
+  ```
+- **Why:** the limit became an oracle. Send 11 wrong passwords for any email: `429` means someone has an account with it, `401` means nobody does. Task 17 made every login failure look and take the same time precisely so attackers can't list accounts (case 20); a limit counted in the wrong place undid that in eleven requests. The moved line still "worked": real accounts were protected, and every test about guessing passwords passed. Only a test comparing the two answers side by side notices.
+
 ## Experiment: the naive dual write loses a job
 
 Not a removed safeguard but the design of Task 22, run live on 2 November 2026 to see the failure Task 23 fixes. `POST /api/v1/jobs` saved the job in PostgreSQL, then pushed its ID to Redis, with nothing tying the two together.
