@@ -1,6 +1,6 @@
 # Architecture
 
-This describes GoFlow at the end of Phase 8. It changes as each phase lands.
+This describes GoFlow at the end of Phase 9. It changes as each phase lands.
 
 ## Overview
 
@@ -312,6 +312,7 @@ Fixed windows: the first attempt for a subject starts a window (15 minutes for l
 - **Redis down: count in memory.** The `Limiter` tries Redis on every attempt and falls back to a map in the process, logging the outage once and the recovery once. Logins stay available and limited, though per process and only until the next restart. The map is capped at 100,000 counters, swept of ended windows at most once a second, so inventing new emails can't exhaust memory.
 - **Counted before the work.** Login counts the client address first (before the database and bcrypt, and for malformed emails too), then the normalized email, then looks up the user. The email is counted **whether or not it's registered**: counting only real accounts would make `429` mean "this account exists" (FAILURES.md, case 39). Password changes count before the current-password check, tickets before Redis is asked for one.
 - **The client's address.** With `GOFLOW_CLIENT_IP_HEADER` empty, the connection's address. On Render it's `CF-Connecting-IP`: Task 37's experiment showed Cloudflare refuses any request that brings its own (`403`, error 1000), while it appends to `X-Forwarded-For`, keeping the client's fake first entry. Behind Render's local proxy the connection address is `[::1]` for everyone, so it can't be used there. A header that's missing or isn't an address falls back to the connection's address. IPv6 counts per /64, the block one customer usually gets.
+- **Why every attempt counts, before the password check.** Counting only failures would mean "check the count, run bcrypt, then add one if it failed": fifty guesses sent together would all see "under the limit" before any failure was recorded, the same check-then-act race as idempotency keys (Task 31). Adding one first is a single atomic step in Redis, so the eleventh request is refused however many arrive at once, and a refused one costs no bcrypt time. The price: an honest user's successful logins count too, and ten in 15 minutes is rare.
 - **Throttle, never lock.** A lockout lets anyone lock a victim out for good with a few wrong passwords; a window clears by itself.
 - **Tests don't share counters.** The e2e servers get their own key prefix (`config.RateLimitPrefix`, not read from the environment), because every e2e test logs in from `127.0.0.1` and counters outlive a test run by 15 minutes.
 
