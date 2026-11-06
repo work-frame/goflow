@@ -114,7 +114,7 @@ Almost all of the 0.6–0.8 s is distance: each CLI command opens a new TLS conn
 | Free services can't set a shutdown delay | Render rejects `maxShutdownDelaySeconds` on the free plan, so the time between `SIGTERM` and `SIGKILL` is Render's to choose. The pool drains for 20 s; a job cut off sooner records nothing | The next start resets it and runs it again. Set the delay on a paid instance |
 | Workers inside the API | One API instance only (startup recovery resets `processing` jobs); jobs run on the API's tenth of a CPU | A paid background worker and leases (Phase 12) before more instances |
 | The live-delivery canary publishes every 2 seconds | About 43,000 Redis commands a day; outbound only, so it doesn't keep the instance awake | Render's Key Value docs mention no command quota. Lengthen the interval on a per-command plan |
-| Metrics aren't collected, only read by hand | No history or alerts; counters restart with the instance | A collector (Grafana Cloud's free plan, or Prometheus in Docker) when the instance is paid and always on anyway |
+| Metrics aren't collected on Render, only read by hand | No history or alerts; counters restart with the instance | Prometheus and Grafana run locally (compose profile `monitoring`). A hosted collector when the instance is paid and always on anyway |
 
 ## Queue and workers (Task 27)
 
@@ -324,6 +324,18 @@ Since Task 45, Render builds the [`Dockerfile`](Dockerfile) and runs its image, 
   4. A `flaky:1` job: `retrying`, then `completed 2/3`.
   5. `/metrics` with the token, as in [Metrics](#metrics-task-40): `200`, `goflow_event_delivery_ok 1`, the job's status changes.
 - **Going back.** Revert the Task 45 commit (render.yaml back to `runtime: go`) and merge; or roll back to a pre-Task 45 deploy in the dashboard as below, though the next Blueprint sync would switch the runtime again.
+
+Result on 5 November 2026 (deploy `571d939`):
+
+| Deploy | Trigger | Took | What happened |
+|---|---|---|---|
+| 17:35 | Auto-Deploy | 30.9 s, **failed** | Built natively with the old `go build` command. The Blueprint sync then removed the start command before the instance started: "Application exited early", and the new process logged nothing. The old instance kept serving |
+| 17:36 | Blueprint | 1 min 32 s | The first Docker build on Render, including downloading `golang:1.27-trixie`. The service badge changed from `Go` to `Docker` |
+| 17:46 | Manual (saving the Environment) | 24.3 s | Docker again, from Render's layer cache |
+
+The new instances started with the same settings as before (`starting addr=:10000 ... queue_enabled=true workers=2`, `listening addr=[::]:10000`), and the old one stopped cleanly (`worker pool stopped: every active job finished`), its dashboard stream reconnecting to the new one. Checks: login and the job list; `flaky:1` completed 2/3, `flaky:3` and `flaky:5` dead 3/3; `/metrics` `200`, `goflow_event_delivery_ok 1`, and status changes matching the three jobs exactly (pending 3, processing 8, retrying 5, completed 1, dead 2; 19 events published).
+
+Same race as Task 38: the commit's auto-deploy runs with the old settings while the Blueprint sync changes them. This time it cost one failed deploy and no downtime. A change to how the service is built or started deserves its own deploy: sync the Blueprint first, or pause auto-deploy while it lands.
 
 ## Rolling back
 

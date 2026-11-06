@@ -1,0 +1,17 @@
+# Prometheus for the development stack (compose profile "monitoring").
+# It reads the API's /metrics every 15 seconds and keeps the numbers, so
+# Grafana can draw rate() and increase() over time. Local only: Render's
+# free instance is still read by hand (a collector would keep it awake).
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: goflow-api
+    metrics_path: /metrics
+    # The same development token compose.yaml gives the API
+    # (GOFLOW_METRICS_TOKEN). Not a secret: it only exists on this
+    # machine. TestPrometheusUsesTheAPIsMetricsToken keeps the two equal.
+    authorization:
+      credentials: local-development-metrics-token-not-a-secret
+    static_configs:
+      - targets: ["api:8080"]

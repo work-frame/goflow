@@ -331,6 +331,7 @@ These are a contract, not something the pool enforces. Tests for each job type s
   Unknown and zero are different answers. A graph that drops to zero during an outage says "nothing waiting"; a gap says "we don't know", which is the truth.
 - **Behind a token.** `GOFLOW_METRICS_TOKEN` (at least 32 characters; Render generates one) is compared in constant time via SHA-256, so neither its content nor its length leaks through timing. Without a token the route doesn't exist. The numbers show how busy GoFlow is and how it fails: nobody else's business.
 - **Own registry.** Each `metrics.New()` has its own registry, not Prometheus's global one, so tests can start any number of servers.
+- **Collected locally (Task 46).** `docker compose --profile monitoring` adds Prometheus, which reads `/metrics` every 15 seconds with the development token, and Grafana with a provisioned **GoFlow overview** dashboard: requests and 5xx per route, 95th-percentile request and attempt times (`histogram_quantile` over the buckets), jobs finished per hour (`increase(...[1h])`, which handles counter resets), the queue, live delivery and rate limits. `TestDashboardQueriesKnownMetrics` fails if a panel asks for a metric `internal/metrics` doesn't define: in Grafana a typo only shows as "No data".
 - **Quieter logs.** Passing `/healthz` checks (Render, every 5 seconds: about 17,000 lines a day) aren't logged any more; a failing one still is.
 
 ## Rate limits: `internal/ratelimit`
@@ -427,7 +428,7 @@ Everything runs with the race detector (`./scripts/check.sh`). [FAILURES.md](FAI
 | Events are published after commit, in the background, and may be lost | They are hints. The client's snapshot after `ready`, `resync`, and reloading after a reconnect cover every loss; PostgreSQL never depends on them |
 | A per-job `version`, raised by every `UPDATE`, orders a job's changes | Row locks make it follow commit order. Timestamps from `now()` follow transaction start, can tie, and depend on the database's clock |
 | Dashboard: plain JavaScript embedded in the API, token in `sessionStorage`, strict CSP | No build step or third-party code to trust; same origin; the token survives a refresh but not the tab. The policy and text-only rendering stand between an injected title and the token |
-| Prometheus metrics behind a token, read by hand for now | The standard format with labels and histograms; no hosted collector, because polling would keep the free instance awake all month |
+| Prometheus metrics behind a token; on Render read by hand, locally collected by Prometheus (compose profile `monitoring`) | The standard format with labels and histograms; no hosted collector, because polling would keep the free instance awake all month |
 | Rate limits in fixed windows, counted in Redis with an in-memory fallback; `429` + `Retry-After`, no lockouts | Shared across instances and restarts; still limited when Redis is down; nobody can lock another user out for good |
 | Client address from `CF-Connecting-IP` on Render, chosen by experiment | Cloudflare refuses requests that send it; `X-Forwarded-For` keeps whatever the client put first |
 | Delivery health by canary: the API publishes to itself every 2 s; 8 s without one back is a pause | Only a message that came back proves the path works, and it doesn't depend on job activity. 10 s to notice is quick for a person watching and slow enough that a reconnect go-redis repairs in 100 ms is never reported |
@@ -458,6 +459,6 @@ Everything runs with the race detector (`./scripts/check.sh`). [FAILURES.md](FAI
 - **While Redis is down, limits are per process and reset on restart.** On Render's single free instance that means a restart (every 15 idle minutes) gives a fresh allowance until Redis is back.
 - After the bcrypt cost changes, response time can tell old accounts from unknown emails until each user logs in once.
 - A failed readiness check gives two log lines: the cause (`readiness check failed`, with the dependency) and the `503` request. Both carry the request ID. Kept as it is: merging them would need the request logger to know why a handler failed.
-- `/metrics` is read by hand (`curl` with the token), not collected. Counters start from zero at every restart, and a free instance restarts after 15 idle minutes, so they show "since this instance started", not history. A collector would keep the instance awake around the clock.
+- On Render, `/metrics` is read by hand (`curl` with the token), not collected; only the local stack has Prometheus. Counters start from zero at every restart, and a free instance restarts after 15 idle minutes, so they show "since this instance started", not history. A collector would keep the instance awake around the clock.
 - The CLI keeps one saved login at a time: logging in to another API replaces it.
 - Hosting is free tier: the first request after idle waits for the server and database to wake ([DEPLOYMENT.md](DEPLOYMENT.md)).

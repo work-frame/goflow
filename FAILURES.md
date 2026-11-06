@@ -629,6 +629,19 @@ Each case was reproduced on a real machine (Arch Linux, Go 1.27, PostgreSQL 17) 
   Built locally with a made-up value (`--build-arg GOFLOW_METRICS_TOKEN=a-fake-token-for-case-44`), `docker inspect --format '{{json .Config.Env}}'` lists it among the image's settings, where anyone who can pull the image can read it.
 - **Why:** on Render this needs no `--build-arg`: Render passes every environment variable of the service to the build as a build argument. With these two lines, each deploy would copy the real metrics token into the image's configuration and history. Nothing would look wrong: the token would even work. An image is a file that gets copied, cached and shared; a secret in it is as good as published to everyone who ever gets a copy. Settings belong to the running container, not to the image.
 
+## 45. Prometheus sends the token the API expects
+
+- **Safeguard:** the development metrics token appears twice, in `compose.yaml` (the API's `GOFLOW_METRICS_TOKEN`) and in `monitoring/prometheus.yml` (what Prometheus sends), and a test keeps the two equal.
+- **Removed:** the agreement. The token was changed in `prometheus.yml` only, as happens when one of two copies is edited.
+- **Caught by:** `TestPrometheusUsesTheAPIsMetricsToken`, which reads both files.
+- **Observed:**
+  ```text
+  --- FAIL: TestPrometheusUsesTheAPIsMetricsToken (0.00s)
+      monitoring_test.go:61: Prometheus sends "local-development-metrics-token-renamed-here", the API expects "local-development-metrics-token-not-a-secret": every scrape would get 401
+  ```
+  With the stack running, Prometheus's target page (`http://localhost:9090/targets`) shows `goflow-api` as down with a 401 error, and every Grafana panel says "No data".
+- **Why:** nothing else complains. Prometheus keeps running, Grafana keeps drawing empty graphs, and the API answers the wrong token with the same `401` it gives anyone. Empty graphs look like a quiet system. Two copies of one value drift apart; when a value must be in two files, a test that compares them is the cheapest guard.
+
 ## Experiment: the naive dual write loses a job
 
 Not a removed safeguard but the design of Task 22, run live on 2 November 2026 to see the failure Task 23 fixes. `POST /api/v1/jobs` saved the job in PostgreSQL, then pushed its ID to Redis, with nothing tying the two together.
@@ -701,6 +714,7 @@ Task 24, run live on 3 November 2026 with the API and one worker.
 - **DNS timeouts on a phone hotspot stopped the API from starting.** Against Neon from a laptop on a phone's mobile hotspot, startup failed with `hostname resolving error: ... i/o timeout`. `getent ahosts` for the same host took 5.06 s once and 0.01 s later: most likely the hotspot dropped the first DNS query, and the API's 5-second startup ping ran out first. Worked around with `ipv4.dns-options "single-request-reopen,timeout:2,attempts:3"` on that connection only (Go reads these options from `/etc/resolv.conf`). The same hotspot makes the first request after a few idle minutes take 2–5 s ([DEPLOYMENT.md](DEPLOYMENT.md#measured-2-november-2026)).
 
 - **A deploy failed because the API started before its queue.** On Render, one Blueprint sync created the Key Value instance and redeployed the API with its URL. The new instance logged `starting ... queue_enabled=true workers=2` twice and exited; the old one kept serving. A manual redeploy minutes later worked. The API exited when its startup Redis ping failed, even though everything that uses Redis retries on its own. Fixed in Task 28: an unreachable Redis is a warning at startup, not a fatal error ([DEPLOYMENT.md](DEPLOYMENT.md#queue-and-workers-task-27)).
+- **The IP diagnostic stayed on in production for about 18 hours.** Task 37 turned `GOFLOW_LOG_IP_HEADERS` on in Render's dashboard on 4 November (22:53 UTC) for one experiment; its last step, "turn it off", wasn't done. Every request then logged the visitor's address and forwarding headers until 5 November, 16:46 UTC, when the startup warning (`GOFLOW_LOG_IP_HEADERS is on ... turn it off when the check is done`) was spotted while reading Task 45's logs. The warning was in every startup log the whole time; nobody reads startup logs unless something is wrong. Settings typed into the dashboard aren't in `render.yaml`, so no merge removes them. Lesson: a diagnostic that records personal data needs an end built in (a deadline after which it switches itself off), not only a warning; and a checklist item to remove it, checked before the task is called done.
 
 ## Not yet reproduced
 
