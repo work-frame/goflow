@@ -11,25 +11,32 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/redis/go-redis/v9"
 )
 
-// The two Redis lists GoFlow uses.
+// The Redis keys GoFlow's queue uses.
 const (
 	// PendingKey holds job IDs waiting for a worker. The relay pushes on the
 	// left (LPUSH); workers take from the right, so the oldest comes first.
 	PendingKey = "goflow:jobs:pending"
 	// ProcessingKey holds the IDs a worker has taken but not yet finished.
-	// An ID stays here until Ack, so a worker that dies mid-job leaves it
-	// behind instead of losing it.
+	// An ID stays here until Ack, so a worker that dies between taking an ID
+	// and claiming its job leaves it behind instead of losing it.
 	ProcessingKey = "goflow:jobs:processing"
 	// DelayedKey is a sorted set of job IDs waiting for a retry, scored by
 	// when they are due (Unix milliseconds). It only schedules delivery:
 	// PostgreSQL records that a job is retrying and when.
 	DelayedKey = "goflow:jobs:delayed"
+	// LeasesKey is a sorted set of job IDs scored by when their lease runs
+	// out (Unix milliseconds, as PostgreSQL computed it). It only tells the
+	// lease reaper when to ask PostgreSQL, which alone decides whether a
+	// lease has expired. Losing it costs nothing but time: the reaper's
+	// hourly sweep reads PostgreSQL directly.
+	LeasesKey = "goflow:jobs:leases"
 )
 
 // ErrEmpty means Take waited and no job ID arrived.
@@ -42,6 +49,7 @@ type Queue struct {
 	key        string // pending list
 	processing string
 	delayed    string
+	leases     string
 }
 
 // Open connects to the Redis server at rawURL and checks it with a PING.
@@ -78,7 +86,7 @@ func New(rawURL string) (*Queue, error) {
 	opts.DialTimeout = 2 * time.Second
 	opts.ReadTimeout = 2 * time.Second
 	opts.WriteTimeout = 2 * time.Second
-	return &Queue{rdb: redis.NewClient(opts), key: PendingKey, processing: ProcessingKey, delayed: DelayedKey}, nil
+	return &Queue{rdb: redis.NewClient(opts), key: PendingKey, processing: ProcessingKey, delayed: DelayedKey, leases: LeasesKey}, nil
 }
 
 // Enqueue adds job IDs to the pending list in one command, keeping their
@@ -126,33 +134,72 @@ func (q *Queue) Ack(ctx context.Context, jobID string) error {
 	return nil
 }
 
-// Recover moves every ID left in the processing list back to the front of
-// the pending list, so it's taken next. It returns how many it moved.
-//
-// Only safe while no other worker is running: it can't tell a crashed
-// worker's IDs from a live one's. For now GoFlow runs one worker process,
-// which calls Recover at start. Several workers will need leases (Phase 12).
-func (q *Queue) Recover(ctx context.Context) (int, error) {
-	n := 0
-	for {
-		// Take puts each ID on the LEFT of processing, so the newest is on the
-		// left. Moving newest first onto the RIGHT of pending, where Take
-		// looks, leaves the oldest unfinished ID to be taken first.
-		err := q.rdb.LMove(ctx, q.processing, q.key, "LEFT", "RIGHT").Err()
-		if errors.Is(err, redis.Nil) {
-			return n, nil
-		}
-		if err != nil {
-			return n, fmt.Errorf("queue: recover: %w", err)
-		}
-		n++
+// Taken returns every ID in the processing list: taken by some worker, in
+// this process or another, and not acknowledged yet.
+func (q *Queue) Taken(ctx context.Context) ([]string, error) {
+	ids, err := q.rdb.LRange(ctx, q.processing, 0, -1).Result()
+	if err != nil {
+		return nil, fmt.Errorf("queue: taken: %w", err)
 	}
+	return ids, nil
+}
+
+// requeueScript moves one copy of ARGV[1] from the processing list
+// (KEYS[1]) to the end of the pending list (KEYS[2]) that Take reads first.
+// Only if it was there: two processes cleaning up at once can't both push
+// the same entry back.
+var requeueScript = redis.NewScript(`
+local n = redis.call('LREM', KEYS[1], 1, ARGV[1])
+if n > 0 then
+	redis.call('RPUSH', KEYS[2], ARGV[1])
+end
+return n
+`)
+
+// Requeue moves one copy of jobID from the processing list back to the
+// front of the queue, so it's taken next. It does nothing if jobID isn't in
+// the processing list.
+func (q *Queue) Requeue(ctx context.Context, jobID string) error {
+	if err := requeueScript.Run(ctx, q.rdb, []string{q.processing, q.key}, jobID).Err(); err != nil {
+		return fmt.Errorf("queue: requeue %s: %w", jobID, err)
+	}
+	return nil
+}
+
+// TrackLease records that jobID's lease runs out at until, as PostgreSQL
+// computed it. Tracking an ID again moves its deadline.
+func (q *Queue) TrackLease(ctx context.Context, jobID string, until time.Time) error {
+	if err := q.rdb.ZAdd(ctx, q.leases, redis.Z{Score: float64(until.UnixMilli()), Member: jobID}).Err(); err != nil {
+		return fmt.Errorf("queue: track lease of %s: %w", jobID, err)
+	}
+	return nil
+}
+
+// DropLease forgets jobID's lease deadline.
+func (q *Queue) DropLease(ctx context.Context, jobID string) error {
+	if err := q.rdb.ZRem(ctx, q.leases, jobID).Err(); err != nil {
+		return fmt.Errorf("queue: drop lease of %s: %w", jobID, err)
+	}
+	return nil
+}
+
+// ExpiredLeases returns up to limit job IDs whose tracked deadline is at or
+// before now, earliest first. now is the caller's clock, so this only says
+// which leases are worth asking PostgreSQL about.
+func (q *Queue) ExpiredLeases(ctx context.Context, now time.Time, limit int) ([]string, error) {
+	ids, err := q.rdb.ZRangeByScore(ctx, q.leases, &redis.ZRangeBy{
+		Min: "-inf", Max: strconv.FormatInt(now.UnixMilli(), 10), Count: int64(limit),
+	}).Result()
+	if err != nil {
+		return nil, fmt.Errorf("queue: expired leases: %w", err)
+	}
+	return ids, nil
 }
 
 // WithKeys returns a Queue that shares q's connections but uses other
-// lists. Tests use it so they never touch the real lists.
-func (q *Queue) WithKeys(pending, processing, delayed string) *Queue {
-	return &Queue{rdb: q.rdb, key: pending, processing: processing, delayed: delayed}
+// keys. Tests use it so they never touch the real ones.
+func (q *Queue) WithKeys(pending, processing, delayed, leases string) *Queue {
+	return &Queue{rdb: q.rdb, key: pending, processing: processing, delayed: delayed, leases: leases}
 }
 
 // Schedule puts a job ID in the delayed set, due at `at`. Scheduling an ID

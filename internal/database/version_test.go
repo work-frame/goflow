@@ -2,6 +2,7 @@ package database
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -43,6 +44,15 @@ func TestEveryChangeRaisesTheVersion(t *testing.T) {
 		t.Fatalf("new job version %d, want 1", j.Version)
 	}
 
+	var token string
+	claimAs := func(leaseFor time.Duration) error {
+		c, won, err := work.Claim(ctx, id, leaseFor)
+		if err == nil && !won {
+			err = fmt.Errorf("claim lost")
+		}
+		token = c.LeaseToken
+		return err
+	}
 	steps := []struct {
 		name string
 		do   func() error
@@ -53,15 +63,16 @@ func TestEveryChangeRaisesTheVersion(t *testing.T) {
 			_, err := outbox.RequeueStale(ctx, -time.Hour, 10, noop)
 			return err
 		}},
-		{"Claim", func() error { _, _, _, err := work.Claim(ctx, id); return err }},
-		{"Retry", func() error { _, err := work.Retry(ctx, id, time.Second, "boom"); return err }},
-		{"second Claim", func() error { _, _, _, err := work.Claim(ctx, id); return err }},
-		{"Bury", func() error { return work.Bury(ctx, id, "boom") }},
+		{"Claim", func() error { return claimAs(testLease) }},
+		{"Renew", func() error { _, err := work.Renew(ctx, id, token, testLease); return err }},
+		{"Retry", func() error { _, err := work.Retry(ctx, id, token, time.Second, "boom"); return err }},
+		{"second Claim", func() error { return claimAs(testLease) }},
+		{"Bury", func() error { return work.Bury(ctx, id, token, "boom") }},
 		{"Rerun", func() error { _, err := jobs.Rerun(ctx, f.alice, id); return err }},
-		{"third Claim", func() error { _, _, _, err := work.Claim(ctx, id); return err }},
-		{"ResetProcessing", func() error { _, err := work.ResetProcessing(ctx); return err }},
-		{"fourth Claim", func() error { _, _, _, err := work.Claim(ctx, id); return err }},
-		{"Complete", func() error { return work.Complete(ctx, id) }},
+		{"third Claim, a lease already run out", func() error { return claimAs(-time.Second) }},
+		{"Reclaim", func() error { _, _, err := work.Reclaim(ctx, id); return err }},
+		{"fourth Claim", func() error { return claimAs(testLease) }},
+		{"Complete", func() error { return work.Complete(ctx, id, token) }},
 	}
 	for _, step := range steps {
 		r.take()
@@ -73,7 +84,8 @@ func TestEveryChangeRaisesTheVersion(t *testing.T) {
 			t.Fatalf("after %s: version %d, want %d", step.name, got, want)
 		}
 		r.mu.Lock()
-		if n := len(r.jobs); n > 0 && step.name != "RequeueStale" {
+		// RequeueStale and Renew change no status, so they announce nothing.
+		if n := len(r.jobs); n > 0 && step.name != "RequeueStale" && step.name != "Renew" {
 			if heard := r.jobs[n-1].Version; heard != want {
 				t.Errorf("after %s: announced version %d, database has %d", step.name, heard, want)
 			}
@@ -82,7 +94,7 @@ func TestEveryChangeRaisesTheVersion(t *testing.T) {
 	}
 
 	// A change that changes nothing doesn't count.
-	work.Complete(ctx, id) // already completed: 0 rows
+	work.Complete(ctx, id, token) // already completed: 0 rows, ErrLeaseLost
 	if got := versionOf(t, f, id); got != want {
 		t.Errorf("a no-op Complete moved the version to %d", got)
 	}

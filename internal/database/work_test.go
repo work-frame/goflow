@@ -2,6 +2,7 @@ package database
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -11,13 +12,31 @@ import (
 	"github.com/work-frame/goflow/internal/job"
 )
 
+// testLease is long enough that no lease runs out during a test unless the
+// test means it to.
+const testLease = time.Minute
+
+// claim claims id with a minute-long lease and reports whether it won.
 func claim(t *testing.T, w *WorkStore, id string) bool {
 	t.Helper()
-	attempt, _, _, err := w.Claim(context.Background(), id)
+	_, won, err := w.Claim(context.Background(), id, testLease)
 	if err != nil {
 		t.Fatalf("Claim(%s): %v", id, err)
 	}
-	return attempt > 0
+	return won
+}
+
+// leaseOf reads the job's current lease token ("" if it has none).
+func leaseOf(t *testing.T, f *jobsFixture, id string) string {
+	t.Helper()
+	var token *string
+	if err := f.db.QueryRowContext(context.Background(), `SELECT lease_token FROM jobs WHERE id = $1`, id).Scan(&token); err != nil {
+		t.Fatalf("read lease of %s: %v", id, err)
+	}
+	if token == nil {
+		return ""
+	}
+	return *token
 }
 
 func TestClaimThenComplete(t *testing.T) {
@@ -31,11 +50,14 @@ func TestClaimThenComplete(t *testing.T) {
 	if s := statusOf(t, f, id); s != job.StatusProcessing {
 		t.Fatalf("status after Claim = %s, want processing", s)
 	}
-	if err := w.Complete(context.Background(), id); err != nil {
+	if err := w.Complete(context.Background(), id, leaseOf(t, f, id)); err != nil {
 		t.Fatal(err)
 	}
 	if s := statusOf(t, f, id); s != job.StatusCompleted {
 		t.Fatalf("status after Complete = %s, want completed", s)
+	}
+	if token := leaseOf(t, f, id); token != "" {
+		t.Errorf("a completed job still has a lease (%q)", token)
 	}
 }
 
@@ -46,10 +68,11 @@ func TestClaimSkipsFinishedAndMissingJobs(t *testing.T) {
 	ctx := context.Background()
 	ids := addJobs(t, f, "done", "broken")
 
-	bury := func(ctx context.Context, id string) error { return w.Bury(ctx, id, "broken for good") }
-	for i, finish := range []func(context.Context, string) error{w.Complete, bury} {
+	complete := func(ctx context.Context, id, token string) error { return w.Complete(ctx, id, token) }
+	bury := func(ctx context.Context, id, token string) error { return w.Bury(ctx, id, token, "broken for good") }
+	for i, finish := range []func(context.Context, string, string) error{complete, bury} {
 		claim(t, w, ids[i])
-		if err := finish(ctx, ids[i]); err != nil {
+		if err := finish(ctx, ids[i], leaseOf(t, f, ids[i])); err != nil {
 			t.Fatal(err)
 		}
 		if claim(t, w, ids[i]) {
@@ -99,12 +122,12 @@ func TestClaimHasExactlyOneWinner(t *testing.T) {
 			go func() {
 				defer wg.Done()
 				<-start // both goroutines are ready; release them together
-				attempt, _, _, err := w.Claim(ctx, id)
+				_, won, err := w.Claim(ctx, id, testLease)
 				if err != nil {
 					errs <- err
 					return
 				}
-				results <- attempt > 0
+				results <- won
 			}()
 		}
 		close(start)
@@ -123,38 +146,6 @@ func TestClaimHasExactlyOneWinner(t *testing.T) {
 		if winners != 1 {
 			t.Fatalf("round %d: %d goroutines won the claim, want exactly 1", i, winners)
 		}
-	}
-}
-
-// Startup recovery: processing jobs go back to queued; other statuses stay.
-func TestResetProcessing(t *testing.T) {
-	f := newJobsFixture(t)
-	w := NewWorkStore(f.db)
-	ctx := context.Background()
-	ids := addJobs(t, f, "stuck one", "stuck two", "finished", "waiting")
-
-	for _, id := range ids[:3] {
-		claim(t, w, id)
-	}
-	if err := w.Complete(ctx, ids[2]); err != nil {
-		t.Fatal(err)
-	}
-
-	n, err := w.ResetProcessing(ctx)
-	if err != nil {
-		t.Fatalf("ResetProcessing: %v", err)
-	}
-	if n != 2 {
-		t.Fatalf("ResetProcessing changed %d jobs, want 2", n)
-	}
-	want := map[string]job.Status{ids[0]: job.StatusQueued, ids[1]: job.StatusQueued, ids[2]: job.StatusCompleted, ids[3]: job.StatusPending}
-	for id, status := range want {
-		if got := statusOf(t, f, id); got != status {
-			t.Errorf("job %s: status %s, want %s", id, got, status)
-		}
-	}
-	if !claim(t, w, ids[0]) {
-		t.Error("a reset job can't be claimed again")
 	}
 }
 
@@ -181,12 +172,12 @@ func TestRetryThenClaimCountsAttempts(t *testing.T) {
 	ctx := context.Background()
 	id := addJobs(t, f, "flaky")[0]
 
-	attempt, max, title, err := w.Claim(ctx, id)
-	if err != nil || attempt != 1 || max != job.DefaultMaxAttempts || title != "flaky" {
-		t.Fatalf("first Claim = %d of %d (%q), %v; want 1 of %d (flaky)", attempt, max, title, err, job.DefaultMaxAttempts)
+	c, _, err := w.Claim(ctx, id, testLease)
+	if err != nil || c.Attempt != 1 || c.MaxAttempts != job.DefaultMaxAttempts || c.Title != "flaky" {
+		t.Fatalf("first Claim = %d of %d (%q), %v; want 1 of %d (flaky)", c.Attempt, c.MaxAttempts, c.Title, err, job.DefaultMaxAttempts)
 	}
 	before := time.Now()
-	due, err := w.Retry(ctx, id, 30*time.Second, "smtp: connection refused")
+	due, err := w.Retry(ctx, id, c.LeaseToken, 30*time.Second, "smtp: connection refused")
 	if err != nil {
 		t.Fatalf("Retry: %v", err)
 	}
@@ -198,9 +189,9 @@ func TestRetryThenClaimCountsAttempts(t *testing.T) {
 		t.Fatalf("after Retry: status %s, attempts %d, next %v, last_error %q", status, attempts, next, lastError)
 	}
 
-	attempt, _, _, err = w.Claim(ctx, id)
-	if err != nil || attempt != 2 {
-		t.Fatalf("Claim of a retrying job = attempt %d, %v; want 2", attempt, err)
+	c, _, err = w.Claim(ctx, id, testLease)
+	if err != nil || c.Attempt != 2 {
+		t.Fatalf("Claim of a retrying job = attempt %d, %v; want 2", c.Attempt, err)
 	}
 	if _, _, next, _ := jobRow(t, f, id); next != nil {
 		t.Errorf("next_attempt_at = %v while processing, want NULL", next)
@@ -215,7 +206,7 @@ func TestBuryMarksDeadAndKeepsTheError(t *testing.T) {
 	claim(t, w, id)
 
 	long := strings.Repeat("x", 5000) // longer than last_error allows
-	if err := w.Bury(ctx, id, long); err != nil {
+	if err := w.Bury(ctx, id, leaseOf(t, f, id), long); err != nil {
 		t.Fatalf("Bury: %v", err)
 	}
 	status, _, _, lastError := jobRow(t, f, id)
@@ -233,8 +224,8 @@ func TestRetryNeedsAProcessingJob(t *testing.T) {
 	w := NewWorkStore(f.db)
 	id := addJobs(t, f, "not started")[0]
 
-	if _, err := w.Retry(context.Background(), id, time.Second, "x"); err == nil {
-		t.Fatal("Retry of a pending job succeeded, want ErrNotProcessing")
+	if _, err := w.Retry(context.Background(), id, "no-such-lease", time.Second, "x"); !errors.Is(err, ErrLeaseLost) {
+		t.Fatalf("Retry of a pending job = %v, want ErrLeaseLost", err)
 	}
 }
 
@@ -258,7 +249,7 @@ func TestRequeueStaleResendsOverdueRetries(t *testing.T) {
 	ids := addJobs(t, f, "lost retry", "fresh retry")
 	for _, id := range ids {
 		claim(t, w, id)
-		if _, err := w.Retry(ctx, id, time.Second, "boom"); err != nil {
+		if _, err := w.Retry(ctx, id, leaseOf(t, f, id), time.Second, "boom"); err != nil {
 			t.Fatal(err)
 		}
 	}

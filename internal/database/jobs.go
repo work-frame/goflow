@@ -253,18 +253,42 @@ type scanner interface {
 }
 
 func scanJob(s scanner) (*job.Job, error) {
-	var j job.Job
-	var next sql.NullTime
-	if err := s.Scan(&j.ID, &j.UserID, &j.Title, &j.Status, &j.CreatedAt, &j.UpdatedAt, &j.Attempts, &j.MaxAttempts, &next, &j.Version); err != nil {
+	var h scanned
+	if err := s.Scan(h.targets()...); err != nil {
 		return nil, err
 	}
+	return h.job(), nil
+}
+
+// scanJobAnd reads a job (jobColumns) followed by extra columns.
+func scanJobAnd(s scanner, extra ...any) (*job.Job, error) {
+	var h scanned
+	if err := s.Scan(append(h.targets(), extra...)...); err != nil {
+		return nil, err
+	}
+	return h.job(), nil
+}
+
+// scanned holds one row of jobColumns while it is read.
+type scanned struct {
+	j    job.Job
+	next sql.NullTime
+}
+
+func (s *scanned) targets() []any {
+	return []any{&s.j.ID, &s.j.UserID, &s.j.Title, &s.j.Status, &s.j.CreatedAt, &s.j.UpdatedAt,
+		&s.j.Attempts, &s.j.MaxAttempts, &s.next, &s.j.Version}
+}
+
+func (s *scanned) job() *job.Job {
+	j := s.j
 	j.CreatedAt = j.CreatedAt.UTC()
 	j.UpdatedAt = j.UpdatedAt.UTC()
-	if next.Valid {
-		t := next.Time.UTC()
+	if s.next.Valid {
+		t := s.next.Time.UTC()
 		j.NextAttemptAt = &t
 	}
-	return &j, nil
+	return &j
 }
 
 // maxAttempts is j's limit, or the default for a job built without job.New.

@@ -17,7 +17,7 @@ I'm building it to learn production Go: the standard library first, then HTTP, P
 - **Phase 9 (done):** rate limits. Login is limited per email and per client address, password changes and stream tickets per account, with counters in Redis (in memory while Redis is down). On Render the client address comes from Cloudflare's `CF-Connecting-IP`, chosen by experiment ([DEPLOYMENT.md](DEPLOYMENT.md#finding-the-real-client-ip-task-37)).
 - **Phase 10 (done):** observability. `GET /metrics` serves Prometheus metrics behind a token: requests by route pattern, jobs (status changes, attempt durations by outcome), the queue's sizes in Redis, live events, rate limits, and Go's own. They're read by hand for now, because a collector polling the free instance would keep it awake. The API also checks its own live-update path with a canary every 2 seconds: open streams and the dashboard's dot say `paused` within 10 seconds when job events stop reaching it, and `resumed` when they flow again. Passing health checks are no longer logged.
 - **Phase 11 (done):** Docker. One image, built in two stages into a distroless static base and run as a non-root user, and a Compose stack (PostgreSQL, Valkey and the API) for development. Render builds and runs the same image (`runtime: docker` in `render.yaml`). An opt-in Compose profile adds Prometheus and Grafana with a GoFlow dashboard, for watching the metrics over time on your own machine.
-- **Phase 12 (next):** distributed workers: more than one worker process, with leases instead of the single-instance startup recovery.
+- **Phase 12 (in progress):** distributed workers. A claimed job is held under a lease (a token valid for 30 s on PostgreSQL's clock, renewed every 10 s while the job runs), and only the current token can record a result. A reaper takes back jobs whose lease ran out. Any number of worker processes can share one database and one Redis.
 
 ## Requirements
 
@@ -59,7 +59,7 @@ docker compose up -d --build   # PostgreSQL, Valkey and the API at http://localh
 | `GOFLOW_LOG_IP_HEADERS` | `off` | `on` adds a `client ip sources` log line per request: the connection's address and the `X-Forwarded-For`, `True-Client-IP`, `CF-Connecting-IP`, `X-Real-IP` and `Forwarded` headers, each capped at 200 characters. A diagnostic for finding out which one a host makes trustworthy ([DEPLOYMENT.md](DEPLOYMENT.md#finding-the-real-client-ip-task-37)); turn it off afterwards. |
 | `PORT` | none | Port to listen on, as set by hosting platforms such as Render. Used only when `GOFLOW_ADDR` is not set. |
 | `GOFLOW_REDIS_URL` | none (queue off) | Redis for the job queue, e.g. `redis://127.0.0.1:6379/0`. A Redis on another machine must use `rediss://` (TLS), except a single-label private-network name such as Render's `red-abc123`. Without it, new jobs stay `pending` in the outbox until a server with Redis starts. |
-| `GOFLOW_WORKERS` | `0` | Job workers the API runs itself, 0 to 32. Needs `GOFLOW_REDIS_URL`. Only one API instance may run workers. |
+| `GOFLOW_WORKERS` | `0` | Job workers the API runs itself, 0 to 32. Needs `GOFLOW_REDIS_URL`. Any number of API instances and `cmd/worker` processes may run workers at once (leases). |
 
 The server stops on `Ctrl+C` or `SIGTERM`, finishing in-flight requests first (up to 10 seconds).
 

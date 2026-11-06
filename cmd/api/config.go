@@ -32,7 +32,7 @@ type config struct {
 	BcryptCost       int
 	RegistrationOpen bool
 	// Workers is how many job workers the API runs itself (0: none).
-	// Needs RedisURL. Only ONE API instance may run workers: see worker.Pool.
+	// Needs RedisURL. Any number of processes may run workers (leases).
 	Workers int
 	// SimulatedWork is how long each placeholder job takes. Not read from
 	// the environment; tests shorten it.

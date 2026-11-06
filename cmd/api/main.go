@@ -39,6 +39,11 @@ const (
 	// It is below workerDrain, so a job started just before SIGTERM can
 	// still finish or time out inside the drain.
 	jobTimeout = 15 * time.Second
+	// leaseCheckEvery: how often the lease reaper asks Redis for leases past
+	// their deadline (PostgreSQL only when there are some). leaseSweepEvery:
+	// how often it asks PostgreSQL directly, for deadlines Redis lost.
+	leaseCheckEvery = 5 * time.Second
+	leaseSweepEvery = time.Hour
 )
 
 func main() {
@@ -168,13 +173,19 @@ func run(ctx context.Context, logger *slog.Logger, cfg config, ready func(addr s
 		// it can run every second without waking the database.
 		stopPromoter := relay.NewPromoter(q, logger, time.Second).Start(ctx)
 		defer stopPromoter()
+		// Jobs whose worker stopped renewing its lease, in this process or
+		// any other, go back to the queue. It runs even with no workers here:
+		// cmd/worker processes may be running them.
+		work := database.NewWorkStore(db).WithNotifier(notifier)
+		stopReaper := relay.NewLeaseReaper(work, q, logger, leaseCheckEvery, leaseSweepEvery).Start(ctx)
+		defer stopReaper()
 
 		if cfg.Workers > 0 {
-			// The pool's startup recovery resets every 'processing' job, so
-			// ONLY ONE API INSTANCE may run workers (see worker.Pool.Run).
+			// Leases let any number of processes run workers on the same
+			// database and Redis (see worker.Pool).
 			pool := &worker.Pool{
 				Queue:        q,
-				Store:        database.NewWorkStore(db).WithNotifier(notifier),
+				Store:        work,
 				Handle:       worker.Demo(cfg.SimulatedWork),
 				JobTimeout:   jobTimeout,
 				Logger:       logger,

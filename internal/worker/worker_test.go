@@ -11,19 +11,46 @@ import (
 	"testing"
 	"time"
 
+	"github.com/work-frame/goflow/internal/database"
 	"github.com/work-frame/goflow/internal/queue"
 )
 
 func discardLogger() *slog.Logger { return slog.New(slog.DiscardHandler) }
 
 // memQueue behaves like the Redis lists: Take moves an ID from pending to
-// processing, Ack removes it, Recover moves processing back to the front.
+// processing, Ack removes it, Requeue moves one back to the front. It also
+// keeps lease deadlines like the sorted set.
 type memQueue struct {
 	mu         sync.Mutex
 	pending    []string // index 0 is taken first
 	processing []string
 	delayed    map[string]time.Time
+	leases     map[string]time.Time
 	calls      *callLog // shared with a memStore to check call order
+}
+
+func (q *memQueue) TrackLease(_ context.Context, id string, until time.Time) error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if q.leases == nil {
+		q.leases = map[string]time.Time{}
+	}
+	q.leases[id] = until
+	return nil
+}
+
+func (q *memQueue) DropLease(_ context.Context, id string) error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	delete(q.leases, id)
+	return nil
+}
+
+func (q *memQueue) leaseOf(id string) (time.Time, bool) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	t, ok := q.leases[id]
+	return t, ok
 }
 
 // Schedule records the retry. Tests promote it by hand with promote.
@@ -87,13 +114,20 @@ func (q *memQueue) Ack(_ context.Context, id string) error {
 	return nil
 }
 
-func (q *memQueue) Recover(context.Context) (int, error) {
+func (q *memQueue) Taken(context.Context) ([]string, error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	n := len(q.processing)
-	q.pending = append(slices.Clone(q.processing), q.pending...)
-	q.processing = nil
-	return n, nil
+	return slices.Clone(q.processing), nil
+}
+
+func (q *memQueue) Requeue(_ context.Context, id string) error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if i := slices.Index(q.processing, id); i >= 0 {
+		q.processing = slices.Delete(q.processing, i, i+1)
+		q.pending = append([]string{id}, q.pending...)
+	}
+	return nil
 }
 
 func (q *memQueue) add(ids ...string) {
@@ -108,87 +142,149 @@ func (q *memQueue) lists() (pending, processing []string) {
 	return slices.Clone(q.pending), slices.Clone(q.processing)
 }
 
-// memStore tracks statuses like WorkStore: Claim wins only from pending,
-// queued or retrying, under a mutex, so exactly one caller wins. It records
-// the order of Retry calls in calls, shared with memQueue's Schedule.
+// memStore tracks statuses and leases like WorkStore: Claim wins only from
+// pending, queued or retrying, under a mutex, so exactly one caller wins,
+// and gives each claim its own token; every later write needs the job's
+// current token. It records the order of Retry calls in calls, shared with
+// memQueue's Schedule.
 type memStore struct {
 	mu       sync.Mutex
 	status   map[string]string
 	attempts map[string]int
 	max      int
 	retryErr error // when set, Retry fails (the "commit" fails)
+	renewErr error // when set, Renew fails like an unreachable database
 	calls    *callLog
 	titles   map[string]string
 	errors   map[string]string // last error per job, from Retry and Bury
+	tokens   map[string]string // the job's current lease token
+	claims   int
+	renewals int
+	refused  []string // writes refused for a stale token
 }
 
 func newMemStore(ids ...string) *memStore {
 	s := &memStore{status: map[string]string{}, attempts: map[string]int{}, max: 3, calls: &callLog{},
-		titles: map[string]string{}, errors: map[string]string{}}
+		titles: map[string]string{}, errors: map[string]string{}, tokens: map[string]string{}}
 	for _, id := range ids {
 		s.status[id] = "queued"
 	}
 	return s
 }
 
-func (s *memStore) Claim(_ context.Context, id string) (int, int, string, error) {
+func (s *memStore) Claim(_ context.Context, id string, leaseFor time.Duration) (database.Claimed, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	switch s.status[id] {
 	case "pending", "queued", "retrying":
 		s.status[id] = "processing"
 		s.attempts[id]++
-		return s.attempts[id], s.max, s.titles[id], nil
+		s.claims++
+		token := fmt.Sprintf("lease-%d", s.claims)
+		s.tokens[id] = token
+		return database.Claimed{Attempt: s.attempts[id], MaxAttempts: s.max, Title: s.titles[id],
+			LeaseToken: token, LeaseExpires: time.Now().Add(leaseFor)}, true, nil
 	}
-	return 0, 0, "", nil
+	return database.Claimed{}, false, nil
 }
 
-func (s *memStore) ResetProcessing(context.Context) (int64, error) {
+// owns reports whether token is job id's current lease. s.mu must be held.
+func (s *memStore) owns(id, token, op string) bool {
+	if s.status[id] == "processing" && s.tokens[id] == token {
+		return true
+	}
+	s.refused = append(s.refused, op+" "+id)
+	return false
+}
+
+func (s *memStore) Renew(_ context.Context, id, token string, leaseFor time.Duration) (time.Time, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	var n int64
-	for id, st := range s.status {
-		if st == "processing" {
-			s.status[id] = "queued"
-			n++
+	s.renewals++
+	if s.renewErr != nil {
+		return time.Time{}, s.renewErr
+	}
+	if !s.owns(id, token, "renew") {
+		return time.Time{}, database.ErrLeaseLost
+	}
+	return time.Now().Add(leaseFor), nil
+}
+
+// takeOver plays another worker taking the job after its lease ran out:
+// still processing, under a token the first holder doesn't have.
+func (s *memStore) takeOver(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.tokens[id] = "another-workers-lease"
+}
+
+func (s *memStore) Processing(_ context.Context, ids []string) (map[string]bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := map[string]bool{}
+	for _, id := range ids {
+		if s.status[id] == "processing" {
+			out[id] = true
 		}
 	}
-	return n, nil
+	return out, nil
 }
 
-func (s *memStore) setIf(id, from, to string) {
+func (s *memStore) Complete(_ context.Context, id, token string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.status[id] == from {
-		s.status[id] = to
+	if !s.owns(id, token, "complete") {
+		return database.ErrLeaseLost
 	}
-}
-
-func (s *memStore) Complete(_ context.Context, id string) error {
-	s.setIf(id, "processing", "completed")
+	s.status[id] = "completed"
+	delete(s.tokens, id)
 	return nil
 }
 
-func (s *memStore) Retry(_ context.Context, id string, delay time.Duration, lastError string) (time.Time, error) {
+func (s *memStore) Retry(_ context.Context, id, token string, delay time.Duration, lastError string) (time.Time, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.calls.add("postgres:retry " + id)
 	if s.retryErr != nil {
 		return time.Time{}, s.retryErr
 	}
-	s.errors[id] = lastError
-	if s.status[id] == "processing" {
-		s.status[id] = "retrying"
+	if !s.owns(id, token, "retry") {
+		return time.Time{}, database.ErrLeaseLost
 	}
+	s.errors[id] = lastError
+	s.status[id] = "retrying"
+	delete(s.tokens, id)
 	return time.Now().Add(delay), nil
 }
 
-func (s *memStore) Bury(_ context.Context, id string, lastError string) error {
+func (s *memStore) Bury(_ context.Context, id, token, lastError string) error {
 	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.owns(id, token, "bury") {
+		return database.ErrLeaseLost
+	}
 	s.errors[id] = lastError
-	s.mu.Unlock()
-	s.setIf(id, "processing", "dead")
+	s.status[id] = "dead"
+	delete(s.tokens, id)
 	return nil
+}
+
+func (s *memStore) tokenOf(id string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.tokens[id]
+}
+
+func (s *memStore) refusedWrites() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Clone(s.refused)
+}
+
+func (s *memStore) renewCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.renewals
 }
 
 func (s *memStore) lastError(id string) string {
@@ -523,8 +619,8 @@ func TestStopLetsTheActiveJobFinish(t *testing.T) {
 	}
 }
 
-// A job still running when the drain timeout ends is cancelled, records
-// nothing, and keeps its ID in the processing list for the next start.
+// A job still running when the drain timeout ends is cancelled and records
+// nothing. Its lease then runs out and the reaper sends it elsewhere.
 func TestDrainTimeoutCancelsAndKeepsTheJob(t *testing.T) {
 	q, s := &memQueue{pending: []string{"slow"}}, newMemStore("slow")
 	inJob := make(chan struct{})
@@ -550,18 +646,162 @@ func TestDrainTimeoutCancelsAndKeepsTheJob(t *testing.T) {
 	}
 }
 
-// Startup recovery: a job a stopped process left 'processing' (in PostgreSQL
-// and in Redis's processing list) is reset, re-queued and run to the end.
-func TestStartupRecoveryRunsLeftoverJobs(t *testing.T) {
+// Startup cleanup: an ID a stopped worker took but never claimed (its job
+// is still queued) goes back to the queue and runs.
+func TestStartupRequeuesTakenButUnclaimedIDs(t *testing.T) {
 	q := &memQueue{processing: []string{"leftover"}}
-	s := newMemStore()
-	s.status["leftover"] = "processing"
+	s := newMemStore("leftover")
 	c := &counter{}
 	start(t, newPool(q, s, 2, c.handle))
 
-	eventually(t, "leftover completed after recovery", func() bool { return s.get("leftover") == "completed" })
+	eventually(t, "leftover completed after the cleanup", func() bool { return s.get("leftover") == "completed" })
 	if c.count("leftover") != 1 {
 		t.Errorf("leftover ran %d times, want 1", c.count("leftover"))
+	}
+}
+
+// Startup cleanup must never touch a job someone holds a lease on: another
+// process may be running it right now. Its stale list entry goes; the job
+// stays processing under the same lease, and this pool doesn't run it.
+func TestStartupLeavesOtherWorkersJobsAlone(t *testing.T) {
+	q := &memQueue{processing: []string{"theirs"}}
+	s := newMemStore("theirs")
+	if _, _, err := s.Claim(context.Background(), "theirs", time.Minute); err != nil { // another process's claim
+		t.Fatal(err)
+	}
+	theirToken := s.tokenOf("theirs")
+	c := &counter{}
+	start(t, newPool(q, s, 2, c.handle))
+
+	eventually(t, "the stale list entry removed", func() bool { _, processing := q.lists(); return len(processing) == 0 })
+	time.Sleep(20 * time.Millisecond) // give the pool every chance to run it
+	if c.count("theirs") != 0 {
+		t.Fatal("startup ran a job another worker holds a lease on")
+	}
+	if s.get("theirs") != "processing" || s.tokenOf("theirs") != theirToken {
+		t.Fatalf("startup changed another worker's job: %s under %q", s.get("theirs"), s.tokenOf("theirs"))
+	}
+	if pending, _ := q.lists(); len(pending) != 0 {
+		t.Errorf("pending = %v: another worker's job must not be queued again", pending)
+	}
+}
+
+// While a job runs, its lease is renewed and its deadline in Redis kept
+// up to date; once it finishes, the deadline is dropped.
+func TestHeartbeatRenewsTheLease(t *testing.T) {
+	q, s := &memQueue{pending: []string{"long"}}, newMemStore("long")
+	sawDeadline := make(chan time.Time, 1)
+	p := newPool(q, s, 1, func(ctx context.Context, _ Run) error {
+		time.Sleep(150 * time.Millisecond) // several heartbeats long, more than one lease
+		until, _ := q.leaseOf("long")
+		sawDeadline <- until
+		return nil
+	})
+	p.Lease, p.HeartbeatEvery = 60*time.Millisecond, 20*time.Millisecond
+	start(t, p)
+
+	eventually(t, "long completed", func() bool { return s.get("long") == "completed" })
+	if n := s.renewCount(); n < 4 {
+		t.Errorf("%d renewals during a 150ms job with a 20ms heartbeat, want at least 4", n)
+	}
+	if until := <-sawDeadline; time.Until(until) < -50*time.Millisecond {
+		t.Errorf("deadline in Redis was %v ago at the end of the job, want it kept fresh", -time.Until(until))
+	}
+	if _, ok := q.leaseOf("long"); ok {
+		t.Error("the deadline is still tracked after the job finished")
+	}
+	if refused := s.refusedWrites(); len(refused) != 0 {
+		t.Errorf("writes refused: %v", refused)
+	}
+}
+
+// A worker whose lease is gone (taken back and claimed elsewhere) hears it
+// at its next heartbeat: its handler is cancelled, and it records nothing
+// at all. The job stays the other worker's.
+func TestLostLeaseCancelsTheJobAndRecordsNothing(t *testing.T) {
+	q, s := &memQueue{pending: []string{"contested"}}, newMemStore("contested")
+	inJob := make(chan struct{})
+	cause := make(chan error, 1)
+	p := newPool(q, s, 1, func(ctx context.Context, _ Run) error {
+		close(inJob)
+		<-ctx.Done()
+		cause <- context.Cause(ctx)
+		return ctx.Err()
+	})
+	p.Lease, p.HeartbeatEvery = time.Minute, 10*time.Millisecond
+	start(t, p)
+
+	<-inJob
+	s.takeOver("contested")
+	select {
+	case got := <-cause:
+		if !errors.Is(got, errLeaseLost) {
+			t.Errorf("handler cancelled with %v, want errLeaseLost", got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the handler wasn't cancelled within 5s of losing its lease")
+	}
+	eventually(t, "the ID acknowledged", func() bool { _, processing := q.lists(); return len(processing) == 0 })
+	if s.get("contested") != "processing" || s.tokenOf("contested") != "another-workers-lease" {
+		t.Errorf("job is %s under %q: the stale worker changed it", s.get("contested"), s.tokenOf("contested"))
+	}
+	if refused := s.refusedWrites(); !slices.Equal(refused, []string{"renew contested"}) {
+		t.Errorf("refused writes %v, want only the heartbeat's renew: it must not try to record anything", refused)
+	}
+}
+
+// If the database can't be reached for a whole lease length, the worker
+// can't know whether its job was taken back, so it assumes so and stops.
+func TestUnrenewableLeaseCancelsTheJob(t *testing.T) {
+	q, s := &memQueue{pending: []string{"cut-off"}}, newMemStore("cut-off")
+	s.renewErr = errors.New("dial tcp: connection refused")
+	cancelled := make(chan time.Duration, 1)
+	p := newPool(q, s, 1, func(ctx context.Context, _ Run) error {
+		began := time.Now()
+		<-ctx.Done()
+		cancelled <- time.Since(began)
+		return ctx.Err()
+	})
+	p.Lease, p.HeartbeatEvery = 60*time.Millisecond, 10*time.Millisecond
+	start(t, p)
+
+	select {
+	case after := <-cancelled:
+		if after < 50*time.Millisecond {
+			t.Errorf("cancelled after %v, before a whole lease (60ms) of failed renewals", after)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the job wasn't cancelled within 5s of its lease running out unrenewed")
+	}
+	if got := s.get("cut-off"); got != "processing" {
+		t.Errorf("status %s, want processing: nothing may be recorded", got)
+	}
+}
+
+// The race with completion: the handler finishes just as the lease is
+// taken over, before any heartbeat notices. The write is refused; the
+// result is discarded, not retried, and the job stays the other worker's.
+func TestCompletionAfterTheLeaseWasTakenIsDiscarded(t *testing.T) {
+	q, s := &memQueue{pending: []string{"late"}}, newMemStore("late")
+	var observed []string
+	var mu sync.Mutex
+	p := newPool(q, s, 1, func(ctx context.Context, _ Run) error {
+		s.takeOver("late") // the reaper and another worker moved while we worked
+		return nil
+	})
+	p.Lease, p.HeartbeatEvery = time.Minute, time.Minute // no heartbeat before Complete
+	p.Observe = func(outcome string, _ time.Duration) { mu.Lock(); observed = append(observed, outcome); mu.Unlock() }
+	start(t, p)
+
+	eventually(t, "the refused completion", func() bool { return slices.Contains(s.refusedWrites(), "complete late") })
+	eventually(t, "the ID acknowledged", func() bool { _, processing := q.lists(); return len(processing) == 0 })
+	if s.get("late") != "processing" || s.tokenOf("late") != "another-workers-lease" {
+		t.Errorf("job is %s under %q, want the other worker's", s.get("late"), s.tokenOf("late"))
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(observed) != 0 {
+		t.Errorf("observed %v: a discarded result must not count", observed)
 	}
 }
 
@@ -572,8 +812,8 @@ func TestPoolNeedsAWorker(t *testing.T) {
 	}
 }
 
-// flakyQueue fails Recover until up is set, like a Redis that isn't
-// reachable yet when the process starts.
+// flakyQueue fails Taken (the startup cleanup's first call) until up is
+// set, like a Redis that isn't reachable yet when the process starts.
 type flakyQueue struct {
 	*memQueue
 	mu       sync.Mutex
@@ -581,15 +821,15 @@ type flakyQueue struct {
 	attempts int
 }
 
-func (q *flakyQueue) Recover(ctx context.Context) (int, error) {
+func (q *flakyQueue) Taken(ctx context.Context) ([]string, error) {
 	q.mu.Lock()
 	q.attempts++
 	up := q.up
 	q.mu.Unlock()
 	if !up {
-		return 0, errors.New("dial tcp: lookup red-abc123: no such host")
+		return nil, errors.New("dial tcp: lookup red-abc123: no such host")
 	}
-	return q.memQueue.Recover(ctx)
+	return q.memQueue.Taken(ctx)
 }
 
 func (q *flakyQueue) state() (attempts int, up bool) {
