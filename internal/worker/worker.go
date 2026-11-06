@@ -1,18 +1,21 @@
 // Package worker runs a pool of goroutines that take job IDs off the queue
-// and run the jobs.
+// and run the jobs. Several pools, in several processes, can share one
+// database and one Redis.
 //
 // Each job goes through the same steps, in an order that keeps it from being
 // lost or half-recorded:
 //
-//	Take     ID moves pending → processing (Redis)
-//	Claim    pending/queued → processing (PostgreSQL); only one caller can win
-//	Handle   the work itself
-//	Complete job becomes completed, or Fail → failed (PostgreSQL)
-//	Ack      ID leaves processing (Redis)
+//	Take      ID moves pending → processing list (Redis)
+//	Claim     the job becomes processing under a new lease (PostgreSQL);
+//	          only one caller can win
+//	Handle    the work itself, while a heartbeat renews the lease
+//	Complete  or Retry or Bury, only with the lease's token (PostgreSQL)
+//	Ack       ID leaves the processing list (Redis)
 //
-// A crash before Ack leaves the ID in Redis's processing list and the job
-// processing in PostgreSQL. The next start puts both back (see Pool.Run).
-// So a job may run twice, but it is never silently dropped.
+// A process that dies mid-job stops renewing its leases. Once they run out,
+// the lease reaper (package relay) takes the jobs back and they run again:
+// a job may run twice, but it is never silently dropped. A worker whose
+// lease ran out can't record anything any more (see database.WorkStore).
 package worker
 
 import (
@@ -24,6 +27,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/work-frame/goflow/internal/database"
 	"github.com/work-frame/goflow/internal/queue"
 )
 
@@ -38,27 +42,37 @@ const (
 	// cancelled. A handler that ignores its context can't hold the process
 	// open forever.
 	abandonWait = 5 * time.Second
+	// DefaultLease is how long a claim lasts without being renewed.
+	DefaultLease = 30 * time.Second
 )
 
 // Queue is what the pool needs from Redis. *queue.Queue satisfies it.
 type Queue interface {
 	Take(ctx context.Context, timeout time.Duration) (string, error)
 	Ack(ctx context.Context, jobID string) error
-	Recover(ctx context.Context) (int, error)
 	Schedule(ctx context.Context, jobID string, at time.Time) error
+	// Taken lists the processing list; Requeue moves one ID from it back
+	// to the queue.
+	Taken(ctx context.Context) ([]string, error)
+	Requeue(ctx context.Context, jobID string) error
+	// TrackLease and DropLease keep the lease reaper's list of deadlines.
+	TrackLease(ctx context.Context, jobID string, until time.Time) error
+	DropLease(ctx context.Context, jobID string) error
 }
 
-// Store is what the pool needs from PostgreSQL. *database.WorkStore satisfies it.
+// Store is what the pool needs from PostgreSQL. *database.WorkStore
+// satisfies it. Every write after Claim carries the lease token and fails
+// with database.ErrLeaseLost once the lease isn't the job's any more.
 type Store interface {
-	// Claim returns the attempt number (0: not won, don't run), the limit
-	// and the job's title.
-	Claim(ctx context.Context, id string) (attempt, maxAttempts int, title string, err error)
-	Complete(ctx context.Context, id string) error
+	Claim(ctx context.Context, id string, leaseFor time.Duration) (database.Claimed, bool, error)
+	Renew(ctx context.Context, id, token string, leaseFor time.Duration) (time.Time, error)
+	Complete(ctx context.Context, id, token string) error
 	// Retry records a retry due after delay and returns when it is due.
-	Retry(ctx context.Context, id string, delay time.Duration, lastError string) (time.Time, error)
+	Retry(ctx context.Context, id, token string, delay time.Duration, lastError string) (time.Time, error)
 	// Bury marks the job dead.
-	Bury(ctx context.Context, id string, lastError string) error
-	ResetProcessing(ctx context.Context) (int64, error)
+	Bury(ctx context.Context, id, token, lastError string) error
+	// Processing reports which of ids are processing (someone's lease).
+	Processing(ctx context.Context, ids []string) (map[string]bool, error)
 }
 
 // Run is one attempt at a job, as a Handler sees it.
@@ -102,6 +116,26 @@ type Pool struct {
 	// or "dead") and how long its handler ran, after the outcome is saved.
 	// The API uses it for metrics; cmd/worker has no metrics endpoint.
 	Observe func(outcome string, took time.Duration)
+	// Lease is how long a claim lasts unless renewed. Zero means
+	// DefaultLease (30 s).
+	Lease time.Duration
+	// HeartbeatEvery is how often a running job's lease is renewed. Zero
+	// means a third of Lease, so two renewals can fail before it runs out.
+	HeartbeatEvery time.Duration
+}
+
+func (p *Pool) lease() time.Duration {
+	if p.Lease > 0 {
+		return p.Lease
+	}
+	return DefaultLease
+}
+
+func (p *Pool) heartbeatEvery() time.Duration {
+	if p.HeartbeatEvery > 0 {
+		return p.HeartbeatEvery
+	}
+	return p.lease() / 3
 }
 
 // observe reports an attempt's outcome to Observe, if set.
@@ -111,26 +145,27 @@ func (p *Pool) observe(outcome string, took time.Duration) {
 	}
 }
 
-// Run recovers what a previous run left behind, starts the workers, and
-// blocks until ctx ends and the workers have stopped.
+// Run tidies what a stopped process left in the processing list, starts the
+// workers, and blocks until ctx ends and the workers have stopped.
 //
 // Shutdown has two separate signals:
 //
 //   - ctx (cancelled on SIGTERM) stops workers from TAKING new jobs.
 //   - Active jobs run under their own context, which ctx does not cancel.
-//     They get DrainTimeout to finish. Only after that is their context
-//     cancelled; they then record nothing and keep their ID in the processing
-//     list, so the next start runs them again.
+//     They get DrainTimeout to finish, and their leases are renewed
+//     meanwhile. Only after that is their context cancelled; they then
+//     record nothing, their leases run out, and the reaper sends them to
+//     another worker.
 //
 // Run returns an error only if it can't start.
 func (p *Pool) Run(ctx context.Context) error {
 	if p.Workers < 1 {
 		return fmt.Errorf("worker: pool needs at least 1 worker, got %d", p.Workers)
 	}
-	// No worker starts before recovery has succeeded: ResetProcessing must
-	// finish before anyone claims. If Redis or the database isn't reachable
-	// yet (a fresh deploy can start before its Key Value is ready), keep
-	// trying instead of giving up; jobs wait safely meanwhile.
+	// No worker starts before the cleanup has succeeded. If Redis or the
+	// database isn't reachable yet (a fresh deploy can start before its Key
+	// Value is ready), keep trying instead of giving up; jobs wait safely
+	// meanwhile.
 	wait := p.RetryWait
 	if wait <= 0 {
 		wait = time.Second
@@ -180,7 +215,7 @@ func (p *Pool) Run(ctx context.Context) error {
 	case <-time.After(p.DrainTimeout):
 	}
 
-	p.Logger.Warn("worker pool: drain timeout reached; cancelling unfinished jobs, they run again after restart")
+	p.Logger.Warn("worker pool: drain timeout reached; cancelling unfinished jobs, they run again once their leases run out")
 	cancelJobs()
 	select {
 	case <-done:
@@ -190,31 +225,45 @@ func (p *Pool) Run(ctx context.Context) error {
 	return nil
 }
 
-// recoverAtStartup resets what a stopped process left half-done, before any
-// worker claims anything:
+// recoverAtStartup tidies the processing list before any worker of this
+// pool takes anything. It never changes a job in PostgreSQL, so it can't
+// disturb a job another process is running, however many are running.
 //
-//  1. PostgreSQL: jobs still 'processing' go back to 'queued', so Claim can
-//     win them again.
-//  2. Redis: IDs left in the processing list go back to the front of the
-//     pending list, so a worker takes them first.
-//
-// SAFE ONLY WITH ONE WORKER PROCESS (one API instance). It assumes every
-// processing job belongs to a process that is no longer running. A second
-// process starting while the first works would reset jobs that are still
-// running, and they would run twice at the same time. Several processes need
-// leases instead (Phase 12).
+// An ID in the processing list was taken by some worker, here or in
+// another process. If its job is processing, someone holds its lease:
+// the entry goes (the lease decides what happens to that job, and the
+// reaper takes it back if its holder died). Otherwise the job was never
+// claimed (its worker died between Take and Claim) or is already
+// finished: the ID goes back to the queue. If a live worker had just taken
+// it and is about to claim it, the copy only makes a duplicate, which
+// Claim lets exactly one worker win.
 func (p *Pool) recoverAtStartup(ctx context.Context) error {
-	reset, err := p.Store.ResetProcessing(ctx)
+	ids, err := p.Queue.Taken(ctx)
 	if err != nil {
 		return err
 	}
-	requeued, err := p.Queue.Recover(ctx)
+	if len(ids) == 0 {
+		return nil
+	}
+	leased, err := p.Store.Processing(ctx, ids)
 	if err != nil {
 		return err
 	}
-	if reset > 0 || requeued > 0 {
-		p.Logger.Info("worker pool: recovered unfinished jobs", "jobs_reset", reset, "ids_requeued", requeued)
+	var dropped, requeued int
+	for _, id := range ids {
+		if leased[id] {
+			if err := p.Queue.Ack(ctx, id); err != nil {
+				return err
+			}
+			dropped++
+			continue
+		}
+		if err := p.Queue.Requeue(ctx, id); err != nil {
+			return err
+		}
+		requeued++
 	}
+	p.Logger.Info("worker pool: tidied the processing list", "leased_elsewhere", dropped, "ids_requeued", requeued)
 	return nil
 }
 
@@ -239,61 +288,154 @@ func (p *Pool) work(stop, jobsCtx context.Context, log *slog.Logger) {
 	}
 }
 
+// errLeaseLost is the cause a job's context is cancelled with when its
+// lease is gone.
+var errLeaseLost = errors.New("lease lost")
+
 // process runs one job. Errors are logged, never fatal: unless the outcome
-// was saved, the ID stays in the processing list for the next start.
+// was saved, the job is taken back once its lease runs out.
 func (p *Pool) process(ctx context.Context, log *slog.Logger, id string) {
-	attempt, maxAttempts, title, err := p.Store.Claim(ctx, id)
+	claimed, ok, err := p.Store.Claim(ctx, id, p.lease())
 	if err != nil {
 		log.Warn("worker: claim failed; the ID stays in processing", "err", err)
 		return
 	}
-	if attempt == 0 {
+	if !ok {
 		log.Info("worker: skipping, already taken, finished or deleted")
 		p.ack(ctx, log, id)
 		return
 	}
-	log = log.With("attempt", attempt, "max_attempts", maxAttempts)
+	log = log.With("attempt", claimed.Attempt, "max_attempts", claimed.MaxAttempts)
+	p.trackLease(ctx, log, id, claimed.LeaseExpires)
+
+	// The handler runs under runCtx. The heartbeat cancels it, with
+	// errLeaseLost as the cause, when the lease is gone.
+	runCtx, cancelRun := context.WithCancelCause(ctx)
+	defer cancelRun(nil)
+	stopBeat := make(chan struct{})
+	beatDone := make(chan struct{})
+	go func() {
+		defer close(beatDone)
+		p.heartbeat(ctx, log, id, claimed.LeaseToken, stopBeat, cancelRun)
+	}()
 
 	start := time.Now()
-	err = p.runHandler(ctx, Run{JobID: id, Title: title, Attempt: attempt}, log)
+	err = p.runHandler(runCtx, Run{JobID: id, Title: claimed.Title, Attempt: claimed.Attempt}, log)
 	took := time.Since(start)
+	close(stopBeat)
+	<-beatDone
+
+	if errors.Is(context.Cause(runCtx), errLeaseLost) {
+		// Another worker may be running the job now. Whatever this attempt
+		// did, it records nothing: that is the next holder's to do.
+		log.Warn("worker: lease lost; stopped the job and recorded nothing")
+		p.ack(ctx, log, id)
+		return
+	}
 	if ctx.Err() != nil {
-		// Only after the drain timeout. Record nothing: the job stays
-		// processing and its ID stays in the processing list.
-		log.Warn("worker: job cancelled at shutdown; it will run again after restart")
+		// Only after the drain timeout. Record nothing: the lease runs out
+		// and the reaper sends the job to another worker.
+		log.Warn("worker: job cancelled at shutdown; it runs again once its lease runs out")
 		return
 	}
 
 	saveCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
+	token := claimed.LeaseToken
 	switch {
 	case err == nil:
-		if err := p.Store.Complete(saveCtx, id); err != nil {
-			log.Warn("worker: couldn't record completion; the ID stays in processing", "err", err)
+		if err := p.Store.Complete(saveCtx, id, token); err != nil {
+			p.notRecorded(saveCtx, log, id, "completion", err)
 			return
 		}
 		log.Info("worker: job completed", "duration", took.Round(time.Millisecond))
 		p.observe("completed", took)
 
-	case IsPermanent(err) || attempt >= maxAttempts:
+	case IsPermanent(err) || claimed.Attempt >= claimed.MaxAttempts:
 		reason := "out of attempts"
 		if IsPermanent(err) {
 			reason = "permanent error"
 		}
-		if err := p.Store.Bury(saveCtx, id, err.Error()); err != nil {
-			log.Warn("worker: couldn't record the dead job; the ID stays in processing", "err", err)
+		if err := p.Store.Bury(saveCtx, id, token, err.Error()); err != nil {
+			p.notRecorded(saveCtx, log, id, "dead job", err)
 			return
 		}
 		log.Warn("worker: job dead", "reason", reason, "err", err)
 		p.observe("dead", took)
 
 	default:
-		if !p.retry(saveCtx, log, id, attempt, err) {
-			return // nothing recorded: keep the ID in processing
+		if !p.retry(saveCtx, log, id, token, claimed.Attempt, err) {
+			return
 		}
 		p.observe("retry", took)
 	}
+	p.dropLease(saveCtx, log, id)
 	p.ack(saveCtx, log, id)
+}
+
+// heartbeat renews the lease every HeartbeatEvery until stop is closed.
+// When the database says the lease is gone (ErrLeaseLost), or renewals have
+// failed for a whole lease length (this worker can't know whether the job
+// was taken back), it cancels the job with errLeaseLost and returns.
+func (p *Pool) heartbeat(ctx context.Context, log *slog.Logger, id, token string, stop <-chan struct{}, cancel context.CancelCauseFunc) {
+	every := p.heartbeatEvery()
+	t := time.NewTicker(every)
+	defer t.Stop()
+	lastRenewed := time.Now() // the claim; a monotonic reading, so clock jumps don't matter
+	for {
+		select {
+		case <-stop:
+			return
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		renewCtx, done := context.WithTimeout(ctx, every)
+		until, err := p.Store.Renew(renewCtx, id, token, p.lease())
+		done()
+		switch {
+		case err == nil:
+			lastRenewed = time.Now()
+			p.trackLease(ctx, log, id, until)
+		case errors.Is(err, database.ErrLeaseLost):
+			log.Warn("worker: lease lost; cancelling the job")
+			cancel(errLeaseLost)
+			return
+		case time.Since(lastRenewed) >= p.lease():
+			log.Warn("worker: can't renew the lease and it has run out; cancelling the job", "err", err)
+			cancel(errLeaseLost)
+			return
+		default:
+			log.Warn("worker: can't renew the lease; trying again", "err", err)
+		}
+	}
+}
+
+// notRecorded handles a failed write of the job's outcome. ErrLeaseLost
+// means another worker owns the job now: this result is discarded for good,
+// so the ID is acknowledged. Any other error leaves everything as it is:
+// the lease runs out and the job runs again.
+func (p *Pool) notRecorded(ctx context.Context, log *slog.Logger, id, what string, err error) {
+	if errors.Is(err, database.ErrLeaseLost) {
+		log.Warn("worker: lease lost before the "+what+" was recorded; discarded it", "err", err)
+		p.ack(ctx, log, id)
+		return
+	}
+	log.Warn("worker: couldn't record the "+what+"; the job runs again once its lease runs out", "err", err)
+}
+
+func (p *Pool) trackLease(ctx context.Context, log *slog.Logger, id string, until time.Time) {
+	if err := p.Queue.TrackLease(ctx, id, until); err != nil {
+		// PostgreSQL still has the lease; the reaper's hourly sweep finds it.
+		log.Warn("worker: couldn't record the lease deadline in Redis", "err", err)
+	}
+}
+
+func (p *Pool) dropLease(ctx context.Context, log *slog.Logger, id string) {
+	if err := p.Queue.DropLease(ctx, id); err != nil {
+		// Harmless: the reaper asks PostgreSQL, finds the job finished, and drops it.
+		log.Warn("worker: couldn't drop the lease deadline from Redis", "err", err)
+	}
 }
 
 // runHandler runs one attempt under the job timeout. Two different ends are
@@ -325,15 +467,15 @@ func (p *Pool) runHandler(ctx context.Context, run Run, log *slog.Logger) error 
 // 'retrying' with a due time in PostgreSQL, and the reconciler re-sends it
 // once overdue. The other order could leave a retry scheduled in Redis that
 // PostgreSQL never recorded. It reports whether the retry was recorded.
-func (p *Pool) retry(ctx context.Context, log *slog.Logger, id string, attempt int, jobErr error) bool {
+func (p *Pool) retry(ctx context.Context, log *slog.Logger, id, token string, attempt int, jobErr error) bool {
 	backoff := p.Backoff
 	if backoff == nil {
 		backoff = Backoff
 	}
 	delay := backoff(attempt)
-	due, err := p.Store.Retry(ctx, id, delay, jobErr.Error())
+	due, err := p.Store.Retry(ctx, id, token, delay, jobErr.Error())
 	if err != nil {
-		log.Warn("worker: couldn't record the retry; the ID stays in processing", "err", err)
+		p.notRecorded(ctx, log, id, "retry", err)
 		return false
 	}
 	if err := p.Queue.Schedule(ctx, id, due); err != nil {
@@ -345,7 +487,7 @@ func (p *Pool) retry(ctx context.Context, log *slog.Logger, id string, attempt i
 
 func (p *Pool) ack(ctx context.Context, log *slog.Logger, id string) {
 	if err := p.Queue.Ack(ctx, id); err != nil {
-		// Harmless: after a restart Recover puts it back and Claim skips it.
+		// Harmless: a later start requeues it and Claim skips it.
 		log.Warn("worker: ack failed; the ID may be seen again and skipped", "err", err)
 	}
 }

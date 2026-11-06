@@ -112,7 +112,7 @@ Almost all of the 0.6–0.8 s is distance: each CLI command opens a new TLS conn
 | Free Key Value has no persistence | A restart empties both lists; queued jobs lose their IDs | The reconciler re-sends jobs `queued` for over 10 minutes, at start and hourly |
 | Neon free: 100 compute-hours a month; can't stay awake for free | A query every few seconds would use the month up in about 2.5 weeks, then suspend the database | The relay never polls while healthy; the reconciler runs hourly. Watch Neon's usage page |
 | Free services can't set a shutdown delay | Render rejects `maxShutdownDelaySeconds` on the free plan, so the time between `SIGTERM` and `SIGKILL` is Render's to choose. The pool drains for 20 s; a job cut off sooner records nothing | The next start resets it and runs it again. Set the delay on a paid instance |
-| Workers inside the API | One API instance only (startup recovery resets `processing` jobs); jobs run on the API's tenth of a CPU | A paid background worker and leases (Phase 12) before more instances |
+| Workers inside the API | Jobs run on the API's tenth of a CPU, in one instance (the free plan has no background workers) | Leases (Task 48) make more instances or a paid background worker safe to add |
 | The live-delivery canary publishes every 2 seconds | About 43,000 Redis commands a day; outbound only, so it doesn't keep the instance awake | Render's Key Value docs mention no command quota. Lengthen the interval on a per-command plan |
 | Metrics aren't collected on Render, only read by hand | No history or alerts; counters restart with the instance | Prometheus and Grafana run locally (compose profile `monitoring`). A hosted collector when the instance is paid and always on anyway |
 
@@ -336,6 +336,13 @@ Result on 5 November 2026 (deploy `571d939`):
 The new instances started with the same settings as before (`starting addr=:10000 ... queue_enabled=true workers=2`, `listening addr=[::]:10000`), and the old one stopped cleanly (`worker pool stopped: every active job finished`), its dashboard stream reconnecting to the new one. Checks: login and the job list; `flaky:1` completed 2/3, `flaky:3` and `flaky:5` dead 3/3; `/metrics` `200`, `goflow_event_delivery_ok 1`, and status changes matching the three jobs exactly (pending 3, processing 8, retrying 5, completed 1, dead 2; 19 events published).
 
 Same race as Task 38: the commit's auto-deploy runs with the old settings while the Blueprint sync changes them. This time it cost one failed deploy and no downtime. A change to how the service is built or started deserves its own deploy: sync the Blueprint first, or pause auto-deploy while it lands.
+
+## Leases (Task 48)
+
+Migration 0010 adds `lease_token` and `lease_expires_at` and a constraint that ties them to `processing`. Two things to know when it reaches Render:
+
+- **Deploy while no job is running.** For a few seconds the old instance (no leases) keeps serving while the new one has already applied the migration. A job the old instance claims or finishes in that window breaks the new constraint, so its write fails. Nothing is lost: the job stays `processing` (or its ID stays in Redis), the new instance's lease sweep or startup tidy-up sends it again, and it runs once more. With the dashboard showing nothing `processing`, nothing happens at all.
+- **Checks after the deploy:** the startup log shows `migrations applied versions=[10]`; a `flaky:1` job still ends `completed 2/3`; `/metrics` still says `goflow_event_delivery_ok 1`. With one instance on the free plan there is nothing to take back, so the log should show no `lease reaper` lines.
 
 ## Rolling back
 

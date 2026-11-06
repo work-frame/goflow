@@ -22,7 +22,7 @@ func deadJob(t *testing.T, f *jobsFixture, title string) string {
 	if !claim(t, w, id) {
 		t.Fatal("Claim lost")
 	}
-	if err := w.Bury(ctx, id, "smtp: 550 mailbox unavailable"); err != nil {
+	if err := w.Bury(ctx, id, leaseOf(t, f, id), "smtp: 550 mailbox unavailable"); err != nil {
 		t.Fatal(err)
 	}
 	return id
@@ -57,9 +57,9 @@ func TestRerunGivesADeadJobFreshAttempts(t *testing.T) {
 	if len(sent) != 1 || sent[0] != id {
 		t.Fatalf("relay sent %v, want [%s]", sent, id)
 	}
-	attempt, _, _, err := NewWorkStore(f.db).Claim(ctx, id)
-	if err != nil || attempt != 1 {
-		t.Fatalf("Claim after rerun = attempt %d, %v; want 1", attempt, err)
+	c, _, err := NewWorkStore(f.db).Claim(ctx, id, testLease)
+	if err != nil || c.Attempt != 1 {
+		t.Fatalf("Claim after rerun = attempt %d, %v; want 1", c.Attempt, err)
 	}
 }
 
@@ -70,7 +70,7 @@ func TestRerunRefusesJobsThatArentDead(t *testing.T) {
 	ids := addJobs(t, f, "pending", "processing", "completed")
 	claim(t, w, ids[1])
 	claim(t, w, ids[2])
-	if err := w.Complete(ctx, ids[2]); err != nil {
+	if err := w.Complete(ctx, ids[2], leaseOf(t, f, ids[2])); err != nil {
 		t.Fatal(err)
 	}
 

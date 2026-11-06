@@ -642,6 +642,21 @@ Each case was reproduced on a real machine (Arch Linux, Go 1.27, PostgreSQL 17) 
   With the stack running, Prometheus's target page (`http://localhost:9090/targets`) shows `goflow-api` as down with a 401 error, and every Grafana panel says "No data".
 - **Why:** nothing else complains. Prometheus keeps running, Grafana keeps drawing empty graphs, and the API answers the wrong token with the same `401` it gives anyone. Empty graphs look like a quiet system. Two copies of one value drift apart; when a value must be in two files, a test that compares them is the cheapest guard.
 
+## 46. Only the current lease can finish a job
+
+- **Safeguard:** `Complete` changes a job only `WHERE lease_token = $token`: the token from the claim that is still the job's.
+- **Removed:** that condition, in `Complete` only. Any token was accepted while the job was `processing`.
+- **Caught by:** `TestAStaleHolderCanChangeNothing` (PostgreSQL) and `TestAFrozenWorkerCannotOverwriteItsReplacement` (two worker pools on real PostgreSQL and Redis).
+- **Observed:**
+  ```text
+  --- FAIL: TestAStaleHolderCanChangeNothing (0.17s)
+      lease_test.go:76: A's Complete = <nil>, want ErrLeaseLost
+      lease_test.go:80: after A's attempts: status completed, want processing (B's)
+  --- FAIL: TestAFrozenWorkerCannotOverwriteItsReplacement (6.40s)
+      leases_test.go:209: A's late Complete = <nil>, want ErrLeaseLost: a worker whose lease ran out finished the job B is running
+  ```
+- **Why:** worker A froze, its lease ran out, the reaper took the job back and worker B claimed it. When A woke up, the job was `processing` again, which is all the old check looked at. So A marked it `completed` while B was still working: users saw a finished job that was in fact still running, and B's own result (a failure, maybe) then had nowhere to go. A status says what is happening to a job; only the token says *whose* attempt it is. The other three fenced writes (`Renew`, `Retry`, `Bury`) kept their check, and the tests for them still passed: each write needs its own guard.
+
 ## Experiment: the naive dual write loses a job
 
 Not a removed safeguard but the design of Task 22, run live on 2 November 2026 to see the failure Task 23 fixes. `POST /api/v1/jobs` saved the job in PostgreSQL, then pushed its ID to Redis, with nothing tying the two together.

@@ -2,6 +2,7 @@ package database
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -73,13 +74,13 @@ func TestStoresAnnounceEveryStatusChange(t *testing.T) {
 
 	claim(t, work, id)
 	expectEvents(t, r, "Claim", "processing:"+id)
-	if _, err := work.Retry(ctx, id, time.Second, "boom"); err != nil {
+	if _, err := work.Retry(ctx, id, leaseOf(t, f, id), time.Second, "boom"); err != nil {
 		t.Fatal(err)
 	}
 	expectEvents(t, r, "Retry", "retrying:"+id)
 	claim(t, work, id)
 	expectEvents(t, r, "second Claim", "processing:"+id)
-	if err := work.Bury(ctx, id, "boom"); err != nil {
+	if err := work.Bury(ctx, id, leaseOf(t, f, id), "boom"); err != nil {
 		t.Fatal(err)
 	}
 	expectEvents(t, r, "Bury", "dead:"+id)
@@ -92,7 +93,7 @@ func TestStoresAnnounceEveryStatusChange(t *testing.T) {
 		t.Fatal(err)
 	}
 	claim(t, work, id)
-	if err := work.Complete(ctx, id); err != nil {
+	if err := work.Complete(ctx, id, leaseOf(t, f, id)); err != nil {
 		t.Fatal(err)
 	}
 	expectEvents(t, r, "Relay, Claim, Complete", "queued:"+id, "processing:"+id, "completed:"+id)
@@ -131,17 +132,22 @@ func TestNoAnnouncementWithoutAChange(t *testing.T) {
 	work := NewWorkStore(f.db).WithNotifier(r)
 	id := addJobs(t, f, "done")[0]
 	claim(t, work, id)
-	if err := work.Complete(ctx, id); err != nil {
+	token := leaseOf(t, f, id)
+	if err := work.Complete(ctx, id, token); err != nil {
 		t.Fatal(err)
 	}
 	r.take()
 
 	claim(t, work, id) // already completed: 0 rows
-	if err := work.Complete(ctx, id); err != nil {
-		t.Fatal(err)
+	// The lease ended with the job: every write with it is refused.
+	if err := work.Complete(ctx, id, token); !errors.Is(err, ErrLeaseLost) {
+		t.Errorf("second Complete = %v, want ErrLeaseLost", err)
 	}
-	if err := work.Bury(ctx, id, "x"); err != nil {
-		t.Fatal(err)
+	if err := work.Bury(ctx, id, token, "x"); !errors.Is(err, ErrLeaseLost) {
+		t.Errorf("Bury of a completed job = %v, want ErrLeaseLost", err)
+	}
+	if requeue, _, err := work.Reclaim(ctx, id); err != nil || requeue {
+		t.Errorf("Reclaim of a completed job = %v, %v; want nothing", requeue, err)
 	}
 	jobs.Rerun(ctx, f.alice, id) // not dead: refused
 	jobs.Rerun(ctx, f.bob, id)   // not bob's
@@ -152,19 +158,29 @@ func TestNoAnnouncementWithoutAChange(t *testing.T) {
 	expectEvents(t, r, "changes that changed nothing")
 }
 
-// A crashed process's jobs are announced as queued again at the next start.
-func TestResetProcessingAnnouncesEachJob(t *testing.T) {
+// Jobs taken back from an expired lease are announced as queued again;
+// renewing a lease announces nothing (the status didn't change).
+func TestReclaimAnnouncesEachJob(t *testing.T) {
 	f := newJobsFixture(t)
+	ctx := context.Background()
 	r := &recorder{}
 	work := NewWorkStore(f.db).WithNotifier(r)
 	ids := addJobs(t, f, "a", "b", "untouched")
-	claim(t, work, ids[0])
-	claim(t, work, ids[1])
+	for _, id := range ids[:2] {
+		if _, _, err := work.Claim(ctx, id, -time.Second); err != nil { // already run out
+			t.Fatal(err)
+		}
+	}
+	claim(t, work, ids[2])
 	r.take()
 
-	n, err := work.ResetProcessing(context.Background())
-	if err != nil || n != 2 {
-		t.Fatalf("ResetProcessing = %d, %v; want 2", n, err)
+	if _, err := work.Renew(ctx, ids[2], leaseOf(t, f, ids[2]), testLease); err != nil {
+		t.Fatal(err)
+	}
+	expectEvents(t, r, "Renew")
+	requeue, err := work.ReclaimExpired(ctx, 10)
+	if err != nil || len(requeue) != 2 {
+		t.Fatalf("ReclaimExpired = %v, %v; want the two expired jobs", requeue, err)
 	}
 	got := r.take()
 	if len(got) != 2 || !strings.HasPrefix(got[0], "queued:") || !strings.HasPrefix(got[1], "queued:") {
@@ -178,7 +194,7 @@ func TestStoresWithoutANotifier(t *testing.T) {
 	id := addJobs(t, f, "quiet")[0]
 	w := NewWorkStore(f.db)
 	claim(t, w, id)
-	if err := w.Complete(context.Background(), id); err != nil {
+	if err := w.Complete(context.Background(), id, leaseOf(t, f, id)); err != nil {
 		t.Fatal(err)
 	}
 }

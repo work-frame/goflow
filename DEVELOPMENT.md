@@ -151,9 +151,9 @@ In a third terminal, run the worker. It needs the same database and Redis as the
 go build -o bin/worker ./cmd/worker && GOFLOW_REDIS_URL='redis://127.0.0.1:6379/0' ./bin/worker
 ```
 
-`GOFLOW_WORKERS` sets how many jobs run at once (default 4, up to 32). Each job takes 5 seconds of placeholder work and ends `completed`. `Ctrl+C` stops taking new jobs and gives running ones 20 seconds to finish; a job still running after that is left for the next start, which logs `recovered unfinished jobs` and runs it again.
+`GOFLOW_WORKERS` sets how many jobs run at once (default 4, up to 32). Each job takes 5 seconds of placeholder work and ends `completed`. `Ctrl+C` stops taking new jobs and gives running ones 20 seconds to finish; a job still running after that records nothing, and once its 30-second lease runs out the lease reaper (in the API and in every worker process) sends it to run again.
 
-Run **one** worker process at a time. Its startup recovery resets every `processing` job, which would break jobs another worker process is still running.
+Run as many worker processes as you like, next to an API that runs workers too: each job is held under a lease, and a process's start never touches jobs another one is running.
 
 `goflow login` saves one API at a time. Logging in locally replaces a saved login to the hosted API, and the other way round.
 

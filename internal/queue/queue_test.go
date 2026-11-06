@@ -28,9 +28,10 @@ func openTestQueue(t *testing.T) *Queue {
 	q.key = "goflow:test:" + t.Name() + ":pending"
 	q.processing = "goflow:test:" + t.Name() + ":processing"
 	q.delayed = "goflow:test:" + t.Name() + ":delayed"
-	q.rdb.Del(context.Background(), q.key, q.processing, q.delayed)
+	q.leases = "goflow:test:" + t.Name() + ":leases"
+	q.rdb.Del(context.Background(), q.key, q.processing, q.delayed, q.leases)
 	t.Cleanup(func() {
-		q.rdb.Del(context.Background(), q.key, q.processing, q.delayed)
+		q.rdb.Del(context.Background(), q.key, q.processing, q.delayed, q.leases)
 		q.Close()
 	})
 	return q
@@ -152,32 +153,71 @@ func TestTakeWaitsThenReportsEmpty(t *testing.T) {
 	}
 }
 
-func TestRecoverPutsUnfinishedIDsFirst(t *testing.T) {
+// A worker took a and b and died before claiming them. Taken lists them;
+// Requeue puts one back where Take looks first, and only once, however
+// many processes clean up at the same time.
+func TestRequeueMovesATakenIDBackOnce(t *testing.T) {
 	q := openTestQueue(t)
 	ctx := context.Background()
 	if err := q.Enqueue(ctx, "a", "b", "c"); err != nil {
 		t.Fatal(err)
 	}
-	for range 2 { // a worker takes a and b, then dies without Ack
+	for range 2 {
 		if _, err := q.Take(ctx, time.Second); err != nil {
 			t.Fatal(err)
 		}
 	}
-
-	n, err := q.Recover(ctx)
-	if err != nil || n != 2 {
-		t.Fatalf("Recover = %d, %v; want 2, nil", n, err)
+	taken, err := q.Taken(ctx)
+	if err != nil || !slices.Equal(taken, []string{"b", "a"}) {
+		t.Fatalf("Taken = %v, %v; want [b a]", taken, err)
 	}
-	var order []string
-	for range 3 {
-		id, err := q.Take(ctx, time.Second)
-		if err != nil {
+
+	var wg sync.WaitGroup
+	for range 3 { // three processes starting at once
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := q.Requeue(ctx, "a"); err != nil {
+				t.Error(err)
+			}
+		}()
+	}
+	wg.Wait()
+	if id, err := q.Take(ctx, time.Second); err != nil || id != "a" {
+		t.Fatalf("next Take = %q, %v; want the requeued a first", id, err)
+	}
+	if n, _ := q.Len(ctx); n != 1 {
+		t.Errorf("%d IDs waiting, want 1 (c): a must be requeued once", n)
+	}
+}
+
+// Lease deadlines: tracked, moved, dropped, and listed once they pass by
+// the caller's clock.
+func TestLeaseDeadlines(t *testing.T) {
+	q := openTestQueue(t)
+	ctx := context.Background()
+	now := time.Now()
+	for id, until := range map[string]time.Time{"past": now.Add(-time.Minute), "soon": now.Add(-time.Second), "later": now.Add(time.Hour)} {
+		if err := q.TrackLease(ctx, id, until); err != nil {
 			t.Fatal(err)
 		}
-		order = append(order, id)
 	}
-	if want := []string{"a", "b", "c"}; !slices.Equal(order, want) {
-		t.Fatalf("order after Recover = %v, want %v", order, want)
+	got, err := q.ExpiredLeases(ctx, now, 10)
+	if err != nil || !slices.Equal(got, []string{"past", "soon"}) {
+		t.Fatalf("ExpiredLeases = %v, %v; want [past soon], earliest first", got, err)
+	}
+	if got, _ := q.ExpiredLeases(ctx, now, 1); !slices.Equal(got, []string{"past"}) {
+		t.Errorf("ExpiredLeases with limit 1 = %v, want [past]", got)
+	}
+	// Renewed: the new deadline replaces the old one.
+	if err := q.TrackLease(ctx, "soon", now.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.DropLease(ctx, "past"); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := q.ExpiredLeases(ctx, now, 10); len(got) != 0 {
+		t.Errorf("ExpiredLeases after renewing and dropping = %v, want none", got)
 	}
 }
 

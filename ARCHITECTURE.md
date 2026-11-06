@@ -101,6 +101,9 @@ jobs (
   last_error      TEXT                             -- up to 1000 characters; not shown to users yet
   idempotency_key TEXT                             -- 1 to 255 characters; NULL without the header
   version         BIGINT      NOT NULL DEFAULT 1   -- every UPDATE adds 1
+  lease_token     TEXT                             -- the worker holding a processing job (Task 48)
+  lease_expires_at TIMESTAMPTZ                     -- when that lease runs out, PostgreSQL's clock
+  CHECK (status = 'processing') = (lease_token IS NOT NULL AND lease_expires_at IS NOT NULL)
 )
 UNIQUE INDEX (user_id, idempotency_key) WHERE idempotency_key IS NOT NULL
 INDEX (user_id, created_at, id)  -- one user's jobs, oldest first, paginated
@@ -176,7 +179,7 @@ every API instance: SUBSCRIBE goflow:events ─► events.Hub ─► only the ow
                                                                 └─► data: {"type":"changed","job":{...}}
 ```
 
-- **PostgreSQL stays the truth; events are hints.** Stores call the `Notifier` only after `COMMIT`, with the row as committed (`RETURNING`), so a listener never hears about a change that was rolled back. Redis Pub/Sub delivers at most once and keeps nothing. A missed event costs a client a reload, never a job. Every status change goes through a store method (`Add`, `Rerun`, `Delete`, `Relay`, `Claim`, `Complete`, `Retry`, `Bury`, `ResetProcessing`), so none can be forgotten in a handler.
+- **PostgreSQL stays the truth; events are hints.** Stores call the `Notifier` only after `COMMIT`, with the row as committed (`RETURNING`), so a listener never hears about a change that was rolled back. Redis Pub/Sub delivers at most once and keeps nothing. A missed event costs a client a reload, never a job. Every status change goes through a store method (`Add`, `Rerun`, `Delete`, `Relay`, `Claim`, `Complete`, `Retry`, `Bury`, `Reclaim`, `ReclaimExpired`), so none can be forgotten in a handler.
 - **Publishing never slows the real work.** `events.Publisher` encodes the event, puts it in a buffer and returns. One goroutine sends to Redis, in order, with a 2-second limit per message. When Redis hangs, the buffer fills and new events are dropped and counted. A Redis outage can't delay a job's creation or a worker's result.
 - **Routing by owner, in the hub.** Every API instance subscribes once to one channel. The `Hub` hands each message only to the streams of the job's owner (`user_id` from the Redis envelope, which never reaches the client). This is the same rule as `WHERE user_id = $n` in SQL, applied to events (FAILURES.md, case 35).
 - **A slow client is dropped, not waited for.** Delivery never blocks. A stream more than 64 messages behind is closed; its client reconnects and reloads.
@@ -227,7 +230,7 @@ All errors are `{"error": "..."}`.
 
 1. Read every setting with `loadConfig` and report all problems at once (`errors.Join`): a missing or non-TLS remote `GOFLOW_DATABASE_URL`, a bcrypt cost outside 10–14, a `GOFLOW_REGISTRATION` other than `open` or `closed`. Errors never include the URL, which holds the password.
 2. Connect (5 s ping), run migrations. No port is opened if this fails.
-3. If `GOFLOW_REDIS_URL` is set, create the Redis client and start the relay and the reconciler, and, with `GOFLOW_WORKERS` above 0, the worker pool. An unreachable Redis is logged (`queue not reachable yet`), not fatal: jobs still go to the outbox, the relay retries with backoff, and the pool retries its startup recovery until Redis answers (`TestAPIStartsWhenRedisIsDown`). Without `GOFLOW_REDIS_URL`, log a warning: new jobs wait in the outbox. `cmd/worker` still exits if Redis is down at start: it has nothing else to do.
+3. If `GOFLOW_REDIS_URL` is set, create the Redis client and start the relay, the reconciler and the lease reaper, and, with `GOFLOW_WORKERS` above 0, the worker pool. An unreachable Redis is logged (`queue not reachable yet`), not fatal: jobs still go to the outbox, the relay retries with backoff, and the pool retries its startup recovery until Redis answers (`TestAPIStartsWhenRedisIsDown`). Without `GOFLOW_REDIS_URL`, log a warning: new jobs wait in the outbox. `cmd/worker` still exits if Redis is down at start: it has nothing else to do.
 4. Start the hourly expired-session cleanup, and build the dummy bcrypt hash used for unknown emails in the background.
 5. Bind the port (`GOFLOW_ADDR`, else `PORT`, else `:8080`), log `listening`, serve.
 6. On `SIGINT`/`SIGTERM`: stop accepting connections, finish in-flight requests (up to 10 s), stop the cleanup and the relay, then close Redis and the database pool.
@@ -259,22 +262,35 @@ relay (at start, when woken, and on a retry timer after a failure):
 
 ```text
 Take      BLMOVE goflow:jobs:pending → goflow:jobs:processing   (atomic; waits up to 2 s)
-Claim     UPDATE ... status = 'processing', attempts = attempts + 1
-            WHERE id = $1 AND status IN ('pending','queued','retrying') RETURNING attempts, max_attempts
+Claim     UPDATE ... status = 'processing', attempts = attempts + 1,
+                     lease_token = <new random token>, lease_expires_at = now() + 30 s
+            WHERE id = $1 AND status IN ('pending','queued','retrying') RETURNING ..., lease_expires_at
             0 rows (already processing, finished, dead or deleted) → skip, Ack
+          ZADD goflow:jobs:leases <expiry ms> <id>
 Handle    the work, under a 15 s deadline (worker.Demo: test behaviours picked by title)
-Outcome   success                          → status = 'completed'
+          every 10 s: UPDATE ... lease_expires_at = now() + 30 s WHERE id AND lease_token = <token>
+            0 rows → the lease is gone: cancel the handler, record nothing
+Outcome   (every UPDATE also WHERE lease_token = <token>, and ends the lease)
+          success                          → status = 'completed'
           Permanent(err), or last attempt  → status = 'dead', last_error
           any other error                  → status = 'retrying', next_attempt_at, last_error (COMMIT)
                                              then ZADD goflow:jobs:delayed <due ms> <id>
+          0 rows                           → the lease was lost: result discarded
+          ZREM goflow:jobs:leases
 Ack       LREM goflow:jobs:processing
 ```
 
 - **Exactly one claim wins, enforced by PostgreSQL.** When two workers claim the same job (a duplicate ID), the first `UPDATE` locks the row; the second waits for that commit, re-checks `status IN ('pending','queued','retrying')`, finds `processing` and changes 0 rows. This holds across processes, which a Go mutex can't. `TestClaimHasExactlyOneWinner` races two claims on real PostgreSQL 50 times.
-- **An ID is never only in memory.** `BLMOVE` moves it between lists in one step, and only `Ack`, after the outcome is saved, removes it.
-- **Shutdown has two signals.** `SIGTERM` cancels the pool's context, which stops workers from *taking* new jobs. Running jobs use a separate context (`context.WithoutCancel`) that `SIGTERM` doesn't reach; they get `DrainTimeout` (20 s) to finish, tracked with a `sync.WaitGroup`. Only after that are they cancelled: they record nothing, so the job stays `processing` and its ID stays in the `processing` list. An idle worker can delay shutdown by up to one `Take` (2 s): go-redis doesn't interrupt a blocking `BLMOVE` when its context is cancelled.
-- **Recovery happens at the next start, not at shutdown.** A host may `SIGKILL` the process after its grace period, and no code runs then. So before any worker starts, `Pool.Run` resets jobs still `processing` to `queued` (`ResetProcessing`) and moves IDs left in the `processing` list back to the front of `pending` (`Recover`).
-- **Single process only.** That startup recovery assumes every `processing` job belongs to a process that has stopped. **It is not safe with more than one worker process or API instance:** a second process starting would reset jobs the first is still running, and they would run twice at the same time. Running several processes needs leases (who holds a job, until when) so only expired claims are taken over (Phase 12). Goroutines inside one process are fine: they share one recovery, done before any of them start.
+- **An ID is never only in memory.** `BLMOVE` moves it between lists in one step, and only `Ack`, after the outcome is saved (or found to be someone else's to save), removes it.
+- **Shutdown has two signals.** `SIGTERM` cancels the pool's context, which stops workers from *taking* new jobs. Running jobs use a separate context (`context.WithoutCancel`) that `SIGTERM` doesn't reach; they get `DrainTimeout` (20 s) to finish, tracked with a `sync.WaitGroup`. Only after that are they cancelled: they record nothing, so the job stays `processing` until its lease runs out and the reaper sends it elsewhere. An idle worker can delay shutdown by up to one `Take` (2 s): go-redis doesn't interrupt a blocking `BLMOVE` when its context is cancelled.
+- **Leases make several processes safe (Task 48).** Before, every start reset all `processing` jobs to `queued`, which was only correct with one process: a second one starting reset jobs the first was still running, and they ran again (`TestSeveralProcessesRunEachJobOnce` saw attempt 3 on the old code). Now a `processing` job belongs to whoever holds its lease:
+  - **Every claim gets a fresh token** (`crypto/rand.Text`, 130 bits), and `lease_expires_at = now() + 30 s`, computed by PostgreSQL. A database constraint ties the two together: a `processing` job always has a lease, nothing else ever does.
+  - **The token fences every write.** `Renew`, `Complete`, `Retry` and `Bury` all say `WHERE lease_token = $token`; once the job has been taken back (and maybe claimed by another worker), the old holder's token matches nothing, and it gets `ErrLeaseLost`. A worker that loses its lease therefore can't overwrite what its replacement does, even in the worst case: its handler finishes and it calls `Complete` while the other worker is mid-job, the job still `processing` (FAILURES.md, case 46; `TestAFrozenWorkerCannotOverwriteItsReplacement`).
+  - **The heartbeat** renews the lease every 10 seconds. When the database says the lease is gone, or renewals have failed for a whole lease length (it can't know whether the job was taken back), the worker cancels its handler with `errLeaseLost` as the cause and records nothing.
+  - **PostgreSQL's clock decides expiry; Redis only says when to ask.** Every deadline is also kept in the sorted set `goflow:jobs:leases`. The lease reaper (`relay.LeaseReaper`, in the API and in every worker process) checks it every 5 seconds and asks PostgreSQL about each deadline that has passed. `Reclaim` takes the job back only `WHERE lease_expires_at < now()` there; if the lease was renewed, or the reaper's clock is fast, it answers with the real deadline instead. With no deadline passed, PostgreSQL isn't touched, so a sleeping free database stays asleep. At start and hourly the reaper also sweeps PostgreSQL directly (`ReclaimExpired`), for deadlines a Key Value restart lost.
+  - **One winner in every race.** The row lock serialises a late `Complete` against `Reclaim`, and a `Renew` against `Reclaim`: exactly one takes effect, never both, never neither (`TestCompleteAndReclaimRaceHasOneWinner`, `TestRenewAndReclaimRaceHasOneWinner`, 30 rounds each on real PostgreSQL). Until someone takes it back, an expired lease still counts: no other worker can have the job, so its holder may renew it or record its result.
+  - **A lost lease uses up the attempt,** like a crash. If it was the last one, the job becomes `dead` with `last_error` saying so, instead of going round forever.
+  - **Startup never touches a running job.** A starting pool only tidies the shared `processing` list: an ID whose job is `processing` belongs to someone's lease, so its stale entry is dropped; any other ID was taken but never claimed (or finished but not acknowledged), so it goes back to the queue (`Requeue`, a Lua script, so two processes starting together can't both push it). If a live worker in another process had just taken that ID, the copy is only a duplicate, and `Claim` lets one worker win.
 - **The worker doesn't migrate.** The API owns the schema.
 
 ### Retries
@@ -396,8 +412,8 @@ golang:1.27-trixie                         gcr.io/distroless/static-debian13:non
 | `internal/cli` | A fake API with 2 jobs per page, plus failure and deadline doubles |
 | `internal/client` | **Contract tests** against the real `api.NewRouter`, served by `httptest.NewServer` |
 | `internal/events` | The hub and the publisher with fakes for Redis: owner-only delivery, slow clients dropped, publishing that never blocks, tickets working once and stored as hashes, and delivery health with each half of the canary's path broken on its own |
-| `internal/database` | Real PostgreSQL. `TestMain` migrates one template database per run, and each test copies it |
-| `cmd/api` | End to end: the real server on `127.0.0.1:0`, including jobs surviving a restart, sign-up, sessions, settings validation, `/metrics` after a job's whole life, and live delivery pausing and resuming with Redis behind a TCP proxy the test can cut |
+| `internal/database` | Real PostgreSQL. `TestMain` migrates one template database per run, and each test copies it. Lease races (a late `Complete` or `Renew` against `Reclaim`) run 30 rounds each |
+| `cmd/api` | End to end: the real server on `127.0.0.1:0`, including jobs surviving a restart, sign-up, sessions, settings validation, `/metrics` after a job's whole life, live delivery pausing and resuming with Redis behind a TCP proxy the test can cut, three API instances with workers sharing one database and Redis, and two worker pools racing over one lease |
 
 Everything runs with the race detector (`./scripts/check.sh`). [FAILURES.md](FAILURES.md) records what each safeguard prevents.
 
@@ -413,6 +429,7 @@ Everything runs with the race detector (`./scripts/check.sh`). [FAILURES.md](FAI
 | Remote database only over TLS (`verify-full`); this machine and single-label private-network names excepted | Passwords, hashes and session hashes never cross the internet in plain text. A name without a dot (Compose's `postgres`) can't be resolved by public DNS, so the connection stays on a private network; Neon's host always needs TLS |
 | One image: two build stages, distroless static, non-root, static binaries | Only what runs is shipped; CA certificates for Neon included; no shell for an attacker; the same image locally and on Render (`runtime: docker`) |
 | Redis as the queue, next to PostgreSQL | Workers wait on `BLMOVE` instead of polling the database, which also lets a sleeping free database stay asleep. The cost: a second system to run and secure, and the dual-write problem, which the outbox exists to solve. PostgreSQL alone (`FOR UPDATE SKIP LOCKED`) would have avoided it; Redis was chosen to learn the queue patterns |
+| Leases with a token on every write; PostgreSQL's clock decides expiry, Redis only keeps deadlines to know when to ask | Several worker processes can share the work without resetting each other's jobs, and a worker whose lease ran out can't overwrite the next one's result. Asking PostgreSQL only for passed deadlines keeps a free database asleep |
 | Only job IDs travel through Redis | Nothing to serialize or keep in sync: the job lives in PostgreSQL, and a worker reads it by ID. Losing Redis's data loses no job, only "please run this" messages, which the outbox and `Recover` can resend |
 | At least once, never at most once | A job may run twice (a crash after the work, before `Complete`), but it is never silently dropped. Duplicates of finished jobs are skipped by `Claim`; handlers with outside effects (email, payments) must be idempotent, for example by passing the job ID as the provider's idempotency key |
 | Transactional outbox instead of writing to PostgreSQL and Redis in the request | Two systems can't share a transaction. Writing to both loses jobs when the second write fails ([FAILURES.md](FAILURES.md), the dual-write experiment) |
@@ -445,7 +462,8 @@ Everything runs with the race detector (`./scripts/check.sh`). [FAILURES.md](FAI
 ## Known limitations
 
 - The work itself is a placeholder (`worker.Demo` picks a behaviour from the title); real job types with their own payloads come later.
-- One worker process at a time (see [The worker pool](#the-worker-pool)); not safe with several. On Render the pool runs inside the single API instance. Leases for more instances come in Phase 12.
+- On Render the pool runs inside the single free API instance. Several processes are safe (leases, Task 48) but only run locally so far.
+- A worker frozen for longer than its lease (30 s) can still be *running* its handler while another worker runs the same job: fencing stops it from recording anything, not from working. Handlers with outside effects must be idempotent ([Handler contract](#handler-contract)).
 - Jobs reach Redis at least once, and a handler can run more than once. Handlers must follow the [handler contract](#handler-contract); nothing enforces it.
 - When Key Value loses its data, retries and queued jobs come back through the hourly reconciler: up to about 70 minutes late.
 - `last_error` is stored but not shown to users yet: `goflow job get` on a dead job doesn't say why it died.

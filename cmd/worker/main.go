@@ -5,8 +5,9 @@
 // pushes to. It doesn't run migrations: the API owns the schema, so start
 // the API (or run it once) before the worker.
 //
-// Run ONE worker process at a time: at startup it resets every job left
-// 'processing', which is only safe when no other worker process is running.
+// Any number of worker processes (and API instances with workers) can run
+// at once: each job is held under a lease, and a process only takes back
+// jobs whose lease has run out (see worker.Pool and database.WorkStore).
 package main
 
 import (
@@ -114,11 +115,16 @@ func run(ctx context.Context, logger *slog.Logger, dbURL, redisURL string, worke
 	// Due retries move from Redis's delayed set to the queue.
 	stopPromoter := relay.NewPromoter(q, logger, time.Second).Start(ctx)
 	defer stopPromoter()
+	// Jobs whose worker stopped renewing its lease go back to the queue.
+	// Every process runs a reaper; PostgreSQL lets one take each job back.
+	work := database.NewWorkStore(db).WithNotifier(pub)
+	stopReaper := relay.NewLeaseReaper(work, q, logger, 5*time.Second, time.Hour).Start(ctx)
+	defer stopReaper()
 
 	logger.Info("worker starting", "workers", workers, "simulated_work", simulatedWork, "drain_timeout", drainTimeout)
 	p := &worker.Pool{
 		Queue:        q,
-		Store:        database.NewWorkStore(db).WithNotifier(pub),
+		Store:        work,
 		Handle:       worker.Demo(simulatedWork),
 		JobTimeout:   jobTimeout,
 		Logger:       logger,
