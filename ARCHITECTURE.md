@@ -1,6 +1,6 @@
 # Architecture
 
-This describes GoFlow at the end of Phase 10. It changes as each phase lands.
+This describes GoFlow at the end of Phase 11. It changes as each phase lands.
 
 ## Overview
 
@@ -331,7 +331,7 @@ These are a contract, not something the pool enforces. Tests for each job type s
   Unknown and zero are different answers. A graph that drops to zero during an outage says "nothing waiting"; a gap says "we don't know", which is the truth.
 - **Behind a token.** `GOFLOW_METRICS_TOKEN` (at least 32 characters; Render generates one) is compared in constant time via SHA-256, so neither its content nor its length leaks through timing. Without a token the route doesn't exist. The numbers show how busy GoFlow is and how it fails: nobody else's business.
 - **Own registry.** Each `metrics.New()` has its own registry, not Prometheus's global one, so tests can start any number of servers.
-- **Collected locally (Task 46).** `docker compose --profile monitoring` adds Prometheus, which reads `/metrics` every 15 seconds with the development token, and Grafana with a provisioned **GoFlow overview** dashboard: requests and 5xx per route, 95th-percentile request and attempt times (`histogram_quantile` over the buckets), jobs finished per hour (`increase(...[1h])`, which handles counter resets), the queue, live delivery and rate limits. `TestDashboardQueriesKnownMetrics` fails if a panel asks for a metric `internal/metrics` doesn't define: in Grafana a typo only shows as "No data".
+- **Collected locally (Task 46).** `docker compose --profile monitoring` adds Prometheus, which reads `/metrics` every 15 seconds with the development token, and Grafana with a provisioned **GoFlow overview** dashboard: requests and 5xx per route, 95th-percentile request and attempt times (`histogram_quantile` over the buckets), jobs finished per hour (`increase(...[1h])`, which handles counter resets), the queue, live delivery and rate limits. `TestDashboardQueriesKnownMetrics` fails if a panel asks for a metric `internal/metrics` doesn't define: in Grafana a typo only shows as "No data". `increase()` and `rate()` estimate from samples 15 seconds apart and extrapolate to the window's edges, so "jobs finished in the last hour" can read 1.3: an estimate of the counter's growth, not 0.3 of a job. Over longer windows the error shrinks.
 - **Quieter logs.** Passing `/healthz` checks (Render, every 5 seconds: about 17,000 lines a day) aren't logged any more; a failing one still is.
 
 ## Rate limits: `internal/ratelimit`
@@ -459,6 +459,7 @@ Everything runs with the race detector (`./scripts/check.sh`). [FAILURES.md](FAI
 - **While Redis is down, limits are per process and reset on restart.** On Render's single free instance that means a restart (every 15 idle minutes) gives a fresh allowance until Redis is back.
 - After the bcrypt cost changes, response time can tell old accounts from unknown emails until each user logs in once.
 - A failed readiness check gives two log lines: the cause (`readiness check failed`, with the dependency) and the `503` request. Both carry the request ID. Kept as it is: merging them would need the request logger to know why a handler failed.
+- **The image tests read text.** `TestImageHoldsNoSettingsOrSecrets` catches `ARG` and `ENV GOFLOW_...`, and `.dockerignore` keeps everything but `go.mod`, `go.sum`, `cmd` and `internal` out of the build. It can't catch a secret under another name (`ENV DB_PASSWORD=...`), one written by a `RUN` step, or a secret file placed inside `cmd/` or `internal/`, which the allowlist lets in. Scanning the built image for secrets (and never keeping key files in the repo folder) would close that gap.
 - On Render, `/metrics` is read by hand (`curl` with the token), not collected; only the local stack has Prometheus. Counters start from zero at every restart, and a free instance restarts after 15 idle minutes, so they show "since this instance started", not history. A collector would keep the instance awake around the clock.
 - The CLI keeps one saved login at a time: logging in to another API replaces it.
 - Hosting is free tier: the first request after idle waits for the server and database to wake ([DEPLOYMENT.md](DEPLOYMENT.md)).
