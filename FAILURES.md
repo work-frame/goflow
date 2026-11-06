@@ -629,6 +629,19 @@ Each case was reproduced on a real machine (Arch Linux, Go 1.27, PostgreSQL 17) 
   Built locally with a made-up value (`--build-arg GOFLOW_METRICS_TOKEN=a-fake-token-for-case-44`), `docker inspect --format '{{json .Config.Env}}'` lists it among the image's settings, where anyone who can pull the image can read it.
 - **Why:** on Render this needs no `--build-arg`: Render passes every environment variable of the service to the build as a build argument. With these two lines, each deploy would copy the real metrics token into the image's configuration and history. Nothing would look wrong: the token would even work. An image is a file that gets copied, cached and shared; a secret in it is as good as published to everyone who ever gets a copy. Settings belong to the running container, not to the image.
 
+## 45. Prometheus sends the token the API expects
+
+- **Safeguard:** the development metrics token appears twice, in `compose.yaml` (the API's `GOFLOW_METRICS_TOKEN`) and in `monitoring/prometheus.yml` (what Prometheus sends), and a test keeps the two equal.
+- **Removed:** the agreement. The token was changed in `prometheus.yml` only, as happens when one of two copies is edited.
+- **Caught by:** `TestPrometheusUsesTheAPIsMetricsToken`, which reads both files.
+- **Observed:**
+  ```text
+  --- FAIL: TestPrometheusUsesTheAPIsMetricsToken (0.00s)
+      monitoring_test.go:61: Prometheus sends "local-development-metrics-token-renamed-here", the API expects "local-development-metrics-token-not-a-secret": every scrape would get 401
+  ```
+  With the stack running, Prometheus's target page (`http://localhost:9090/targets`) shows `goflow-api` as down with a 401 error, and every Grafana panel says "No data".
+- **Why:** nothing else complains. Prometheus keeps running, Grafana keeps drawing empty graphs, and the API answers the wrong token with the same `401` it gives anyone. Empty graphs look like a quiet system. Two copies of one value drift apart; when a value must be in two files, a test that compares them is the cheapest guard.
+
 ## Experiment: the naive dual write loses a job
 
 Not a removed safeguard but the design of Task 22, run live on 2 November 2026 to see the failure Task 23 fixes. `POST /api/v1/jobs` saved the job in PostgreSQL, then pushed its ID to Redis, with nothing tying the two together.
