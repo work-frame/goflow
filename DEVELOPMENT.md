@@ -48,6 +48,8 @@ docker compose up -d --build
 docker compose logs -f api   # Ctrl+C stops following, not the API
 ```
 
+Docker may warn that the legacy builder is deprecated: install the buildx plugin (`sudo pacman -S docker-buildx` on Arch) to build with BuildKit. The Dockerfile works with both.
+
 The API is then at `http://localhost:8080`, like one started with `go build`. Run one or the other: both want port 8080. `docker compose stop api` frees it; `docker compose down` stops the whole stack and keeps the volumes. Never add `-v` to `down`: it deletes the volumes, your development database with them.
 
 ### Watching it: Prometheus and Grafana
