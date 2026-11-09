@@ -735,6 +735,40 @@ Task 24, run live on 3 November 2026 with the API and one worker.
   1627a0c861d907904df6884e9f6d772e  completed  2026-11-03 00:03:20  crash for real
   ```
 - **Timing note:** two earlier attempts pressed Ctrl+C by hand after the job had already completed (5 s and 30 s too late), and one ran with the API stopped. The shell timed it reliably: `./bin/worker & W=$!`, then `sleep 2; kill -INT $W`.
+
+## Experiment: a worker killed with SIGKILL
+
+Task 49, run live on 9 November 2026 with the Compose stack: the API with two workers of its own, and three worker containers with two each, sharing one PostgreSQL and one Valkey. Steps in [DEVELOPMENT.md](DEVELOPMENT.md#crash-test-kill-a-worker-mid-job). The question: does a killed worker's job come back only after PostgreSQL says its lease ran out, and does nobody touch the jobs that are still running?
+
+- **The claims:** eight `sleep:12s` jobs, created at once and claimed within 60 ms, two per container and two by the API. The two that matter:
+  ```text
+  worker-3  | 13:43:35.316Z msg="worker: job claimed" worker=1 job_id=dab52c659a953c300af989cb53bd82be attempt=1 max_attempts=3 lease_expires=2026-11-09T13:44:05.314Z
+  worker-3  | 13:43:35.328Z msg="worker: job claimed" worker=0 job_id=c2c5efed09a34eb17e653e11251a5639 attempt=1 max_attempts=3 lease_expires=2026-11-09T13:44:05.325Z
+  ```
+- **The kill:** `docker kill goflow-worker-3` (SIGKILL) about 3 s into both jobs. No drain, no last write.
+- **The wait,** sampled from PostgreSQL every 2 s (time, job, status, attempts, deadline, seconds left; a selection):
+  ```text
+  13:43:44 dab52c65 processing 1 13:44:05.314 21
+  13:43:47 1e964f7d processing 1 13:44:15.292 28
+  13:43:47 dab52c65 processing 1 13:44:05.314 18
+  13:44:04 c2c5efed processing 1 13:44:05.325 1
+  13:44:04 dab52c65 processing 1 13:44:05.314 1
+  13:44:06 c2c5efed processing 2 13:44:35.894 29
+  13:44:06 dab52c65 processing 2 13:44:35.889 29
+  ```
+  At 13:43:47 the heartbeat moved the deadlines of the six jobs on live workers (`1e964f7d` among them) to 13:44:15; they finished on attempt 1 by 13:43:49. The killed worker's two kept 13:44:05, because no process was left to renew them, and were still on attempt 1 with 1 s left.
+- **The recovery:**
+  ```text
+  api-1     | 13:44:05.887Z msg="lease reaper: lease ran out; job sent to run again" job_id=dab52c659a953c300af989cb53bd82be
+  api-1     | 13:44:05.891Z msg="lease reaper: lease ran out; job sent to run again" job_id=c2c5efed09a34eb17e653e11251a5639
+  worker-1  | 13:44:05.893Z msg="worker: job claimed" worker=1 job_id=dab52c659a953c300af989cb53bd82be attempt=2 max_attempts=3 lease_expires=2026-11-09T13:44:35.889Z
+  api-1     | 13:44:05.896Z msg="worker: job claimed" worker=0 job_id=c2c5efed09a34eb17e653e11251a5639 attempt=2 max_attempts=3 lease_expires=2026-11-09T13:44:35.894Z
+  worker-1  | 13:44:17.898Z msg="worker: job completed" worker=1 job_id=dab52c659a953c300af989cb53bd82be attempt=2 max_attempts=3 duration=12.001s
+  api-1     | 13:44:17.901Z msg="worker: job completed" worker=0 job_id=c2c5efed09a34eb17e653e11251a5639 attempt=2 max_attempts=3 duration=12s
+  ```
+  Taken back 0.57 s after PostgreSQL's deadline, never before it, and run as attempt 2 by `worker-1` and the API. Final count: six jobs completed on attempt 1, two on attempt 2. `docker compose up -d` then started `worker-3` again.
+- **What it shows, and what it doesn't:** the lease decided when the jobs came back, and the token decided whose result counted. But `worker-3` had already done 3 s of each job before it died, and attempt 2 did all 12 s again. With a job that sends an email, that would be two emails. Fencing protects the record, not the world outside: side effects need their own idempotency key ([Handler contract](ARCHITECTURE.md#handler-contract)).
+- **Compared with Task 24:** then, one worker and a SIGINT; the job came back when that same worker restarted, by resetting every `processing` job, which was only safe with one process. Now another process picks the job up, and a restart touches nobody else's work.
 ---
 
 ## What tests did not catch

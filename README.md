@@ -17,7 +17,8 @@ I'm building it to learn production Go: the standard library first, then HTTP, P
 - **Phase 9 (done):** rate limits. Login is limited per email and per client address, password changes and stream tickets per account, with counters in Redis (in memory while Redis is down). On Render the client address comes from Cloudflare's `CF-Connecting-IP`, chosen by experiment ([DEPLOYMENT.md](DEPLOYMENT.md#finding-the-real-client-ip-task-37)).
 - **Phase 10 (done):** observability. `GET /metrics` serves Prometheus metrics behind a token: requests by route pattern, jobs (status changes, attempt durations by outcome), the queue's sizes in Redis, live events, rate limits, and Go's own. They're read by hand for now, because a collector polling the free instance would keep it awake. The API also checks its own live-update path with a canary every 2 seconds: open streams and the dashboard's dot say `paused` within 10 seconds when job events stop reaching it, and `resumed` when they flow again. Passing health checks are no longer logged.
 - **Phase 11 (done):** Docker. One image, built in two stages into a distroless static base and run as a non-root user, and a Compose stack (PostgreSQL, Valkey and the API) for development. Render builds and runs the same image (`runtime: docker` in `render.yaml`). An opt-in Compose profile adds Prometheus and Grafana with a GoFlow dashboard, for watching the metrics over time on your own machine.
-- **Phase 12 (in progress):** distributed workers. A claimed job is held under a lease (a token valid for 30 s on PostgreSQL's clock, renewed every 10 s while the job runs), and only the current token can record a result. A reaper takes back jobs whose lease ran out. Any number of worker processes can share one database and one Redis; the Compose stack runs three worker containers from the API's image, and a SIGKILL test shows a killed worker's jobs coming back on another worker only after their leases run out ([DEVELOPMENT.md](DEVELOPMENT.md#crash-test-kill-a-worker-mid-job)).
+- **Phase 12 (done):** distributed workers. A claimed job is held under a lease (a token valid for 30 s on PostgreSQL's clock, renewed every 10 s while the job runs), and only the current token can record a result. A reaper takes back jobs whose lease ran out. Any number of worker processes can share one database and one Redis; the Compose stack runs three worker containers from the API's image, and a SIGKILL test shows a killed worker's jobs coming back on another worker only after their leases run out ([DEVELOPMENT.md](DEVELOPMENT.md#crash-test-kill-a-worker-mid-job)). `./scripts/check.sh` refuses to run unless the PostgreSQL and Redis tests can run too, because a skipped test prints `ok`.
+- **Phase 13 (next):** integration and load testing: tests that run in parallel, the slow session tests, and measuring how many jobs per second the workers really take.
 
 ## Requirements
 
@@ -300,7 +301,7 @@ render.yaml            Render deployment (see DEPLOYMENT.md)
 9. Rate limiting (done)
 10. Metrics and live-update health (done: Prometheus metrics behind a token, read by hand; the dashboard says `paused` when events stop flowing, not just when its connection drops ([how](ARCHITECTURE.md#delivery-health)))
 11. Docker (done: one distroless image locally and on Render, a Compose stack, and opt-in Prometheus and Grafana)
-12. Distributed workers
+12. Distributed workers (done: leases on PostgreSQL's clock, fenced results, three worker containers locally, and a SIGKILL test)
 13. Integration and load testing
 14. CI/CD
 
