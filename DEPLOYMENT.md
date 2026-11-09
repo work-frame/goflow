@@ -344,6 +344,18 @@ Migration 0010 adds `lease_token` and `lease_expires_at` and a constraint that t
 - **Deploy while no job is running.** For a few seconds the old instance (no leases) keeps serving while the new one has already applied the migration. A job the old instance claims or finishes in that window breaks the new constraint, so its write fails. Nothing is lost: the job stays `processing` (or its ID stays in Redis), the new instance's lease sweep or startup tidy-up sends it again, and it runs once more. With the dashboard showing nothing `processing`, nothing happens at all.
 - **Checks after the deploy:** the startup log shows `migrations applied versions=[10]`; a `flaky:1` job still ends `completed 2/3`; `/metrics` still says `goflow_event_delivery_ok 1`. With one instance on the free plan there is nothing to take back, so the log should show no `lease reaper` lines.
 
+Result on 6 November 2026 (deploy `3e5d521`):
+
+| Check | What happened |
+|---|---|
+| Deploy | One auto-deploy, 1 min 12 s, no failed deploy. Nothing was `processing` while it ran |
+| Migration | `migrations applied versions=[10]` at 15:14:52 UTC |
+| A `flaky:1` job | `a3267d7f…`: `retrying`, then `completed 2/3`, the same as before leases |
+| `/metrics` | `goflow_event_delivery_ok 1` |
+| Local Compose stack | Rebuilt from the same commit; its API applied migration 10 at 15:24:00 UTC on the development database |
+
+Render still runs one instance, with the API's own two workers: a separate worker service isn't on the free plan. Several processes sharing the work is tested locally instead, with the Compose stack's three worker containers (Task 49, [DEVELOPMENT.md](DEVELOPMENT.md#crash-test-kill-a-worker-mid-job)).
+
 ## Rolling back
 
 Render keeps previous deploys. In the dashboard: `goflow-api` → **Deploys** → pick the last good one → **Rollback**. A rollback doesn't undo migrations, so a migration must keep working with the code before it (add columns before using them, drop them a release later).

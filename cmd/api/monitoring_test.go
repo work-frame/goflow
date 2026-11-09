@@ -31,7 +31,7 @@ func service(t *testing.T, compose, name string) string {
 }
 
 // Prometheus and Grafana start only when asked for: a plain
-// "docker compose up" stays PostgreSQL, Valkey and the API.
+// "docker compose up" stays PostgreSQL, Valkey, the API and the workers.
 func TestMonitoringIsOptIn(t *testing.T) {
 	compose := readRepoFile(t, "compose.yaml")
 	for _, name := range []string{"prometheus", "grafana"} {
@@ -39,7 +39,7 @@ func TestMonitoringIsOptIn(t *testing.T) {
 			t.Errorf(`compose.yaml: %s has no profiles: ["monitoring"], so it would start with every docker compose up`, name)
 		}
 	}
-	for _, name := range []string{"postgres", "valkey", "api"} {
+	for _, name := range []string{"postgres", "valkey", "api", "worker"} {
 		if strings.Contains(service(t, compose, name), "profiles:") {
 			t.Errorf("compose.yaml: %s has a profile, so a plain docker compose up would skip it", name)
 		}

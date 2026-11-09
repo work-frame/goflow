@@ -17,7 +17,7 @@ I'm building it to learn production Go: the standard library first, then HTTP, P
 - **Phase 9 (done):** rate limits. Login is limited per email and per client address, password changes and stream tickets per account, with counters in Redis (in memory while Redis is down). On Render the client address comes from Cloudflare's `CF-Connecting-IP`, chosen by experiment ([DEPLOYMENT.md](DEPLOYMENT.md#finding-the-real-client-ip-task-37)).
 - **Phase 10 (done):** observability. `GET /metrics` serves Prometheus metrics behind a token: requests by route pattern, jobs (status changes, attempt durations by outcome), the queue's sizes in Redis, live events, rate limits, and Go's own. They're read by hand for now, because a collector polling the free instance would keep it awake. The API also checks its own live-update path with a canary every 2 seconds: open streams and the dashboard's dot say `paused` within 10 seconds when job events stop reaching it, and `resumed` when they flow again. Passing health checks are no longer logged.
 - **Phase 11 (done):** Docker. One image, built in two stages into a distroless static base and run as a non-root user, and a Compose stack (PostgreSQL, Valkey and the API) for development. Render builds and runs the same image (`runtime: docker` in `render.yaml`). An opt-in Compose profile adds Prometheus and Grafana with a GoFlow dashboard, for watching the metrics over time on your own machine.
-- **Phase 12 (in progress):** distributed workers. A claimed job is held under a lease (a token valid for 30 s on PostgreSQL's clock, renewed every 10 s while the job runs), and only the current token can record a result. A reaper takes back jobs whose lease ran out. Any number of worker processes can share one database and one Redis.
+- **Phase 12 (in progress):** distributed workers. A claimed job is held under a lease (a token valid for 30 s on PostgreSQL's clock, renewed every 10 s while the job runs), and only the current token can record a result. A reaper takes back jobs whose lease ran out. Any number of worker processes can share one database and one Redis; the Compose stack runs three worker containers from the API's image, and a SIGKILL test shows a killed worker's jobs coming back on another worker only after their leases run out ([DEVELOPMENT.md](DEVELOPMENT.md#crash-test-kill-a-worker-mid-job)).
 
 ## Requirements
 
@@ -256,7 +256,7 @@ Run every check before committing:
 ./scripts/check.sh
 ```
 
-It runs `gofmt`, `go vet` and `go test -race`, and stops at the first failure.
+It runs `gofmt`, `go vet` and `go test -race`, and stops at the first failure. It needs `GOFLOW_TEST_DATABASE_URL` and `GOFLOW_TEST_REDIS_URL`, and refuses to run without them, because the tests that use PostgreSQL and Redis would skip and still print `ok` ([DEVELOPMENT.md](DEVELOPMENT.md#checks)).
 
 ## Project layout
 
@@ -282,7 +282,7 @@ cmd/worker/            worker entry point
 scripts/               development scripts, and the SQL compose's PostgreSQL runs once
 Dockerfile             the container image: build stage, then distroless static
 .dockerignore          what the image build may see (an allowlist)
-compose.yaml           the development stack: PostgreSQL, Valkey, the API
+compose.yaml           the development stack: PostgreSQL, Valkey, the API, three workers
 monitoring/            Prometheus and Grafana settings and the GoFlow dashboard (compose profile monitoring)
 render.yaml            Render deployment (see DEPLOYMENT.md)
 ```

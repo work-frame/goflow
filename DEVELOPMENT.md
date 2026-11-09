@@ -41,12 +41,14 @@ docker compose up -d --wait postgres valkey
 
 Compose then warns that the volumes "already exist but were not created by Docker Compose": expected, and the data is kept. The stopped containers do nothing; don't start them again while the stack runs. `docker rm goflow-postgres goflow-redis` deletes the two containers when you're sure, never the volumes.
 
-Everything at once, with the API built from the [Dockerfile](Dockerfile), two workers and registration open:
+Everything at once: the API built from the [Dockerfile](Dockerfile) with two workers of its own and registration open, and three worker containers from the same image (`goflow-worker-1` to `-3`, two workers each):
 
 ```bash
 docker compose up -d --build
-docker compose logs -f api   # Ctrl+C stops following, not the API
+docker compose logs -f api worker   # Ctrl+C stops following, not the stack
 ```
+
+`docker compose up -d --scale worker=5` runs five worker containers instead, until the next plain `up`. All of them share one PostgreSQL and one Valkey, and each job is held under a lease, so a job runs on one worker at a time. A `bin/worker` started on the host joins them too: stop the containers first (`docker compose stop worker`) if you want it to get the jobs.
 
 Docker may warn that the legacy builder is deprecated: install the buildx plugin (`sudo pacman -S docker-buildx` on Arch) to build with BuildKit. The Dockerfile works with both.
 
@@ -67,6 +69,49 @@ docker compose --profile monitoring up -d --build
 
 Compose gives the API a development metrics token, and [monitoring/prometheus.yml](monitoring/prometheus.yml) sends the same one (`TestPrometheusUsesTheAPIsMetricsToken` keeps them equal). The dashboard is a file, [monitoring/grafana/dashboards/goflow.json](monitoring/grafana/dashboards/goflow.json): change it there, not in the browser, where changes aren't saved. Create a few jobs (`flaky:1`, `flaky:3`, `sleep:5s`) in the dashboard at `http://localhost:8080` and the graphs fill in within a minute. `docker compose stop prometheus grafana` stops just the two; Prometheus keeps its numbers in the `promdata` volume.
 
+### Crash test: kill a worker mid-job
+
+What happens when a worker process dies without warning, the way it does when the machine loses power or the kernel kills it for memory. `docker kill` sends SIGKILL: the process stops at once, with no drain, no last write and no message to anyone. It stops that one container and deletes nothing; `docker compose up -d` starts it again.
+
+The rule under test: the job comes back only after PostgreSQL says its lease ran out, on another worker, as attempt 2. Every other job keeps running and finishes on attempt 1.
+
+1. Start the stack and log in to the local API with your development account (`goflow login` saves one API at a time):
+
+   ```bash
+   docker compose up -d --build
+   ./bin/goflow login
+   ```
+
+2. Create eight 12-second jobs, one for each worker slot (three containers with two each, plus the API's two). 12 s stays under the 15-second attempt limit:
+
+   ```bash
+   for i in 1 2 3 4 5 6 7 8; do ./bin/goflow job create sleep:12s; done
+   docker compose logs worker | grep 'job claimed'
+   ```
+
+   Each line starts with the container that claimed the job, for example `worker-2  | ... msg="worker: job claimed" ... job_id=e448d133... attempt=1`. Pick a container that has at least one.
+
+3. Kill it, within 12 s of step 2 (before its jobs finish), then watch the jobs. Replace `2` with the container you picked:
+
+   ```bash
+   docker kill goflow-worker-2
+   for i in $(seq 25); do docker compose exec -T postgres psql -U goflow -tAF' ' -c "SELECT to_char(now(),'HH24:MI:SS'), left(id,8), status, attempts, to_char(lease_expires_at,'HH24:MI:SS.MS'), round(extract(epoch FROM lease_expires_at - now())) FROM jobs WHERE title = 'sleep:12s' AND created_at > now() - interval '5 minutes' AND status <> 'completed' ORDER BY id"; echo; sleep 2; done
+   ```
+
+   The columns are PostgreSQL's time, the job, its status, attempts, lease deadline and seconds left. The jobs of the other workers finish and drop out of the list. The killed worker's jobs stay `processing`, attempt 1, with a deadline that no longer moves (nobody renews it) and seconds left counting down to 0 and below. Only then, within the reaper's 5-second check, they turn into attempt 2 with a fresh 30-second deadline, and finish 12 s later.
+
+4. Check who took them back, and when:
+
+   ```bash
+   docker compose logs api worker | grep -E 'lease ran out|attempt=2'
+   docker compose exec -T postgres psql -U goflow -c "SELECT attempts, count(*) FROM jobs WHERE title = 'sleep:12s' AND created_at > now() - interval '10 minutes' GROUP BY attempts ORDER BY attempts"
+   ```
+
+   `lease reaper: lease ran out; job sent to run again` must be later than the deadline step 3 showed, and the `attempt=2` claims come from a container other than the one you killed. The count is the killed container's jobs on attempt 2 and every other job on attempt 1. A job on attempt 2 from any other container, or a reaper line before the deadline, is a bug.
+
+5. Start the killed container again: `docker compose up -d`. Its startup tidies the processing list and leaves the other workers' jobs alone.
+
+Expect the wait to be 20 to 30 s after the kill. A lease lasts 30 s from its last renewal (or the claim), and renewals come every 10 s, so the last one was at most 10 s before the kill. However short or long it is, the job waits for its own deadline.
 
 ### Environment
 
@@ -85,9 +130,10 @@ export GOFLOW_TEST_REDIS_URL='redis://127.0.0.1:6379/1'
 | `GOFLOW_REGISTRATION` | API; `open` or `closed` | `closed` |
 | `PORT` | API, when `GOFLOW_ADDR` is unset (hosting platforms) | none |
 | `GOFLOW_REDIS_URL` | API; optional, remote hosts need `rediss://` | none (queue off) |
-| `GOFLOW_TEST_REDIS_URL` | tests; Redis tests skip without it | none |
+| `GOFLOW_TEST_REDIS_URL` | tests; Redis tests skip without it, and `check.sh` refuses to run | none |
 | `GOFLOW_WORKERS` | worker: jobs that run at once, 1 to 32 (default 4). API: workers it runs itself, 0 to 32 (default 0; needs `GOFLOW_REDIS_URL`) | see left |
-| `GOFLOW_TEST_DATABASE_URL` | tests; database tests skip without it | none |
+| `GOFLOW_TEST_DATABASE_URL` | tests; database tests skip without it, and `check.sh` refuses to run | none |
+| `GOFLOW_QUICK_CHECK` | `check.sh`; `1` runs without the two test URLs and says it was a quick check | none |
 | `GOFLOW_API_URL` | CLI | `http://localhost:8080` |
 | `GOFLOW_TOKEN` | CLI; overrides the saved login from `goflow login` (scripts, CI) | none |
 
@@ -113,6 +159,14 @@ Branch prefixes: `feat/`, `fix/`, `test/`, `docs/`, `chore/`. Commit messages fo
 ## Checks
 
 `./scripts/check.sh` runs `gofmt`, `go vet` and `go test -race -count=1 ./...`, stopping at the first failure and naming it.
+
+It refuses to start unless `GOFLOW_TEST_DATABASE_URL` and `GOFLOW_TEST_REDIS_URL` are both set. A test that needs PostgreSQL or Redis skips itself without its URL, and `go test` prints `ok` for a package whose tests skipped, so a check without them looks like a pass and tests far less. That happened: the Redis tests skipped on the development laptop from Phase 5 to Task 48 ([FAILURES.md](FAILURES.md#environment-incidents)). For a quick check without the services, ask for it by name:
+
+```bash
+GOFLOW_QUICK_CHECK=1 ./scripts/check.sh   # ends with QUICK CHECK PASSED, never ALL CHECKS PASSED
+```
+
+Only `ALL CHECKS PASSED` counts before a commit.
 
 ## Tests
 
