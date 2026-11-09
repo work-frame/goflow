@@ -356,6 +356,21 @@ Result on 6 November 2026 (deploy `3e5d521`):
 
 Render still runs one instance, with the API's own two workers: a separate worker service isn't on the free plan. Several processes sharing the work is tested locally instead, with the Compose stack's three worker containers (Task 49, [DEVELOPMENT.md](DEVELOPMENT.md#crash-test-kill-a-worker-mid-job)).
 
+## Worker containers (Task 49)
+
+Nothing changes on Render: the worker containers are part of the local Compose stack only. The one change the hosted API runs is a new log line, `worker: job claimed`, with the attempt and the lease deadline, so the log shows which process holds which job.
+
+- **Check after the deploy:** create a `sleep:2s` job in the dashboard, then search the runtime log for `job claimed`. The line shows `attempt=1` and a `lease_expires` 30 s after its own time, followed about 2 s later by `worker: job completed` for the same `job_id`.
+
+Result on 9 November 2026 (deploy `d4ba590`):
+
+```text
+17:49:28.664Z msg="worker: job claimed" worker=1 job_id=7eb723a138f632a94ad9fb15c4d91196 attempt=1 max_attempts=3 lease_expires=2026-11-09T17:49:58.662Z
+17:49:30.685Z msg="worker: job completed" worker=1 job_id=7eb723a138f632a94ad9fb15c4d91196 attempt=1 max_attempts=3 duration=2s
+```
+
+The dashboard showed `7eb723a1` `completed 1/3`, with the dot `live`. The deadline is 29.998 s after the log line's time: PostgreSQL set it (`now()` + 30 s) a moment before the worker wrote the line.
+
 ## Rolling back
 
 Render keeps previous deploys. In the dashboard: `goflow-api` → **Deploys** → pick the last good one → **Rollback**. A rollback doesn't undo migrations, so a migration must keep working with the code before it (add columns before using them, drop them a release later).

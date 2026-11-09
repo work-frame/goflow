@@ -1,6 +1,6 @@
 # Architecture
 
-This describes GoFlow at the end of Phase 11. It changes as each phase lands.
+This describes GoFlow at the end of Phase 12. It changes as each phase lands.
 
 ## Overview
 
@@ -289,7 +289,7 @@ Ack       LREM goflow:jobs:processing
   - **The heartbeat** renews the lease every 10 seconds. When the database says the lease is gone, or renewals have failed for a whole lease length (it can't know whether the job was taken back), the worker cancels its handler with `errLeaseLost` as the cause and records nothing.
   - **PostgreSQL's clock decides expiry; Redis only says when to ask.** Every deadline is also kept in the sorted set `goflow:jobs:leases`. The lease reaper (`relay.LeaseReaper`, in the API and in every worker process) checks it every 5 seconds and asks PostgreSQL about each deadline that has passed. `Reclaim` takes the job back only `WHERE lease_expires_at < now()` there; if the lease was renewed, or the reaper's clock is fast, it answers with the real deadline instead. With no deadline passed, PostgreSQL isn't touched, so a sleeping free database stays asleep. At start and hourly the reaper also sweeps PostgreSQL directly (`ReclaimExpired`), for deadlines a Key Value restart lost.
   - **One winner in every race.** The row lock serialises a late `Complete` against `Reclaim`, and a `Renew` against `Reclaim`: exactly one takes effect, never both, never neither (`TestCompleteAndReclaimRaceHasOneWinner`, `TestRenewAndReclaimRaceHasOneWinner`, 30 rounds each on real PostgreSQL). Until someone takes it back, an expired lease still counts: no other worker can have the job, so its holder may renew it or record its result.
-  - **Seen with a real crash (Task 49).** With the API and three worker processes sharing the work, a worker killed with `SIGKILL` 9 s into two 12-second jobs left them `processing` on attempt 1 with a deadline nobody renewed. PostgreSQL showed their seconds left reaching 0 and going below; 2.4 s after the deadline a reaper took them back, and another process ran them as attempt 2. The other six jobs finished on attempt 1. `TestAFrozenWorkerCannotOverwriteItsReplacement` checks the same order on PostgreSQL's clock: the replacement's claim is later than the frozen worker's deadline. DEVELOPMENT.md has the steps to repeat it with `docker kill`.
+  - **Seen with a real crash (Task 49).** In the Compose stack (the API and three worker containers), `docker kill` on one worker 3 s into two 12-second jobs left them `processing` on attempt 1 with a deadline nobody renewed, while the heartbeat moved the other six jobs' deadlines. With 1 s left they were still untouched; 0.57 s after the deadline the API's reaper took them back, and `worker-1` and the API ran them as attempt 2. The other six jobs finished on attempt 1 (FAILURES.md, experiment "a worker killed with SIGKILL"). `TestAFrozenWorkerCannotOverwriteItsReplacement` checks the same order on PostgreSQL's clock: the replacement's claim is later than the frozen worker's deadline. DEVELOPMENT.md has the steps to repeat it with `docker kill`.
   - **A lost lease uses up the attempt,** like a crash. If it was the last one, the job becomes `dead` with `last_error` saying so, instead of going round forever.
   - **Startup never touches a running job.** A starting pool only tidies the shared `processing` list: an ID whose job is `processing` belongs to someone's lease, so its stale entry is dropped; any other ID was taken but never claimed (or finished but not acknowledged), so it goes back to the queue (`Requeue`, a Lua script, so two processes starting together can't both push it). If a live worker in another process had just taken that ID, the copy is only a duplicate, and `Claim` lets one worker win.
 - **The worker doesn't migrate.** The API owns the schema.
@@ -463,7 +463,7 @@ Everything runs with the race detector (`./scripts/check.sh`). Tests that need P
 ## Known limitations
 
 - The work itself is a placeholder (`worker.Demo` picks a behaviour from the title); real job types with their own payloads come later.
-- On Render the pool runs inside the single free API instance. Several processes are safe (leases, Task 48) but only run locally so far.
+- On Render the pool runs inside the single free API instance. Several processes are safe (leases, Task 48) but only run locally so far, in the Compose stack's three worker containers.
 - A worker frozen for longer than its lease (30 s) can still be *running* its handler while another worker runs the same job: fencing stops it from recording anything, not from working. Handlers with outside effects must be idempotent ([Handler contract](#handler-contract)).
 - Jobs reach Redis at least once, and a handler can run more than once. Handlers must follow the [handler contract](#handler-contract); nothing enforces it.
 - When Key Value loses its data, retries and queued jobs come back through the hourly reconciler: up to about 70 minutes late.
