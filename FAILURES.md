@@ -657,6 +657,27 @@ Each case was reproduced on a real machine (Arch Linux, Go 1.27, PostgreSQL 17) 
   ```
 - **Why:** worker A froze, its lease ran out, the reaper took the job back and worker B claimed it. When A woke up, the job was `processing` again, which is all the old check looked at. So A marked it `completed` while B was still working: users saw a finished job that was in fact still running, and B's own result (a failure, maybe) then had nowhere to go. A status says what is happening to a job; only the token says *whose* attempt it is. The other three fenced writes (`Renew`, `Retry`, `Bury`) kept their check, and the tests for them still passed: each write needs its own guard.
 
+## 47. A full check needs both test URLs
+
+- **Safeguard:** `scripts/check.sh` exits before running anything when `GOFLOW_TEST_DATABASE_URL` or `GOFLOW_TEST_REDIS_URL` is unset or empty, and names the missing ones. `GOFLOW_QUICK_CHECK=1` runs anyway and ends with `QUICK CHECK PASSED`, never `ALL CHECKS PASSED`.
+- **Removed:** the `exit 1` after the message, so the script warned and carried on.
+- **Caught by:** `TestCheckRefusesToSkipTheDatabaseTests`, which runs `check.sh` with only the variables each case gives it and a `PATH` with nothing in it: past the URL check, the script stops at `gofmt`, so the test never runs the suite inside the suite.
+- **Observed:**
+  ```text
+  --- FAIL: TestCheckRefusesToSkipTheDatabaseTests (0.01s)
+      --- FAIL: TestCheckRefusesToSkipTheDatabaseTests/neither (0.00s)
+          checkscript_test.go:50: exit code 127, want 1
+          checkscript_test.go:53: check.sh started the checks without every URL:
+              check.sh: not set: GOFLOW_TEST_DATABASE_URL GOFLOW_TEST_REDIS_URL
+              The tests that need them would be skipped, and a skipped test looks like a pass.
+              Set them (DEVELOPMENT.md, Environment), or run a quick check that skips them:
+                GOFLOW_QUICK_CHECK=1 ./scripts/check.sh
+              ==> gofmt
+              scripts/check.sh: line 28: gofmt: command not found
+  ```
+  The same for the other four cases (no Redis, no PostgreSQL, an empty Redis URL, `GOFLOW_QUICK_CHECK=yes`).
+- **Why:** a warning is a line in the middle of a long output that ends with `ALL CHECKS PASSED`. It is exactly what went wrong for months (see Environment incidents): every Redis test skipped, each package printed `ok`, and the check looked whole. A rule that only warns gets read once; a rule that stops gets obeyed. The quick check is still there, but it has to be asked for, and its last line says what it was.
+
 ## Experiment: the naive dual write loses a job
 
 Not a removed safeguard but the design of Task 22, run live on 2 November 2026 to see the failure Task 23 fixes. `POST /api/v1/jobs` saved the job in PostgreSQL, then pushed its ID to Redis, with nothing tying the two together.
@@ -731,6 +752,8 @@ Task 24, run live on 3 November 2026 with the API and one worker.
 
 - **A deploy failed because the API started before its queue.** On Render, one Blueprint sync created the Key Value instance and redeployed the API with its URL. The new instance logged `starting ... queue_enabled=true workers=2` twice and exited; the old one kept serving. A manual redeploy minutes later worked. The API exited when its startup Redis ping failed, even though everything that uses Redis retries on its own. Fixed in Task 28: an unreachable Redis is a warning at startup, not a fatal error ([DEPLOYMENT.md](DEPLOYMENT.md#queue-and-workers-task-27)).
 - **The IP diagnostic stayed on in production for about 18 hours.** Task 37 turned `GOFLOW_LOG_IP_HEADERS` on in Render's dashboard on 4 November (22:53 UTC) for one experiment; its last step, "turn it off", wasn't done. Every request then logged the visitor's address and forwarding headers until 5 November, 16:46 UTC, when the startup warning (`GOFLOW_LOG_IP_HEADERS is on ... turn it off when the check is done`) was spotted while reading Task 45's logs. The warning was in every startup log the whole time; nobody reads startup logs unless something is wrong. Settings typed into the dashboard aren't in `render.yaml`, so no merge removes them. Lesson: a diagnostic that records personal data needs an end built in (a deadline after which it switches itself off), not only a warning; and a checklist item to remove it, checked before the task is called done.
+
+- **The Redis tests skipped on the development laptop from Phase 5 until Task 48.** `GOFLOW_TEST_REDIS_URL` was never set in the laptop's shell, so every test that needs Redis called `t.Skip`. `go test` prints `ok` for a package whose tests skipped, and `./scripts/check.sh` ended with `ALL CHECKS PASSED` every time. Found during Task 48: `TestAFrozenWorkerCannotOverwriteItsReplacement` reported `ok` in 0.007 s, too fast for a test that waits for a 300 ms lease to run out. With the variable set (`redis://127.0.0.1:6379/1`, also added to `~/.zshrc`), the full suite passed and case 46's break-it failed as it should. The sandbox where the tasks are prepared always had both URLs, so every Redis test did run before each task was handed over; what the laptop's checks proved was less than they said. Fixed in Task 49: `check.sh` refuses to run without both URLs (case 47). Lesson: a skipped test is silence, and silence reads as success. Read `go test -v` for `SKIP` lines now and then, and look at test times that are too short to be real.
 
 ## Not yet reproduced
 

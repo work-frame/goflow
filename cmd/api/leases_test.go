@@ -198,6 +198,19 @@ func TestAFrozenWorkerCannotOverwriteItsReplacement(t *testing.T) {
 	if len(bClaims) != 1 || bClaims[0].Attempt != 2 {
 		t.Fatalf("B's claims %+v, want one, attempt 2", bClaims)
 	}
+	// Not one moment early: B claimed after A's lease ran out, both times
+	// by PostgreSQL's clock. A never renewed; B's deadline is its claim
+	// time plus its 30-second lease.
+	aClaims, _ := a.state()
+	if len(aClaims) != 1 {
+		t.Fatalf("A's claims %+v, want one", aClaims)
+	}
+	aExpired := aClaims[0].LeaseExpires
+	bClaimed := bClaims[0].LeaseExpires.Add(-30 * time.Second)
+	if !bClaimed.After(aExpired) {
+		t.Fatalf("B claimed the job at %s, %s before A's lease ran out at %s: a still-valid lease was taken back",
+			bClaimed.Format(time.RFC3339Nano), aExpired.Sub(bClaimed), aExpired.Format(time.RFC3339Nano))
+	}
 	_, _, before := leaseRow(t, ctx, db, id)
 
 	// A wakes up and tries to record its result while B is running.

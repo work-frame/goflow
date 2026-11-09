@@ -306,6 +306,9 @@ func (p *Pool) process(ctx context.Context, log *slog.Logger, id string) {
 		return
 	}
 	log = log.With("attempt", claimed.Attempt, "max_attempts", claimed.MaxAttempts)
+	// Which process holds which job: docker compose logs prefixes each line
+	// with the container. The deadline is PostgreSQL's; heartbeats move it.
+	log.Info("worker: job claimed", "lease_expires", claimed.LeaseExpires)
 	p.trackLease(ctx, log, id, claimed.LeaseExpires)
 
 	// The handler runs under runCtx. The heartbeat cancels it, with

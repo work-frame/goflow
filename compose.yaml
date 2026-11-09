@@ -1,5 +1,6 @@
-# GoFlow's local stack (Phase 11): PostgreSQL, Valkey and the API built
-# from the Dockerfile. Start everything: docker compose up -d --build
+# GoFlow's local stack (Phase 11): PostgreSQL, Valkey, the API built from
+# the Dockerfile, and three workers from the same image (Phase 12).
+# Start everything: docker compose up -d --build
 # With Prometheus and Grafana as well (opt-in, profile "monitoring"):
 #   docker compose --profile monitoring up -d --build
 #
@@ -63,6 +64,31 @@ services:
       valkey:
         condition: service_healthy
     # SIGTERM, then 30 s before SIGKILL: the worker pool drains for 20 s.
+    stop_grace_period: 30s
+
+  # Three worker processes (Phase 12) from the API's image, sharing
+  # PostgreSQL and Valkey with the API's own two workers. Each job is held
+  # under a lease, so they never run one job twice. More or fewer:
+  #   docker compose up -d --scale worker=5
+  # Containers are goflow-worker-1, -2, -3 (DEVELOPMENT.md has a crash test).
+  worker:
+    image: goflow:dev # built by the api service, never pulled
+    pull_policy: never
+    entrypoint: ["/usr/local/bin/worker"]
+    environment:
+      GOFLOW_DATABASE_URL: postgres://goflow:goflow@postgres:5432/goflow?sslmode=disable
+      GOFLOW_REDIS_URL: redis://valkey:6379/0
+      GOFLOW_WORKERS: "2"
+    deploy:
+      replicas: 3
+    depends_on:
+      postgres:
+        condition: service_healthy
+      valkey:
+        condition: service_healthy
+      # The API runs the migrations; the worker needs them in place.
+      api:
+        condition: service_started
     stop_grace_period: 30s
 
   # Opt-in: these two start only with --profile monitoring.
