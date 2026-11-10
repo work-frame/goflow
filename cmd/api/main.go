@@ -125,6 +125,13 @@ func run(ctx context.Context, logger *slog.Logger, cfg config, ready func(addr s
 			return err
 		}
 		defer q.Close()
+		if cfg.RedisKeyPrefix != "" {
+			q = q.WithPrefix(cfg.RedisKeyPrefix) // same connections, other keys
+		}
+		channel := events.Channel
+		if cfg.EventsChannel != "" {
+			channel = cfg.EventsChannel
+		}
 		pingCtx, cancelPing := context.WithTimeout(ctx, 3*time.Second)
 		if err := q.PingContext(pingCtx); err != nil {
 			logger.Warn("queue not reachable yet; jobs wait in the outbox and the relay and workers keep retrying", "err", err)
@@ -139,11 +146,11 @@ func run(ctx context.Context, logger *slog.Logger, cfg config, ready func(addr s
 		// (WithoutCancel) until its deferred stop, so jobs finishing during
 		// the drain still announce it. Deferred before the relay and the
 		// pool, so it stops after both.
-		pub := events.NewPublisher(q, logger)
+		pub := events.NewPublisherOn(q, channel, logger)
 		stopPublisher := pub.Start(context.WithoutCancel(ctx))
 		defer stopPublisher()
 		notifier = database.NotifyAll(m, pub)
-		hub := events.NewHub()
+		hub := events.NewHubOn(channel)
 		m.WatchEvents(pub.Published, pub.Dropped, hub.Streams)
 		m.WatchQueue(q.Sizes)
 		stopListening := events.Listen(ctx, q, hub, logger)

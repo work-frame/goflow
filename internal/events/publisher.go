@@ -44,7 +44,13 @@ type Publisher struct {
 // NewPublisher returns a Publisher for Channel. Call Start before use;
 // until then, events wait in the buffer.
 func NewPublisher(send Sender, logger *slog.Logger) *Publisher {
-	return &Publisher{send: send, channel: Channel, logger: logger, queue: make(chan []byte, bufferSize)}
+	return NewPublisherOn(send, Channel, logger)
+}
+
+// NewPublisherOn is NewPublisher for another channel. The hub that listens
+// must use the same one (NewHubOn).
+func NewPublisherOn(send Sender, channel string, logger *slog.Logger) *Publisher {
+	return &Publisher{send: send, channel: channel, logger: logger, queue: make(chan []byte, bufferSize)}
 }
 
 // JobChanged publishes a created or changed job to its owner.

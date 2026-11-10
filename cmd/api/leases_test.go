@@ -141,11 +141,15 @@ func TestAFrozenWorkerCannotOverwriteItsReplacement(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { db.Close() })
-	q, err := queue.Open(ctx, redisURL)
+	conn, err := queue.Open(ctx, redisURL)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { q.Close() })
+	t.Cleanup(func() { conn.Close() })
+	// The server's queue, as its relay fills it: this test's keys, not
+	// production's (Task 54). With other keys the pools would never see
+	// the job.
+	q := conn.WithPrefix(cfg.RedisKeyPrefix)
 	work := database.NewWorkStore(db)
 	stopReaper := relay.NewLeaseReaper(work, q, discardLogger(), 20*time.Millisecond, time.Hour).Start(ctx)
 	t.Cleanup(stopReaper)

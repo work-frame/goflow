@@ -19,7 +19,10 @@ import (
 	"github.com/work-frame/goflow/internal/job"
 )
 
-// Channel is the Redis Pub/Sub channel every job event goes through.
+// Channel is the Redis Pub/Sub channel every job event goes through, in
+// production. Tests give every test server its own (NewPublisherOn,
+// NewHubOn), so one server's events and canaries never reach another
+// (Task 54).
 const Channel = "goflow:events"
 
 // Message types a client can receive.

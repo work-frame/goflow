@@ -10,8 +10,6 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-// testConfig is a valid config for tests. It uses bcrypt's minimum cost,
-// which loadConfig would refuse: tests skip loadConfig and call run directly.
 // testTakeTimeout is how long test workers wait in Redis for a job. Every
 // test server with workers waited out the 2-second production value when it
 // stopped: about 15 s of cmd/api's 40 (Task 52). 1 s is the shortest that
@@ -19,14 +17,23 @@ import (
 // leases_test.go builds by hand use it too.
 const testTakeTimeout = time.Second
 
+// testConfig is a valid config for tests. It uses bcrypt's minimum cost,
+// which loadConfig would refuse: tests skip loadConfig and call run directly.
+//
+// Redis is named after the test's database (testdb_test.go), so the servers
+// of one test share a queue and an events channel, like one deployment,
+// and different tests never do (Task 54). The channel is set on its own:
+// moving the queue's keys doesn't move Pub/Sub.
 func testConfig(addr, dbURL string) config {
 	// Every test server counts rate limits under its own keys: counters
 	// last 15 minutes in the shared test Redis, and the e2e tests all log
 	// in from 127.0.0.1.
 	b := make([]byte, 6)
 	rand.Read(b)
+	ns := "goflow:test:" + databaseName(dbURL) + ":"
 	return config{Addr: addr, DatabaseURL: dbURL, BcryptCost: bcrypt.MinCost, RegistrationOpen: true, SimulatedWork: 10 * time.Millisecond,
-		RateLimitPrefix: "goflow:test:" + hex.EncodeToString(b) + ":rl:", TakeTimeout: testTakeTimeout}
+		RateLimitPrefix: "goflow:test:" + hex.EncodeToString(b) + ":rl:", TakeTimeout: testTakeTimeout,
+		RedisKeyPrefix: ns, EventsChannel: ns + "events"}
 }
 
 // env turns a map into a getenv function.
@@ -68,6 +75,9 @@ func TestLoadConfigDefaults(t *testing.T) {
 	}
 	if cfg.TakeTimeout != 0 {
 		t.Errorf("TakeTimeout = %v, want 0 (the pool's 2 s default): only tests shorten it", cfg.TakeTimeout)
+	}
+	if cfg.RedisKeyPrefix != "" || cfg.EventsChannel != "" {
+		t.Errorf("RedisKeyPrefix %q, EventsChannel %q; want both empty, so production keeps goflow:jobs:* and goflow:events", cfg.RedisKeyPrefix, cfg.EventsChannel)
 	}
 }
 
