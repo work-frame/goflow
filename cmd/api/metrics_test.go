@@ -11,11 +11,11 @@ import (
 
 const testMetricsToken = "an-e2e-metrics-token-of-32-characters-or-more"
 
-func scrapeMetrics(t *testing.T, base string) string {
+func scrapeMetrics(t *testing.T, client *http.Client, base string) string {
 	t.Helper()
 	req, _ := http.NewRequest(http.MethodGet, base+"/metrics", nil)
 	req.Header.Set("Authorization", "Bearer "+testMetricsToken)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -49,7 +49,7 @@ func TestMetricsEndToEnd(t *testing.T) {
 	cfg.Workers = 2
 	cfg.MetricsToken = testMetricsToken
 	base, _ := startServerWith(t, cfg)
-	client := &http.Client{Timeout: 5 * time.Second}
+	client := testClient(t, 5*time.Second)
 
 	token := signUp(t, client, base, dbURL)
 	id := createJob(t, client, base, token, "flaky:1")
@@ -64,7 +64,7 @@ func TestMetricsEndToEnd(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 	}
 
-	body := scrapeMetrics(t, base)
+	body := scrapeMetrics(t, client, base)
 	for series, atLeast := range map[string]float64{
 		`goflow_job_status_changes_total{status="pending"}`:                1,
 		`goflow_job_status_changes_total{status="retrying"}`:               1,

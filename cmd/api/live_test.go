@@ -106,7 +106,7 @@ func TestLiveEventsEndToEnd(t *testing.T) {
 	cfg.RedisURL = redisURL
 	cfg.Workers = 2
 	base, stop := startServerWith(t, cfg)
-	client := &http.Client{Timeout: 5 * time.Second}
+	client := testClient(t, 5*time.Second)
 
 	alice := signUp(t, client, base, dbURL)
 	bob := signUp(t, client, base, dbURL)
@@ -172,6 +172,7 @@ func TestLiveEventsEndToEnd(t *testing.T) {
 
 	// Shutting down ends open streams at once instead of waiting out
 	// Shutdown's 10-second limit.
+	client.CloseIdleConnections() // its cleanup would run after this stop
 	start := time.Now()
 	stop()
 	if got := aliceEvents.next(t, 5*time.Second); got != "EOF" {

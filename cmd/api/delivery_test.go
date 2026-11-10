@@ -132,9 +132,9 @@ func (s *sseStream) stillOpen(t *testing.T, d time.Duration, while string) {
 	}
 }
 
-func deliveryGauge(t *testing.T, base string) float64 {
+func deliveryGauge(t *testing.T, client *http.Client, base string) float64 {
 	t.Helper()
-	return value(scrapeMetrics(t, base), "goflow_event_delivery_ok")
+	return value(scrapeMetrics(t, client, base), "goflow_event_delivery_ok")
 }
 
 // The requirement from Phase 8 (ARCHITECTURE.md, "Delivery health"): when
@@ -148,7 +148,7 @@ func TestLiveDeliveryPausesWhileRedisIsAway(t *testing.T) {
 	cfg.MetricsToken = testMetricsToken
 	cfg.CanaryInterval, cfg.CanaryTimeout = 100*time.Millisecond, time.Second
 	base, _ := startServerWith(t, cfg)
-	client := &http.Client{Timeout: 5 * time.Second}
+	client := testClient(t, 5*time.Second)
 
 	token := signUp(t, client, base, dbURL)
 	s := openEvents(t, base, ticketFor(t, client, base, token))
@@ -156,7 +156,7 @@ func TestLiveDeliveryPausesWhileRedisIsAway(t *testing.T) {
 		t.Fatalf("first event %s, want ready", got)
 	}
 	s.stillOpen(t, 1500*time.Millisecond, "healthy") // canaries come back: no pause
-	if v := deliveryGauge(t, base); v != 1 {
+	if v := deliveryGauge(t, client, base); v != 1 {
 		t.Errorf("goflow_event_delivery_ok = %v while healthy, want 1", v)
 	}
 
@@ -167,7 +167,7 @@ func TestLiveDeliveryPausesWhileRedisIsAway(t *testing.T) {
 	}
 	t.Logf("paused %v after Redis went away", time.Since(cut).Round(10*time.Millisecond))
 	s.stillOpen(t, time.Second, "paused")
-	if v := deliveryGauge(t, base); v != 0 {
+	if v := deliveryGauge(t, client, base); v != 0 {
 		t.Errorf("goflow_event_delivery_ok = %v while paused, want 0", v)
 	}
 
@@ -177,7 +177,7 @@ func TestLiveDeliveryPausesWhileRedisIsAway(t *testing.T) {
 		t.Fatalf("after Redis came back: %s, want resumed", got)
 	}
 	t.Logf("resumed %v after Redis came back", time.Since(back).Round(10*time.Millisecond))
-	if v := deliveryGauge(t, base); v != 1 {
+	if v := deliveryGauge(t, client, base); v != 1 {
 		t.Errorf("goflow_event_delivery_ok = %v after resuming, want 1", v)
 	}
 }
@@ -191,7 +191,7 @@ func TestShortRedisDropIsOnlyAResync(t *testing.T) {
 	cfg.RedisURL = redisURL
 	cfg.CanaryInterval, cfg.CanaryTimeout = 100*time.Millisecond, 2*time.Second
 	base, _ := startServerWith(t, cfg)
-	client := &http.Client{Timeout: 5 * time.Second}
+	client := testClient(t, 5*time.Second)
 
 	token := signUp(t, client, base, dbURL)
 	s := openEvents(t, base, ticketFor(t, client, base, token))

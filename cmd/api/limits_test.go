@@ -19,7 +19,7 @@ func TestLoginIsLimitedEndToEnd(t *testing.T) {
 	cfg := testConfig("127.0.0.1:0", dbURL)
 	cfg.RedisURL = redisURL
 	base, _ := startServerWith(t, cfg)
-	client := &http.Client{Timeout: 5 * time.Second}
+	client := testClient(t, 5*time.Second)
 
 	opts, err := redis.ParseURL(redisURL)
 	if err != nil {

@@ -87,6 +87,25 @@ func startServerWith(t *testing.T, cfg config) (base string, stop func()) {
 	return base, stop
 }
 
+// testClient returns an HTTP client with a connection pool of its own,
+// whose idle connections are closed when the test ends. Register it after
+// startServer: cleanups run last-registered first, so the connections close
+// before the server shuts down.
+//
+// Why: when a response body is closed, its connection goes back to the
+// client's pool a moment later. A request sent in that moment finds the
+// pool empty and dials a new connection; whichever is ready first serves
+// it, and the other sits unused. The server has accepted that connection
+// but never read a request on it, and Shutdown counts such a connection as
+// busy for its first 5 seconds (Go issue 22682). So stopping the server
+// took about 5.3 s in roughly one run in five (Task 51).
+func testClient(t *testing.T, timeout time.Duration) *http.Client {
+	t.Helper()
+	c := &http.Client{Timeout: timeout, Transport: http.DefaultTransport.(*http.Transport).Clone()}
+	t.Cleanup(c.CloseIdleConnections)
+	return c
+}
+
 // request sends one HTTP request without a session and returns the status,
 // headers and full body.
 func request(t *testing.T, client *http.Client, method, url, body string) (int, http.Header, []byte) {
@@ -171,7 +190,7 @@ func createJob(t *testing.T, client *http.Client, base, token, title string) str
 func TestServerEndToEnd(t *testing.T) {
 	dbURL := testDatabaseURL(t)
 	base, _ := startServer(t, dbURL)
-	client := &http.Client{Timeout: 5 * time.Second}
+	client := testClient(t, 5*time.Second)
 
 	if status, _, body := request(t, client, http.MethodGet, base+"/readyz", ""); status != http.StatusOK {
 		t.Fatalf("readyz: status %d, body %s", status, body)
@@ -203,15 +222,17 @@ func TestServerEndToEnd(t *testing.T) {
 // knows the token and still has the job.
 func TestJobsSurviveRestart(t *testing.T) {
 	dbURL := testDatabaseURL(t)
-	client := &http.Client{Timeout: 5 * time.Second}
 
 	base, stop := startServer(t, dbURL)
+	client := testClient(t, 5*time.Second)
 	token := signUp(t, client, base, dbURL)
 	id := createJob(t, client, base, token, "survive a restart")
+	client.CloseIdleConnections() // its cleanup would run after this stop
 	stop()
 
 	// A brand-new server: new process state, new port, same database.
 	base, _ = startServer(t, dbURL)
+	client = testClient(t, 5*time.Second)
 	jobURL := base + "/api/v1/jobs/" + id
 
 	if status, _, body := requestAs(t, client, http.MethodGet, jobURL, token, ""); status != http.StatusOK {

@@ -21,7 +21,7 @@ func TestCreatedJobsReachTheQueue(t *testing.T) {
 	cfg := testConfig("127.0.0.1:0", dbURL)
 	cfg.RedisURL = redisURL
 	base, _ := startServerWith(t, cfg)
-	client := &http.Client{Timeout: 5 * time.Second}
+	client := testClient(t, 5*time.Second)
 
 	token := signUp(t, client, base, dbURL)
 	id := createJob(t, client, base, token, "queued e2e job")
@@ -77,7 +77,7 @@ func TestAPIWorkersRunJobs(t *testing.T) {
 	cfg.RedisURL = redisURL
 	cfg.Workers = 2
 	base, _ := startServerWith(t, cfg)
-	client := &http.Client{Timeout: 5 * time.Second}
+	client := testClient(t, 5*time.Second)
 
 	token := signUp(t, client, base, dbURL)
 	id := createJob(t, client, base, token, "run me in the API")
@@ -111,7 +111,7 @@ func TestAPIStartsWhenRedisIsDown(t *testing.T) {
 	cfg.RedisURL = "redis://127.0.0.1:1/0"
 	cfg.Workers = 1
 	base, _ := startServerWith(t, cfg)
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := testClient(t, 10*time.Second)
 
 	if status, _, body := request(t, client, http.MethodGet, base+"/readyz", ""); status != http.StatusOK {
 		t.Fatalf("readyz with Redis down: status %d, body %s; readiness depends on the database only", status, body)
@@ -163,7 +163,7 @@ func TestAPIRetriesAFailedJob(t *testing.T) {
 	cfg.RedisURL = redisURL
 	cfg.Workers = 2
 	base, _ := startServerWith(t, cfg)
-	client := &http.Client{Timeout: 5 * time.Second}
+	client := testClient(t, 5*time.Second)
 
 	token := signUp(t, client, base, dbURL)
 	flaky := createJob(t, client, base, token, "flaky:1")

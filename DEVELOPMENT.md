@@ -179,6 +179,18 @@ go test -count=1 -timeout 10s ./internal/cli/        # fail fast if something lo
 
 See the Testing section of [ARCHITECTURE.md](ARCHITECTURE.md) for what each package's tests cover.
 
+### Finding slow tests
+
+`go test -json` reports every test's time. The slowest ten in a package, top-level tests only:
+
+```bash
+go test -race -count=1 -json ./cmd/api/ | jq -r 'select(.Action == "pass" and .Test != null and (.Test | contains("/") | not)) | "\(.Elapsed)\t\(.Test)"' | sort -rn | head
+```
+
+Run it three or four times: a test that is slow only sometimes is a race or a timeout, not slow code. A time close to a round number (2 s, 5 s) usually means something is waiting for a timer to run out. To see what, build the test binary (`go test -c -race -o /tmp/api.test ./cmd/api`), run the one test many times (`-test.run '^TestName$' -test.count=60 -test.v`), and send the process `SIGQUIT` during a slow run: Go prints every goroutine and where it waits. That is how case 48 was found.
+
+In `cmd/api` tests, get HTTP clients from `testClient(t, timeout)` after `startServer`, never `&http.Client{}` or `http.DefaultClient`: see case 48.
+
 ### Breaking things on purpose
 
 Commit first. Then make the change, run the test, read the output, and restore with `git checkout -- <file>`. If the result is new, add it to [FAILURES.md](FAILURES.md).
