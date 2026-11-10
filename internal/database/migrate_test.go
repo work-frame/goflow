@@ -22,6 +22,7 @@ func embeddedMigrationCount(t *testing.T) int {
 }
 
 func TestMigrateCreatesSchema(t *testing.T) {
+	t.Parallel()
 	db := newTestDB(t)
 	ctx := context.Background()
 
@@ -40,6 +41,7 @@ func TestMigrateCreatesSchema(t *testing.T) {
 }
 
 func TestMigrateIsIdempotent(t *testing.T) {
+	t.Parallel()
 	db := newTestDB(t)
 	ctx := context.Background()
 
@@ -55,9 +57,11 @@ func TestMigrateIsIdempotent(t *testing.T) {
 	}
 }
 
+// Not parallel: its 5 callers use 5 connections at once.
 func TestMigrateConcurrently(t *testing.T) {
 	db := newTestDB(t)
 	const callers = 5
+	withConns(db, callers) // each waits for the advisory lock on its own connection
 
 	var (
 		wg    sync.WaitGroup
@@ -92,6 +96,7 @@ func TestMigrateConcurrently(t *testing.T) {
 }
 
 func TestJobsTableConstraints(t *testing.T) {
+	t.Parallel()
 	db := newTestDB(t)
 	ctx := context.Background()
 	if _, err := Migrate(ctx, db); err != nil {

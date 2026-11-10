@@ -27,6 +27,7 @@ func countRows(t *testing.T, f *jobsFixture, query string, args ...any) int {
 }
 
 func TestAddWithAUsedKeyIsDuplicateKey(t *testing.T) {
+	t.Parallel()
 	f := newJobsFixture(t)
 	first, err := addWithKey(t, f, f.alice, "send invoice", "key-1")
 	if err != nil {
@@ -48,6 +49,7 @@ func TestAddWithAUsedKeyIsDuplicateKey(t *testing.T) {
 // A duplicate job ID is a different problem from a reused key, and the
 // unique index name is what tells them apart.
 func TestAddTellsDuplicateIDFromDuplicateKey(t *testing.T) {
+	t.Parallel()
 	f := newJobsFixture(t)
 	j, err := addWithKey(t, f, f.alice, "x", "key-a")
 	if err != nil {
@@ -61,6 +63,7 @@ func TestAddTellsDuplicateIDFromDuplicateKey(t *testing.T) {
 }
 
 func TestIdempotencyKeysBelongToOneUser(t *testing.T) {
+	t.Parallel()
 	f := newJobsFixture(t)
 	ctx := context.Background()
 	a, err := addWithKey(t, f, f.alice, "alice's", "same")
@@ -84,6 +87,7 @@ func TestIdempotencyKeysBelongToOneUser(t *testing.T) {
 
 // Jobs without a key store NULL, and NULLs never collide.
 func TestJobsWithoutAKeyNeverCollide(t *testing.T) {
+	t.Parallel()
 	f := newJobsFixture(t)
 	addJobs(t, f, "one", "two", "three")
 	if n := countRows(t, f, `SELECT count(*) FROM jobs WHERE idempotency_key IS NULL`); n != 3 {
@@ -93,9 +97,11 @@ func TestJobsWithoutAKeyNeverCollide(t *testing.T) {
 
 // The real race: many requests with one key at the same moment, each on its
 // own connection. PostgreSQL's unique index lets exactly one INSERT commit.
+// Not parallel: its 20 callers use 20 connections at once.
 func TestConcurrentAddsWithOneKeyHaveOneWinner(t *testing.T) {
 	f := newJobsFixture(t)
 	const n = 20
+	withConns(f.db, n) // all 20 inserts in flight together, or they don't race
 
 	var wg sync.WaitGroup
 	start := make(chan struct{})
@@ -136,6 +142,7 @@ func TestConcurrentAddsWithOneKeyHaveOneWinner(t *testing.T) {
 }
 
 func TestIdempotencyKeyLengthIsChecked(t *testing.T) {
+	t.Parallel()
 	f := newJobsFixture(t)
 	if _, err := addWithKey(t, f, f.alice, "x", strings.Repeat("k", 256)); err == nil {
 		t.Fatal("a 256-character key was stored, want the CHECK to refuse it")

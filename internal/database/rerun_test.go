@@ -29,6 +29,7 @@ func deadJob(t *testing.T, f *jobsFixture, title string) string {
 }
 
 func TestRerunGivesADeadJobFreshAttempts(t *testing.T) {
+	t.Parallel()
 	f := newJobsFixture(t)
 	ctx := context.Background()
 	id := deadJob(t, f, "send email")
@@ -64,6 +65,7 @@ func TestRerunGivesADeadJobFreshAttempts(t *testing.T) {
 }
 
 func TestRerunRefusesJobsThatArentDead(t *testing.T) {
+	t.Parallel()
 	f := newJobsFixture(t)
 	ctx := context.Background()
 	w := NewWorkStore(f.db)
@@ -86,6 +88,7 @@ func TestRerunRefusesJobsThatArentDead(t *testing.T) {
 }
 
 func TestRerunIsScopedToTheOwner(t *testing.T) {
+	t.Parallel()
 	f := newJobsFixture(t)
 	ctx := context.Background()
 	id := deadJob(t, f, "alice's")
@@ -105,10 +108,12 @@ func TestRerunIsScopedToTheOwner(t *testing.T) {
 // row lock lets one win; the others wait, re-check the status (now
 // pending), and change nothing. Without the status in the WHERE clause, a
 // late second rerun could reset a job a worker had already claimed.
+// Not parallel: its 10 callers use 10 connections at once.
 func TestConcurrentRerunsHaveOneWinner(t *testing.T) {
 	f := newJobsFixture(t)
 	id := deadJob(t, f, "double click")
 	const n = 10
+	withConns(f.db, n) // all 10 reruns in flight together, or they don't race
 
 	var wg sync.WaitGroup
 	start := make(chan struct{})

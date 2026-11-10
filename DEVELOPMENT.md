@@ -191,6 +191,8 @@ Run it three or four times: a test that is slow only sometimes is a race or a ti
 
 In `cmd/api` tests, get HTTP clients from `testClient(t, timeout)` after `startServer`, never `&http.Client{}` or `http.DefaultClient`: see case 48.
 
+In `internal/database`, a test that gets its own copy (`newMigratedTestDB`, `newTestDB`, or a fixture built on them) starts with `t.Parallel()`. Its copy has 3 connections. A test that runs more callers at once than that calls `withConns(db, n)` and stays sequential (no `t.Parallel()`), so a few of them can't add up to PostgreSQL's limit of 100. A test that waits for a connection without asking fails with "waited N times for one of its 3 database connections" (case 50).
+
 ### Breaking things on purpose
 
 Commit first. Then make the change, run the test, read the output, and restore with `git checkout -- <file>`. If the result is new, add it to [FAILURES.md](FAILURES.md).

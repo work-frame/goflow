@@ -24,6 +24,7 @@ func newSessionFixture(t *testing.T) (*sql.DB, *auth.User, *SessionStore) {
 }
 
 func TestSessionStoreCreateAndLookup(t *testing.T) {
+	t.Parallel()
 	_, u, s := newSessionFixture(t)
 	ctx := context.Background()
 
@@ -41,6 +42,7 @@ func TestSessionStoreCreateAndLookup(t *testing.T) {
 }
 
 func TestSessionStoreLookupUnknown(t *testing.T) {
+	t.Parallel()
 	_, _, s := newSessionFixture(t)
 	_, err := s.Lookup(context.Background(), auth.HashToken("gfs_never-issued"))
 	if !errors.Is(err, auth.ErrSessionNotFound) {
@@ -49,6 +51,7 @@ func TestSessionStoreLookupUnknown(t *testing.T) {
 }
 
 func TestSessionStoreLookupExpired(t *testing.T) {
+	t.Parallel()
 	_, u, s := newSessionFixture(t)
 	ctx := context.Background()
 
@@ -63,6 +66,7 @@ func TestSessionStoreLookupExpired(t *testing.T) {
 }
 
 func TestSessionStoreDelete(t *testing.T) {
+	t.Parallel()
 	_, u, s := newSessionFixture(t)
 	ctx := context.Background()
 
@@ -83,6 +87,7 @@ func TestSessionStoreDelete(t *testing.T) {
 }
 
 func TestDeletingUserEndsSessions(t *testing.T) {
+	t.Parallel()
 	db, u, s := newSessionFixture(t)
 	ctx := context.Background()
 
@@ -99,6 +104,7 @@ func TestDeletingUserEndsSessions(t *testing.T) {
 }
 
 func TestSessionsTableConstraints(t *testing.T) {
+	t.Parallel()
 	db, u, _ := newSessionFixture(t)
 	ctx := context.Background()
 	const insert = `INSERT INTO sessions (token_hash, user_id, created_at, expires_at) VALUES ($1, $2, $3, $4)`
@@ -129,6 +135,7 @@ func TestSessionsTableConstraints(t *testing.T) {
 }
 
 func TestUserStoreUpdatePasswordHash(t *testing.T) {
+	t.Parallel()
 	users := newTestUserStore(t)
 	ctx := context.Background()
 	u := mustNewUser(t, "dan@example.com")
@@ -190,6 +197,7 @@ func newTwoUserFixture(t *testing.T) (*sql.DB, *auth.User, *auth.User, *SessionS
 }
 
 func TestSessionStoreDeleteExpired(t *testing.T) {
+	t.Parallel()
 	db, u, s := newSessionFixture(t)
 	ctx := context.Background()
 
@@ -212,6 +220,7 @@ func TestSessionStoreDeleteExpired(t *testing.T) {
 }
 
 func TestSessionStoreDeleteAllForUser(t *testing.T) {
+	t.Parallel()
 	db, dan, eve, s := newTwoUserFixture(t)
 
 	sessionsOf(t, s, dan.ID, 3, time.Now())
@@ -230,6 +239,7 @@ func TestSessionStoreDeleteAllForUser(t *testing.T) {
 }
 
 func TestUserStoreChangePassword(t *testing.T) {
+	t.Parallel()
 	db, dan, eve, s := newTwoUserFixture(t)
 	users := NewUserStore(db)
 	ctx := context.Background()
@@ -276,6 +286,7 @@ func TestUserStoreChangePassword(t *testing.T) {
 
 // If ending the other sessions fails, the password must not change either.
 func TestUserStoreChangePasswordIsAllOrNothing(t *testing.T) {
+	t.Parallel()
 	db, dan, _, _ := newTwoUserFixture(t)
 	users := NewUserStore(db)
 	ctx := context.Background()

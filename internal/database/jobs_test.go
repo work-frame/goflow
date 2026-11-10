@@ -66,6 +66,7 @@ func ids(jobs []*job.Job) []string {
 }
 
 func TestJobStoreAddAndGetRoundTrip(t *testing.T) {
+	t.Parallel()
 	f := newJobsFixture(t)
 	ctx := context.Background()
 	want := mustNewJob(t, f.alice, "send welcome email")
@@ -87,6 +88,7 @@ func TestJobStoreAddAndGetRoundTrip(t *testing.T) {
 }
 
 func TestJobStoreGetMissing(t *testing.T) {
+	t.Parallel()
 	f := newJobsFixture(t)
 
 	_, err := f.s.Get(context.Background(), f.alice, "does-not-exist")
@@ -96,6 +98,7 @@ func TestJobStoreGetMissing(t *testing.T) {
 }
 
 func TestJobStoreAddRejectsBadInput(t *testing.T) {
+	t.Parallel()
 	f := newJobsFixture(t)
 	ctx := context.Background()
 	j := mustNewJob(t, f.alice, "send email")
@@ -120,6 +123,7 @@ func TestJobStoreAddRejectsBadInput(t *testing.T) {
 
 // The core rule of Task 18: one user can never see, list or delete another's jobs.
 func TestJobStoreKeepsUsersApart(t *testing.T) {
+	t.Parallel()
 	f := newJobsFixture(t)
 	ctx := context.Background()
 
@@ -151,6 +155,7 @@ func TestJobStoreKeepsUsersApart(t *testing.T) {
 }
 
 func TestDeletingUserDeletesTheirJobs(t *testing.T) {
+	t.Parallel()
 	f := newJobsFixture(t)
 	ctx := context.Background()
 	j := mustNewJob(t, f.alice, "alice's job")
@@ -171,6 +176,7 @@ func TestDeletingUserDeletesTheirJobs(t *testing.T) {
 }
 
 func TestJobStoreList(t *testing.T) {
+	t.Parallel()
 	f := newJobsFixture(t)
 	ctx := context.Background()
 
@@ -220,6 +226,7 @@ func TestJobStoreList(t *testing.T) {
 }
 
 func TestJobStoreListPaginates(t *testing.T) {
+	t.Parallel()
 	f := newJobsFixture(t)
 	ctx := context.Background()
 	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
@@ -270,6 +277,7 @@ func TestJobStoreListPaginates(t *testing.T) {
 }
 
 func TestJobStoreListRejectsBadLimit(t *testing.T) {
+	t.Parallel()
 	f := newJobsFixture(t)
 
 	_, err := f.s.List(context.Background(), f.alice, job.ListParams{Limit: 0})
@@ -279,6 +287,7 @@ func TestJobStoreListRejectsBadLimit(t *testing.T) {
 }
 
 func TestJobStoreDelete(t *testing.T) {
+	t.Parallel()
 	f := newJobsFixture(t)
 	ctx := context.Background()
 	j := mustNewJob(t, f.alice, "send email")
@@ -298,6 +307,7 @@ func TestJobStoreDelete(t *testing.T) {
 }
 
 func TestJobStoreStopsWhenContextIsCancelled(t *testing.T) {
+	t.Parallel()
 	f := newJobsFixture(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -309,10 +319,16 @@ func TestJobStoreStopsWhenContextIsCancelled(t *testing.T) {
 	}
 }
 
+// Not parallel: it uses 10 connections at once.
 func TestJobStoreConcurrentAdds(t *testing.T) {
 	f := newJobsFixture(t)
 	ctx := context.Background()
 	const n = 50
+	// 50 callers queue for production's 10 connections on purpose: an Add
+	// that asks the pool for a second connection while holding its
+	// transaction then deadlocks here instead of passing (case 26).
+	withConns(f.db, 10)
+	expectConnWaits(f.db)
 
 	var wg sync.WaitGroup
 	for i := range n {
@@ -344,6 +360,7 @@ func TestJobStoreConcurrentAdds(t *testing.T) {
 // Migration 0004 deletes jobs that existed before owners did. This test builds
 // a database at version 3, adds an ownerless job, then runs every migration.
 func TestMigration4DeletesOwnerlessJobs(t *testing.T) {
+	t.Parallel()
 	db := newTestDB(t)
 	ctx := context.Background()
 

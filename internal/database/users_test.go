@@ -30,6 +30,7 @@ func mustNewUser(t *testing.T, email string) *auth.User {
 }
 
 func TestUserStoreCreateAndGetRoundTrip(t *testing.T) {
+	t.Parallel()
 	s := newTestUserStore(t)
 	ctx := context.Background()
 	u := mustNewUser(t, "dan@example.com")
@@ -47,6 +48,7 @@ func TestUserStoreCreateAndGetRoundTrip(t *testing.T) {
 }
 
 func TestUserStoreGetMissing(t *testing.T) {
+	t.Parallel()
 	s := newTestUserStore(t)
 	if _, err := s.GetByEmail(context.Background(), "nobody@example.com"); !errors.Is(err, auth.ErrUserNotFound) {
 		t.Fatalf("err = %v, want auth.ErrUserNotFound", err)
@@ -54,6 +56,7 @@ func TestUserStoreGetMissing(t *testing.T) {
 }
 
 func TestUserStoreRejectsTakenEmail(t *testing.T) {
+	t.Parallel()
 	s := newTestUserStore(t)
 	ctx := context.Background()
 
@@ -68,6 +71,7 @@ func TestUserStoreRejectsTakenEmail(t *testing.T) {
 }
 
 func TestUserStoreDuplicateIDIsNotEmailTaken(t *testing.T) {
+	t.Parallel()
 	s := newTestUserStore(t)
 	ctx := context.Background()
 
@@ -85,6 +89,7 @@ func TestUserStoreDuplicateIDIsNotEmailTaken(t *testing.T) {
 }
 
 func TestUsersTableConstraints(t *testing.T) {
+	t.Parallel()
 	db := newMigratedTestDB(t)
 	ctx := context.Background()
 

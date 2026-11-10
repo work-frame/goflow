@@ -25,6 +25,7 @@ func expiredClaim(t *testing.T, w *WorkStore, id string) Claimed {
 }
 
 func TestEveryClaimGetsAFreshToken(t *testing.T) {
+	t.Parallel()
 	f := newJobsFixture(t)
 	w := NewWorkStore(f.db)
 	ctx := context.Background()
@@ -51,6 +52,7 @@ func TestEveryClaimGetsAFreshToken(t *testing.T) {
 // refused and changes nothing, while B's lease is untouched; then B
 // finishes normally.
 func TestAStaleHolderCanChangeNothing(t *testing.T) {
+	t.Parallel()
 	f := newJobsFixture(t)
 	w := NewWorkStore(f.db)
 	ctx := context.Background()
@@ -98,6 +100,7 @@ func TestAStaleHolderCanChangeNothing(t *testing.T) {
 // taken back, whatever the caller thinks, and the caller learns when it
 // runs out.
 func TestReclaimLeavesALiveLeaseAlone(t *testing.T) {
+	t.Parallel()
 	f := newJobsFixture(t)
 	w := NewWorkStore(f.db)
 	ctx := context.Background()
@@ -127,6 +130,7 @@ func TestReclaimLeavesALiveLeaseAlone(t *testing.T) {
 
 // Renewing moves the deadline forward, and only for the holder.
 func TestRenewExtendsTheLease(t *testing.T) {
+	t.Parallel()
 	f := newJobsFixture(t)
 	w := NewWorkStore(f.db)
 	ctx := context.Background()
@@ -149,6 +153,7 @@ func TestRenewExtendsTheLease(t *testing.T) {
 // Until somebody takes it back, an expired lease still belongs to its
 // holder: no other worker can have the job, so its result is accepted.
 func TestAnExpiredLeaseCountsUntilTakenBack(t *testing.T) {
+	t.Parallel()
 	f := newJobsFixture(t)
 	w := NewWorkStore(f.db)
 	id := addJobs(t, f, "late")[0]
@@ -161,6 +166,7 @@ func TestAnExpiredLeaseCountsUntilTakenBack(t *testing.T) {
 // A lost lease uses up the attempt, like a crash. On the last attempt the
 // job is dead, with a reason, instead of going round forever.
 func TestALostLastAttemptBuriesTheJob(t *testing.T) {
+	t.Parallel()
 	f := newJobsFixture(t)
 	w := NewWorkStore(f.db)
 	ctx := context.Background()
@@ -188,6 +194,7 @@ func TestALostLastAttemptBuriesTheJob(t *testing.T) {
 // back. Exactly one wins, every time. Never both (the job completed AND
 // queued to run again), never neither.
 func TestCompleteAndReclaimRaceHasOneWinner(t *testing.T) {
+	t.Parallel()
 	f := newJobsFixture(t)
 	w := NewWorkStore(f.db)
 	ctx := context.Background()
@@ -223,6 +230,7 @@ func TestCompleteAndReclaimRaceHasOneWinner(t *testing.T) {
 // The same race between a heartbeat and a reaper: either the lease is
 // renewed and stays, or it's taken back and the holder hears it's gone.
 func TestRenewAndReclaimRaceHasOneWinner(t *testing.T) {
+	t.Parallel()
 	f := newJobsFixture(t)
 	w := NewWorkStore(f.db)
 	ctx := context.Background()
@@ -257,6 +265,7 @@ func TestRenewAndReclaimRaceHasOneWinner(t *testing.T) {
 
 // Two reapers taking back the same jobs: each job goes back once.
 func TestReclaimExpiredSendsEachJobOnce(t *testing.T) {
+	t.Parallel()
 	f := newJobsFixture(t)
 	w := NewWorkStore(f.db)
 	ctx := context.Background()
@@ -297,6 +306,7 @@ func TestReclaimExpiredSendsEachJobOnce(t *testing.T) {
 }
 
 func TestProcessingReportsLeasedJobs(t *testing.T) {
+	t.Parallel()
 	f := newJobsFixture(t)
 	w := NewWorkStore(f.db)
 	ids := addJobs(t, f, "running", "waiting")
@@ -313,6 +323,7 @@ func TestProcessingReportsLeasedJobs(t *testing.T) {
 // The database itself refuses a processing job without an owner, and a
 // lease left on a job that isn't processing.
 func TestDatabaseTiesLeasesToProcessing(t *testing.T) {
+	t.Parallel()
 	f := newJobsFixture(t)
 	ctx := context.Background()
 	id := addJobs(t, f, "rules")[0]
@@ -331,6 +342,7 @@ func TestDatabaseTiesLeasesToProcessing(t *testing.T) {
 // Jobs left 'processing' before leases existed get one that has already
 // run out, so the first sweep takes them back.
 func TestMigration10GivesOldProcessingJobsAnExpiredLease(t *testing.T) {
+	t.Parallel()
 	db := newTestDB(t)
 	ctx := context.Background()
 
