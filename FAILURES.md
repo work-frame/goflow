@@ -692,6 +692,20 @@ Each case was reproduced on a real machine (Arch Linux, Go 1.27, PostgreSQL 17) 
 - **Why:** when a response body is closed, its connection goes back to the client's pool a moment later. A request sent in that moment finds the pool empty and dials a new connection; one of the two then sits unused. The server has accepted it but never read a request on it, and `Server.Shutdown` treats such a connection as busy until it is 5 seconds old (net/http, Go issue 22682), checked with whole-second clocks and a polling interval of up to 500 ms: 5.2 to 5.4 s. That was the "session tests sometimes take 5.4 s" seen since Phase 5. Found in Task 51 with per-test times from `go test -json` (`TestSessionEndToEnd`: 12 slow runs in 60, all 5.31 to 5.38 s) and a goroutine dump taken during a slow run: `Server.Shutdown` waiting, one server connection still in `readRequest`, one idle client connection. Nothing was wrong with sessions. A timeout raised or lowered at random would have hidden it.
 - **The first guard didn't guard.** The first version of the test waited for the race to happen by itself: twenty rounds of ordinary requests. In the sandbox the break-it failed it every time; on the development laptop the break-it **passed** (`ok 2.643s`). Same code, a faster or differently loaded machine, and the race never came up in twenty rounds. A test for a timing bug has to create the timing, not hope for it. The break-it on a second machine is what showed it.
 
+## 49. Test servers' workers don't wait out the production take
+
+- **Safeguard:** `testConfig` sets `TakeTimeout: testTakeTimeout` (1 s), and the API passes it to its worker pool; the pools `leases_test.go` builds by hand set it too. Production never sets it: `loadConfig` leaves it zero, the pool then uses `DefaultTakeTimeout` (2 s), and `TestLoadConfigDefaults` and `TestTakeWaitsThePoolsTakeTimeout` hold both to those values.
+- **Removed:** `TakeTimeout: testTakeTimeout` in `testConfig`, so test servers' workers wait 2 s per take, as in production.
+- **Caught by:** `TestTestServersDoNotWaitOutTheProductionTake`: a server with four idle workers, stopped 100 ms after it starts, must stop in under 1.5 s. It checks the test configuration, not a shutdown guarantee.
+- **Observed:**
+  ```text
+  --- FAIL: TestTestServersDoNotWaitOutTheProductionTake (2.11s)
+      shutdown_test.go:111: stopping a test server with idle workers took 1.989s, want under 1.5s: its workers waited out the rest of a 2s take
+  ```
+  Ten runs with the line removed: 1.98 to 1.99 s. Ten with it: 0.96 to 0.99 s. The workers start their first take at about the time the 100 ms wait ends, so stopping waits out nearly a whole take either way.
+- **Why:** an idle worker waits in Redis's `BLMOVE` until its take timeout runs out, and go-redis doesn't interrupt that wait when the context is cancelled. In production that delays a deploy's shutdown by up to 2 s, which nobody notices, so it stays. A test server stops at the end of every test, and timing each one (Task 52) showed every server with workers spending about 2 s on that wait: some 15 s of `cmd/api`'s 40. With 1 s, `cmd/api` takes 32.3 to 32.8 s in the sandbox (39 to 42 s before).
+- **Why not 100 ms:** that was the plan. go-redis rounds any blocking timeout under 1 s up to 1 s (its `formatSec`, v9.23.0) and logs a warning each time, so 100 ms behaved as 1 s, and a 1-second limit on the stop passed at 0.74 to 0.79 s: by luck. Redis itself accepts `BLMOVE ... 0.1`; sending that directly would have changed production Redis handling and run into the 2-second read deadline GoFlow sets, so it wasn't done.
+
 ## Experiment: the naive dual write loses a job
 
 Not a removed safeguard but the design of Task 22, run live on 2 November 2026 to see the failure Task 23 fixes. `POST /api/v1/jobs` saved the job in PostgreSQL, then pushed its ID to Redis, with nothing tying the two together.

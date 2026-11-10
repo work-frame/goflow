@@ -56,6 +56,11 @@ type config struct {
 	// events.CanaryInterval and events.CanaryTimeout. Tests shorten them.
 	CanaryInterval time.Duration
 	CanaryTimeout  time.Duration
+	// TakeTimeout is how long each worker waits in Redis for a job, and so
+	// how long an idle pool delays shutdown. Not read from the environment:
+	// zero means worker.DefaultTakeTimeout (2 s). Tests shorten it, because
+	// a test server stops at the end of every test (Task 52).
+	TakeTimeout time.Duration
 }
 
 // loadConfig reads the API settings through getenv (os.Getenv in production,

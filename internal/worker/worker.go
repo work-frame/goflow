@@ -32,12 +32,16 @@ import (
 )
 
 const (
-	// takeTimeout is how long one Take waits for a job before the worker
-	// checks whether it should stop. go-redis doesn't interrupt a blocking
-	// BLMOVE when its context is cancelled, so this is also the longest an
-	// idle worker delays shutdown. Shorter means faster shutdowns but more
-	// idle commands to Redis (one per worker per timeout).
-	takeTimeout = 2 * time.Second
+	// DefaultTakeTimeout is how long one Take waits for a job before the
+	// worker checks whether it should stop, unless Pool.TakeTimeout says
+	// otherwise. go-redis doesn't interrupt a blocking BLMOVE when its
+	// context is cancelled, so this is also the longest an idle worker
+	// delays shutdown: 2 s on a deploy, which nobody notices. Shorter means
+	// faster shutdowns but more idle commands to Redis (one per worker per
+	// timeout). Tests use 1 s, because their servers stop dozens of times a
+	// run (Task 52). Nothing shorter works: go-redis rounds a blocking
+	// timeout under 1 s up to 1 s.
+	DefaultTakeTimeout = 2 * time.Second
 	// abandonWait bounds the wait for handlers after their context is
 	// cancelled. A handler that ignores its context can't hold the process
 	// open forever.
@@ -122,6 +126,17 @@ type Pool struct {
 	// HeartbeatEvery is how often a running job's lease is renewed. Zero
 	// means a third of Lease, so two renewals can fail before it runs out.
 	HeartbeatEvery time.Duration
+	// TakeTimeout is how long one Take waits for a job, and so the longest
+	// an idle worker delays shutdown. Zero means DefaultTakeTimeout (2 s).
+	// Only tests set it.
+	TakeTimeout time.Duration
+}
+
+func (p *Pool) takeTimeout() time.Duration {
+	if p.TakeTimeout > 0 {
+		return p.TakeTimeout
+	}
+	return DefaultTakeTimeout
 }
 
 func (p *Pool) lease() time.Duration {
@@ -271,7 +286,7 @@ func (p *Pool) recoverAtStartup(ctx context.Context) error {
 // what a taken job runs under.
 func (p *Pool) work(stop, jobsCtx context.Context, log *slog.Logger) {
 	for stop.Err() == nil {
-		id, err := p.Queue.Take(stop, takeTimeout)
+		id, err := p.Queue.Take(stop, p.takeTimeout())
 		switch {
 		case err == nil:
 			// Taken, so it's this worker's job now, even if the stop signal

@@ -156,7 +156,7 @@ func TestAFrozenWorkerCannotOverwriteItsReplacement(t *testing.T) {
 		go func() {
 			defer close(done)
 			p := &worker.Pool{Queue: q, Store: store, Handle: h, Logger: discardLogger(), Workers: 1,
-				DrainTimeout: time.Second, Lease: lease, HeartbeatEvery: beat}
+				DrainTimeout: time.Second, Lease: lease, HeartbeatEvery: beat, TakeTimeout: testTakeTimeout}
 			if err := p.Run(poolCtx); err != nil {
 				t.Errorf("pool: %v", err)
 			}

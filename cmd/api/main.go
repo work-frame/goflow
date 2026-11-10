@@ -192,6 +192,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg config, ready func(addr s
 				Workers:      cfg.Workers,
 				Observe:      m.ObserveAttempt,
 				DrainTimeout: workerDrain,
+				TakeTimeout:  cfg.TakeTimeout,
 			}
 			// The pool stops taking jobs when ctx ends (SIGTERM), at the same
 			// moment the HTTP server starts shutting down, and drains in
