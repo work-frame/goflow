@@ -743,6 +743,7 @@ Each case was reproduced on a real machine (Arch Linux, Go 1.27, PostgreSQL 17) 
   ```
   Three runs, three failures, and no other test failed.
 - **Why:** a test that asserts "under 1.5 s" or "paused within 1 s" measures the machine as well as the code. Next to 38 other tests it can fail for no reason, or, worse, pass without testing what it says: the several-processes test would start its second server after the first one's jobs had finished, and prove nothing. A comment saying "don't parallelize this" doesn't stop anyone; a test that notices the overlap does. Go runs every sequential test before the first parallel one, so a marked test that keeps its mark is never next to the others.
+- **Measured on the development laptop (10 November 2026):** `cmd/api` took 25.3 to 25.9 s inside `check.sh`, down from 40.9 s with every test sequential. Peak PostgreSQL connections during the whole check, with `internal/database` running alongside: 35 (sampled about three times a second; the sandbox measured 41 with `-p=8 -parallel=8`), against a limit of 100, so test servers keep their production pool of 10. The break-it failed there with `38 started while it ran, 5 still running at its end`, and nothing else failed. Copying the test template took 60 ms and dropping it 26 ms.
 
 ## Experiment: the naive dual write loses a job
 
