@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"net/http"
 	"sync"
 	"testing"
 	"time"
@@ -30,7 +29,7 @@ func TestSeveralProcessesRunEachJobOnce(t *testing.T) {
 		return cfg
 	}
 	first, _ := startServerWith(t, newConfig())
-	client := &http.Client{Timeout: 5 * time.Second}
+	client := testClient(t, 5*time.Second)
 	token := signUp(t, client, first, dbURL)
 
 	var ids []string
@@ -132,7 +131,7 @@ func TestAFrozenWorkerCannotOverwriteItsReplacement(t *testing.T) {
 	cfg := testConfig("127.0.0.1:0", dbURL)
 	cfg.RedisURL = redisURL // relay only: this server runs no workers
 	base, _ := startServerWith(t, cfg)
-	client := &http.Client{Timeout: 5 * time.Second}
+	client := testClient(t, 5*time.Second)
 	token := signUp(t, client, base, dbURL)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)

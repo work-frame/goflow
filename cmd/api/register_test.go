@@ -33,7 +33,7 @@ func deleteUser(t *testing.T, dbURL, email string) {
 func TestRegisterEndToEnd(t *testing.T) {
 	dbURL := testDatabaseURL(t)
 	base, _ := startServer(t, dbURL)
-	client := &http.Client{Timeout: 5 * time.Second}
+	client := testClient(t, 5*time.Second)
 
 	b := make([]byte, 6)
 	rand.Read(b)

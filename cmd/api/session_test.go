@@ -30,7 +30,7 @@ func authed(t *testing.T, client *http.Client, method, url, token string) int {
 func TestSessionEndToEnd(t *testing.T) {
 	dbURL := testDatabaseURL(t)
 	base, _ := startServer(t, dbURL)
-	client := &http.Client{Timeout: 5 * time.Second}
+	client := testClient(t, 5*time.Second)
 
 	b := make([]byte, 6)
 	rand.Read(b)
@@ -69,7 +69,7 @@ func TestSessionEndToEnd(t *testing.T) {
 func TestAccountSecurityEndToEnd(t *testing.T) {
 	dbURL := testDatabaseURL(t)
 	base, _ := startServer(t, dbURL)
-	client := &http.Client{Timeout: 5 * time.Second}
+	client := testClient(t, 5*time.Second)
 
 	laptop := signUp(t, client, base, dbURL)
 	me := base + "/api/v1/auth/me"

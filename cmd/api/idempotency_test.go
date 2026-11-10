@@ -15,7 +15,7 @@ import (
 func TestIdempotentCreateUnderConcurrency(t *testing.T) {
 	dbURL := testDatabaseURL(t)
 	base, _ := startServer(t, dbURL)
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := testClient(t, 10*time.Second)
 	token := signUp(t, client, base, dbURL)
 
 	const n = 20
@@ -98,7 +98,7 @@ func TestRetryDeadJobEndToEnd(t *testing.T) {
 	cfg.RedisURL = redisURL
 	cfg.Workers = 2
 	base, _ := startServerWith(t, cfg)
-	client := &http.Client{Timeout: 5 * time.Second}
+	client := testClient(t, 5*time.Second)
 	token := signUp(t, client, base, dbURL)
 	id := createJob(t, client, base, token, "fail:permanent")
 

@@ -678,6 +678,20 @@ Each case was reproduced on a real machine (Arch Linux, Go 1.27, PostgreSQL 17) 
   The same for the other four cases (no Redis, no PostgreSQL, an empty Redis URL, `GOFLOW_QUICK_CHECK=yes`).
 - **Why:** a warning is a line in the middle of a long output that ends with `ALL CHECKS PASSED`. It is exactly what went wrong for months (see Environment incidents): every Redis test skipped, each package printed `ok`, and the check looked whole. A rule that only warns gets read once; a rule that stops gets obeyed. The quick check is still there, but it has to be asked for, and its last line says what it was.
 
+## 48. Test clients close their idle connections before the server stops
+
+- **Safeguard:** every end-to-end test in `cmd/api` gets its client from `testClient`, which has its own connection pool and closes its idle connections when the test ends, before the server stops.
+- **Removed:** the `t.Cleanup(c.CloseIdleConnections)` line in `testClient`.
+- **Caught by:** `TestStoppingTheServerDoesNotWaitForSpareConnections`. It makes the client dial a connection it never uses, on purpose: request B is sent while A's response is still open, so the client dials a second connection, and the test slows that dial by 300 ms; A's body is then read, B takes A's connection, and the slow dial lands in the pool unused. Stopping the server must take under 2 s.
+- **Observed:**
+  ```text
+  --- FAIL: TestStoppingTheServerDoesNotWaitForSpareConnections (5.65s)
+      shutdown_test.go:80: stopping the server took 5.228s, want under 2s: it waited for a connection the client dialed and never used
+  ```
+  Nine runs with the line removed, nine failures (5.19 to 5.31 s); twenty runs with it, twenty passes.
+- **Why:** when a response body is closed, its connection goes back to the client's pool a moment later. A request sent in that moment finds the pool empty and dials a new connection; one of the two then sits unused. The server has accepted it but never read a request on it, and `Server.Shutdown` treats such a connection as busy until it is 5 seconds old (net/http, Go issue 22682), checked with whole-second clocks and a polling interval of up to 500 ms: 5.2 to 5.4 s. That was the "session tests sometimes take 5.4 s" seen since Phase 5. Found in Task 51 with per-test times from `go test -json` (`TestSessionEndToEnd`: 12 slow runs in 60, all 5.31 to 5.38 s) and a goroutine dump taken during a slow run: `Server.Shutdown` waiting, one server connection still in `readRequest`, one idle client connection. Nothing was wrong with sessions. A timeout raised or lowered at random would have hidden it.
+- **The first guard didn't guard.** The first version of the test waited for the race to happen by itself: twenty rounds of ordinary requests. In the sandbox the break-it failed it every time; on the development laptop the break-it **passed** (`ok 2.643s`). Same code, a faster or differently loaded machine, and the race never came up in twenty rounds. A test for a timing bug has to create the timing, not hope for it. The break-it on a second machine is what showed it.
+
 ## Experiment: the naive dual write loses a job
 
 Not a removed safeguard but the design of Task 22, run live on 2 November 2026 to see the failure Task 23 fixes. `POST /api/v1/jobs` saved the job in PostgreSQL, then pushed its ID to Redis, with nothing tying the two together.
