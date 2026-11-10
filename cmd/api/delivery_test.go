@@ -141,6 +141,7 @@ func deliveryGauge(t *testing.T, client *http.Client, base string) float64 {
 // job events stop reaching the API, an open stream says so and stays
 // open, and says so again when they flow, so the page can reload.
 func TestLiveDeliveryPausesWhileRedisIsAway(t *testing.T) {
+	sequentialTest(t)
 	dbURL := testDatabaseURL(t)
 	redisURL, proxy := proxiedRedisURL(t)
 	cfg := testConfig("127.0.0.1:0", dbURL)
@@ -185,6 +186,7 @@ func TestLiveDeliveryPausesWhileRedisIsAway(t *testing.T) {
 // A dropped connection that go-redis replaces at once is not a pause:
 // streams get the usual resync and nothing else.
 func TestShortRedisDropIsOnlyAResync(t *testing.T) {
+	sequentialTest(t)
 	dbURL := testDatabaseURL(t)
 	redisURL, proxy := proxiedRedisURL(t)
 	cfg := testConfig("127.0.0.1:0", dbURL)

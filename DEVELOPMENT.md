@@ -193,6 +193,8 @@ In `cmd/api` tests, get HTTP clients from `testClient(t, timeout)` after `startS
 
 In `cmd/api`, `testDatabaseURL(t)` is the test's own database, copied from a template and dropped at the end; every call in one test returns the same copy. Build server configs with `testConfig`, which names the test's Redis queue keys and events channel after that copy. A test that needs two separate deployments side by side takes a second copy with `newTestDatabaseURL(t)`. Never use production's key names or `goflow:events` in a test (case 51).
 
+Every test in `cmd/api` starts with `parallelTest(t)`, or `sequentialTest(t)` if it measures time or depends on when something happens; then add it to `timingTests` in `parallel_test.go` with the reason. `TestExactlyTheTimingTestsRunAlone` fails if a test starts with neither, or if the list and the marks disagree (case 52).
+
 In `internal/database`, a test that gets its own copy (`newMigratedTestDB`, `newTestDB`, or a fixture built on them) starts with `t.Parallel()`. Its copy has 3 connections. A test that runs more callers at once than that calls `withConns(db, n)` and stays sequential (no `t.Parallel()`), so a few of them can't add up to PostgreSQL's limit of 100. A test that waits for a connection without asking fails with "waited N times for one of its 3 database connections" (case 50).
 
 ### Breaking things on purpose

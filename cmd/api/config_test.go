@@ -47,6 +47,7 @@ const (
 )
 
 func TestLoadConfigDefaults(t *testing.T) {
+	parallelTest(t)
 	cfg, err := loadConfig(env(map[string]string{"GOFLOW_DATABASE_URL": testDBURL}))
 	if err != nil {
 		t.Fatalf("loadConfig: %v", err)
@@ -82,6 +83,7 @@ func TestLoadConfigDefaults(t *testing.T) {
 }
 
 func TestLoadConfigReadsEverySetting(t *testing.T) {
+	parallelTest(t)
 	cfg, err := loadConfig(env(map[string]string{
 		"GOFLOW_ADDR":             "127.0.0.1:9000",
 		"GOFLOW_DATABASE_URL":     testDBURL,
@@ -105,6 +107,7 @@ func TestLoadConfigReadsEverySetting(t *testing.T) {
 }
 
 func TestLoadConfigRejectsBadSettings(t *testing.T) {
+	parallelTest(t)
 	tests := []struct {
 		name    string
 		vars    map[string]string
@@ -141,6 +144,7 @@ func TestLoadConfigRejectsBadSettings(t *testing.T) {
 }
 
 func TestLoadConfigErrorsNeverContainTheDatabaseURL(t *testing.T) {
+	parallelTest(t)
 	_, err := loadConfig(env(map[string]string{"GOFLOW_DATABASE_URL": testDBURL, "GOFLOW_BCRYPT_COST": "nope"}))
 	if err == nil {
 		t.Fatal("want an error")
@@ -151,6 +155,7 @@ func TestLoadConfigErrorsNeverContainTheDatabaseURL(t *testing.T) {
 }
 
 func TestLoadConfigUsesPORTFromTheHost(t *testing.T) {
+	parallelTest(t)
 	cfg, err := loadConfig(env(map[string]string{"GOFLOW_DATABASE_URL": testDBURL, "PORT": "10000"}))
 	if err != nil {
 		t.Fatal(err)
@@ -171,6 +176,7 @@ func TestLoadConfigUsesPORTFromTheHost(t *testing.T) {
 // A database on another machine must be reached over TLS. One on this machine
 // (the development container) or in a private network (Compose) may skip it.
 func TestLoadConfigRequiresTLSForRemoteDatabases(t *testing.T) {
+	parallelTest(t)
 	tests := []struct {
 		url string
 		ok  bool
@@ -200,6 +206,7 @@ func TestLoadConfigRequiresTLSForRemoteDatabases(t *testing.T) {
 // Like the database: a Redis on another machine must be reached over TLS,
 // which for Redis means the rediss:// scheme.
 func TestLoadConfigRequiresTLSForRemoteRedis(t *testing.T) {
+	parallelTest(t)
 	tests := []struct {
 		url string
 		ok  bool

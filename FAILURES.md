@@ -732,6 +732,18 @@ Each case was reproduced on a real machine (Arch Linux, Go 1.27, PostgreSQL 17) 
 - **The channel on its own:** with the prefixes kept apart and one events channel for both servers instead, the queue part passed and the events part failed: `server A's job b0cf6ec2... appeared 4 times on the other server's events channel`. Keys and Pub/Sub channels are separate namespaces in Redis; a key prefix doesn't move a channel, so each is set, and checked, on its own.
 - **Why it matters now:** until this task, the tests in `cmd/api` all shared the `goflow_test` database and the production key names, and ran one at a time, so nothing crossed. Run two at once (Task 55) and each server's relay, workers and lease reaper would act on the other test's jobs.
 
+## 52. Timing tests run alone
+
+- **Safeguard:** in `cmd/api`, every test starts with `parallelTest(t)` or `sequentialTest(t)`. The seven in `timingTests` (two shutdown limits, the 300 ms lease race, the two Redis-outage delivery tests, shutdown with open streams, and the several-processes test whose servers must start inside 600 ms jobs) use `sequentialTest`, which fails the test if any parallel test started or was still running while it ran. `TestExactlyTheTimingTestsRunAlone` reads the package's source and checks that exactly those seven start with `sequentialTest` and every other test with `parallelTest`.
+- **Removed:** nothing taken away: `t.Parallel()` added right after `sequentialTest(t)` in `TestShortRedisDropIsOnlyAResync`, so the test keeps its mark, passes the source check, and runs with the parallel tests.
+- **Caught by:** `sequentialTest`'s cleanup. The test's own checks passed every time; only the overlap check failed:
+  ```text
+  --- FAIL: TestShortRedisDropIsOnlyAResync (2.18s)
+      parallel_test.go:56: TestShortRedisDropIsOnlyAResync ran alongside parallel tests (38 started while it ran, 0 still running at its end): its timing can't be trusted
+  ```
+  Three runs, three failures, and no other test failed.
+- **Why:** a test that asserts "under 1.5 s" or "paused within 1 s" measures the machine as well as the code. Next to 38 other tests it can fail for no reason, or, worse, pass without testing what it says: the several-processes test would start its second server after the first one's jobs had finished, and prove nothing. A comment saying "don't parallelize this" doesn't stop anyone; a test that notices the overlap does. Go runs every sequential test before the first parallel one, so a marked test that keeps its mark is never next to the others.
+
 ## Experiment: the naive dual write loses a job
 
 Not a removed safeguard but the design of Task 22, run live on 2 November 2026 to see the failure Task 23 fixes. `POST /api/v1/jobs` saved the job in PostgreSQL, then pushed its ID to Redis, with nothing tying the two together.

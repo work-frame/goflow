@@ -66,6 +66,7 @@ func listenTo(t *testing.T, q *queue.Queue, channel string) *channelRecorder {
 // other's job IDs, found no such job in their database, and dropped them:
 // those jobs never ran (FAILURES.md, case 51).
 func TestTwoTestServersShareNoJobsAndNoEvents(t *testing.T) {
+	parallelTest(t)
 	redisURL := testRedisURL(t)
 	newServer := func() (config, string) {
 		cfg := testConfig("127.0.0.1:0", newTestDatabaseURL(t))

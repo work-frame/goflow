@@ -20,6 +20,7 @@ func composeValue(block, key string) string {
 // Valkey. A second build, another database or one replica would still
 // start, so nothing but this test notices.
 func TestComposeRunsThreeWorkersFromTheAPIsImage(t *testing.T) {
+	parallelTest(t)
 	compose := readRepoFile(t, "compose.yaml")
 	api, worker := service(t, compose, "api"), service(t, compose, "worker")
 

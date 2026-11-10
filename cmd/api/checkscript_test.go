@@ -31,6 +31,7 @@ func runCheck(t *testing.T, env ...string) (output string, code int) {
 // a skipped test prints "ok". So a full check refuses to start without
 // both (Task 49: the Redis tests skipped on the laptop for months).
 func TestCheckRefusesToSkipTheDatabaseTests(t *testing.T) {
+	parallelTest(t)
 	const db, redis = "GOFLOW_TEST_DATABASE_URL", "GOFLOW_TEST_REDIS_URL"
 	cases := []struct {
 		name    string
@@ -67,6 +68,7 @@ func TestCheckRefusesToSkipTheDatabaseTests(t *testing.T) {
 // With both URLs, or with GOFLOW_QUICK_CHECK=1, the checks start. A
 // quick check says so first, so its result can't pass for a full one.
 func TestCheckStartsWithBothURLsOrWhenAskedForAQuickCheck(t *testing.T) {
+	parallelTest(t)
 	out, _ := runCheck(t, "GOFLOW_TEST_DATABASE_URL=postgres://x", "GOFLOW_TEST_REDIS_URL=redis://x")
 	if !strings.Contains(out, "==> gofmt") || strings.Contains(out, "QUICK") {
 		t.Errorf("with both URLs, want a full check:\n%s", out)

@@ -188,6 +188,7 @@ func createJob(t *testing.T, client *http.Client, base, token, title string) str
 }
 
 func TestServerEndToEnd(t *testing.T) {
+	parallelTest(t)
 	dbURL := testDatabaseURL(t)
 	base, _ := startServer(t, dbURL)
 	client := testClient(t, 5*time.Second)
@@ -221,6 +222,7 @@ func TestServerEndToEnd(t *testing.T) {
 // Jobs and sessions both live in PostgreSQL, so a restarted server still
 // knows the token and still has the job.
 func TestJobsSurviveRestart(t *testing.T) {
+	parallelTest(t)
 	dbURL := testDatabaseURL(t)
 
 	base, stop := startServer(t, dbURL)
@@ -241,6 +243,7 @@ func TestJobsSurviveRestart(t *testing.T) {
 }
 
 func TestRunFailsWhenPortIsTaken(t *testing.T) {
+	parallelTest(t)
 	dbURL := testDatabaseURL(t)
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")

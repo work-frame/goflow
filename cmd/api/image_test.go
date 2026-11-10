@@ -43,6 +43,7 @@ func instructions(t *testing.T) []string {
 }
 
 func TestImageIsStaticAndRunsAsNonroot(t *testing.T) {
+	parallelTest(t)
 	ins := instructions(t)
 	var froms []string
 	cgoOff, built := false, false
@@ -85,6 +86,7 @@ func containsLine(lines []string, want string) bool {
 // Every instruction is stored in the image, and Render passes each
 // environment variable as a build argument. No secret may appear in one.
 func TestImageHoldsNoSettingsOrSecrets(t *testing.T) {
+	parallelTest(t)
 	for _, in := range instructions(t) {
 		if strings.HasPrefix(in, "ARG ") {
 			t.Errorf("Dockerfile declares %q: build arguments end up in the image's history", in)
@@ -102,6 +104,7 @@ func TestImageHoldsNoSettingsOrSecrets(t *testing.T) {
 // check as before. A buildCommand would mean Render is building the code
 // itself again, outside the image.
 func TestRenderRunsTheImage(t *testing.T) {
+	parallelTest(t)
 	yaml := readRepoFile(t, "render.yaml")
 	api := yaml[:strings.Index(yaml, "- type: keyvalue")] // the goflow-api service
 	for _, want := range []string{"name: goflow-api", "runtime: docker", "dockerfilePath: ./Dockerfile", "healthCheckPath: /healthz"} {
@@ -118,6 +121,7 @@ func TestRenderRunsTheImage(t *testing.T) {
 
 // The build folder is an allowlist: everything out, then only these back in.
 func TestDockerignoreIsAnAllowlist(t *testing.T) {
+	parallelTest(t)
 	allowed := map[string]bool{"!go.mod": true, "!go.sum": true, "!cmd": true, "!internal": true}
 	var rules []string
 	for _, line := range strings.Split(readRepoFile(t, ".dockerignore"), "\n") {
@@ -138,6 +142,7 @@ func TestDockerignoreIsAnAllowlist(t *testing.T) {
 // Docker's port rules bypass most host firewalls: a port published on
 // 0.0.0.0 is open to the whole network.
 func TestComposePublishesPortsOnLoopbackOnly(t *testing.T) {
+	parallelTest(t)
 	ports := regexp.MustCompile(`(?m)^\s+- "([^"]+)"\s*(#.*)?$`)
 	inPorts := false
 	found := 0
