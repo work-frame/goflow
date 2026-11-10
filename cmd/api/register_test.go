@@ -31,6 +31,7 @@ func deleteUser(t *testing.T, dbURL, email string) {
 }
 
 func TestRegisterEndToEnd(t *testing.T) {
+	parallelTest(t)
 	dbURL := testDatabaseURL(t)
 	base, _ := startServer(t, dbURL)
 	client := testClient(t, 5*time.Second)

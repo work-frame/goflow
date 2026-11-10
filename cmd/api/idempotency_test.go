@@ -13,6 +13,7 @@ import (
 // same moment, through real HTTP into real PostgreSQL. Exactly one job may
 // exist afterwards, and every client must get its ID back.
 func TestIdempotentCreateUnderConcurrency(t *testing.T) {
+	parallelTest(t)
 	dbURL := testDatabaseURL(t)
 	base, _ := startServer(t, dbURL)
 	client := testClient(t, 10*time.Second)
@@ -91,6 +92,7 @@ func TestIdempotentCreateUnderConcurrency(t *testing.T) {
 // relay → Redis → worker. "fail:permanent" dies on every run, so it ends
 // dead again, but only after a worker has run it a second time.
 func TestRetryDeadJobEndToEnd(t *testing.T) {
+	parallelTest(t)
 	dbURL := testDatabaseURL(t)
 	redisURL := testRedisURL(t)
 

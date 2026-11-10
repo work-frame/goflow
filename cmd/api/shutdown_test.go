@@ -26,6 +26,7 @@ import (
 // by itself; on the development laptop it never did, and the break-it
 // passed.)
 func TestStoppingTheServerDoesNotWaitForSpareConnections(t *testing.T) {
+	sequentialTest(t)
 	dbURL := testDatabaseURL(t)
 	const limit = 2 * time.Second
 	var started time.Time
@@ -95,6 +96,7 @@ func TestStoppingTheServerDoesNotWaitForSpareConnections(t *testing.T) {
 // stopping waits out nearly a whole take: measured 0.96 to 0.99 s with 1 s,
 // 1.98 to 1.99 s with 2 s. The limit, 1.5 s, sits between them.
 func TestTestServersDoNotWaitOutTheProductionTake(t *testing.T) {
+	sequentialTest(t)
 	cfg := testConfig("127.0.0.1:0", testDatabaseURL(t))
 	cfg.RedisURL = testRedisURL(t)
 	cfg.Workers = 4

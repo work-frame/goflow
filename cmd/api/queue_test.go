@@ -15,6 +15,7 @@ import (
 // A job created through the API reaches Redis through the outbox and the
 // relay, and its status moves from pending to queued.
 func TestCreatedJobsReachTheQueue(t *testing.T) {
+	parallelTest(t)
 	dbURL := testDatabaseURL(t)
 	redisURL := testRedisURL(t)
 
@@ -71,6 +72,7 @@ func TestCreatedJobsReachTheQueue(t *testing.T) {
 // With GOFLOW_WORKERS set, the API runs the job itself: outbox → relay →
 // Redis → worker pool → completed, all in one process.
 func TestAPIWorkersRunJobs(t *testing.T) {
+	parallelTest(t)
 	dbURL := testDatabaseURL(t)
 	redisURL := testRedisURL(t)
 
@@ -106,19 +108,31 @@ func TestAPIWorkersRunJobs(t *testing.T) {
 // jobs to the outbox, and its relay and workers keep retrying in the
 // background. Nothing listens on port 1.
 func TestAPIStartsWhenRedisIsDown(t *testing.T) {
+	parallelTest(t)
 	dbURL := testDatabaseURL(t)
 
 	cfg := testConfig("127.0.0.1:0", dbURL)
 	cfg.RedisURL = "redis://127.0.0.1:1/0"
 	cfg.Workers = 1
+	// Where this test's time goes, shown with -v (Task 55). With no Redis,
+	// the startup ping and the first logins wait out go-redis's retries.
+	started := time.Now()
+	var stopping time.Time
+	t.Cleanup(func() { t.Logf("timing: stop %v", time.Since(stopping).Round(time.Millisecond)) })
 	base, _ := startServerWith(t, cfg)
+	t.Cleanup(func() { stopping = time.Now() }) // runs just before the server's stop
+	t.Logf("timing: start %v", time.Since(started).Round(time.Millisecond))
 	client := testClient(t, 10*time.Second)
 
 	if status, _, body := request(t, client, http.MethodGet, base+"/readyz", ""); status != http.StatusOK {
 		t.Fatalf("readyz with Redis down: status %d, body %s; readiness depends on the database only", status, body)
 	}
+	step := time.Now()
 	token := signUp(t, client, base, dbURL)
+	t.Logf("timing: register and log in %v", time.Since(step).Round(time.Millisecond))
+	step = time.Now()
 	id := createJob(t, client, base, token, "waits for redis")
+	t.Logf("timing: create a job %v", time.Since(step).Round(time.Millisecond))
 
 	status, _, body := requestAs(t, client, http.MethodGet, base+"/api/v1/jobs/"+id, token, "")
 	if status != http.StatusOK {
@@ -157,6 +171,7 @@ func jobState(t *testing.T, client *http.Client, base, token, id string) (string
 // promoter → queue) and completes on attempt 2; a permanent failure is
 // dead after 1 attempt.
 func TestAPIRetriesAFailedJob(t *testing.T) {
+	parallelTest(t)
 	dbURL := testDatabaseURL(t)
 	redisURL := testRedisURL(t)
 

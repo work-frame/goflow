@@ -33,6 +33,7 @@ func service(t *testing.T, compose, name string) string {
 // Prometheus and Grafana start only when asked for: a plain
 // "docker compose up" stays PostgreSQL, Valkey, the API and the workers.
 func TestMonitoringIsOptIn(t *testing.T) {
+	parallelTest(t)
 	compose := readRepoFile(t, "compose.yaml")
 	for _, name := range []string{"prometheus", "grafana"} {
 		if !strings.Contains(service(t, compose, name), `profiles: ["monitoring"]`) {
@@ -49,6 +50,7 @@ func TestMonitoringIsOptIn(t *testing.T) {
 // Prometheus must send the token the API in compose expects. If they
 // differ, every scrape gets 401 and the graphs stay empty.
 func TestPrometheusUsesTheAPIsMetricsToken(t *testing.T) {
+	parallelTest(t)
 	apiToken := regexp.MustCompile(`(?m)^\s+GOFLOW_METRICS_TOKEN:\s*(\S+)`).FindStringSubmatch(service(t, readRepoFile(t, "compose.yaml"), "api"))
 	if apiToken == nil {
 		t.Fatal("compose.yaml: the api service has no GOFLOW_METRICS_TOKEN, so it serves no /metrics")
@@ -68,6 +70,7 @@ func TestPrometheusUsesTheAPIsMetricsToken(t *testing.T) {
 // Every metric the dashboard asks for exists in internal/metrics. A typo
 // in a query isn't an error in Grafana: the panel just says "No data".
 func TestDashboardQueriesKnownMetrics(t *testing.T) {
+	parallelTest(t)
 	var dash struct {
 		Panels []struct {
 			Title   string `json:"title"`

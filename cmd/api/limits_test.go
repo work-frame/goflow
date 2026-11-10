@@ -14,6 +14,7 @@ import (
 // refused with Retry-After, and Redis holds a counter for it that expires
 // and doesn't contain the email.
 func TestLoginIsLimitedEndToEnd(t *testing.T) {
+	parallelTest(t)
 	dbURL := testDatabaseURL(t)
 	redisURL := testRedisURL(t)
 	cfg := testConfig("127.0.0.1:0", dbURL)

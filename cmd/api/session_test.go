@@ -28,6 +28,7 @@ func authed(t *testing.T, client *http.Client, method, url, token string) int {
 // TestSessionEndToEnd runs register → login → me → logout → me against the
 // real server and database: migration 0003, SessionStore and the wiring in run.
 func TestSessionEndToEnd(t *testing.T) {
+	parallelTest(t)
 	dbURL := testDatabaseURL(t)
 	base, _ := startServer(t, dbURL)
 	client := testClient(t, 5*time.Second)
@@ -67,6 +68,7 @@ func TestSessionEndToEnd(t *testing.T) {
 // TestAccountSecurityEndToEnd: a password change ends the other sessions and
 // keeps this one; logout-all then ends this one too. Real server, real database.
 func TestAccountSecurityEndToEnd(t *testing.T) {
+	parallelTest(t)
 	dbURL := testDatabaseURL(t)
 	base, _ := startServer(t, dbURL)
 	client := testClient(t, 5*time.Second)

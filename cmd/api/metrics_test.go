@@ -42,6 +42,7 @@ func value(body, series string) float64 {
 // PostgreSQL, Redis and workers: status changes, the retried and the
 // completed attempt, events sent, and the queue sizes from Redis.
 func TestMetricsEndToEnd(t *testing.T) {
+	parallelTest(t)
 	dbURL := testDatabaseURL(t)
 	redisURL := testRedisURL(t)
 	cfg := testConfig("127.0.0.1:0", dbURL)

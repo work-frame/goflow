@@ -20,6 +20,7 @@ import (
 // the first instance's jobs ran again (attempt 2) while still running.
 // Now every job runs exactly once.
 func TestSeveralProcessesRunEachJobOnce(t *testing.T) {
+	sequentialTest(t)
 	dbURL := testDatabaseURL(t)
 	redisURL := testRedisURL(t)
 	newConfig := func() config {
@@ -126,6 +127,7 @@ func leaseRow(t *testing.T, ctx context.Context, db *sql.DB, id string) (status,
 // its result. A's write is refused and changes nothing; B's job stays B's,
 // and B's result is the one recorded.
 func TestAFrozenWorkerCannotOverwriteItsReplacement(t *testing.T) {
+	sequentialTest(t)
 	dbURL := testDatabaseURL(t)
 	redisURL := testRedisURL(t)
 	cfg := testConfig("127.0.0.1:0", dbURL)

@@ -99,6 +99,7 @@ type liveEvent struct {
 // what a client must do: keep an event only if its version is higher than
 // the copy it already has.
 func TestLiveEventsEndToEnd(t *testing.T) {
+	sequentialTest(t)
 	dbURL := testDatabaseURL(t)
 	redisURL := testRedisURL(t)
 

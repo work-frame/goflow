@@ -31,6 +31,7 @@ func waitForCalls(t *testing.T, d *countingDeleter, want int64) {
 }
 
 func TestSessionCleanupRunsAtStartAndOnEveryTick(t *testing.T) {
+	parallelTest(t)
 	d := &countingDeleter{}
 	stop := startSessionCleanup(context.Background(), discardLogger(), d, 10*time.Millisecond)
 	defer stop()
@@ -39,6 +40,7 @@ func TestSessionCleanupRunsAtStartAndOnEveryTick(t *testing.T) {
 }
 
 func TestSessionCleanupStopsAndStaysStopped(t *testing.T) {
+	parallelTest(t)
 	d := &countingDeleter{}
 	stop := startSessionCleanup(context.Background(), discardLogger(), d, 5*time.Millisecond)
 	waitForCalls(t, d, 1)
@@ -52,6 +54,7 @@ func TestSessionCleanupStopsAndStaysStopped(t *testing.T) {
 }
 
 func TestSessionCleanupStopsWhenContextEnds(t *testing.T) {
+	parallelTest(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	stop := startSessionCleanup(ctx, discardLogger(), &countingDeleter{}, time.Hour)
 	cancel()
@@ -67,6 +70,7 @@ func TestSessionCleanupStopsWhenContextEnds(t *testing.T) {
 
 // A failing cleanup is logged and retried on the next tick, never fatal.
 func TestSessionCleanupKeepsGoingAfterErrors(t *testing.T) {
+	parallelTest(t)
 	d := &countingDeleter{err: errors.New("database is down")}
 	stop := startSessionCleanup(context.Background(), discardLogger(), d, 5*time.Millisecond)
 	defer stop()
