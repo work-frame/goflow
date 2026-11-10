@@ -717,6 +717,7 @@ Each case was reproduced on a real machine (Arch Linux, Go 1.27, PostgreSQL 17) 
       testdb_test.go:157: this test waited 17 times (138ms in all) for one of its 3 database connections: it needs more at once. Give it enough with withConns, or its concurrent callers queue instead of racing
   ```
 - **Why:** capping each copy at 3 connections is what lets 77 tests share PostgreSQL's 100 connections while they run in parallel. But a race test whose 20 callers queue for 3 connections runs them at most 3 at a time: it still passes, and it no longer tests what it says. The test never complains; only the pool's statistics show it. Before the change, a probe that capped every copy at 3 and printed each pool's `WaitCount` found 4 tests waiting: these three, and the case 26 test, which waits on purpose. Measured peaks while the package ran: 7 connections with 2 tests at a time, 16 with 8.
+- **Measured on the development laptop (10 November 2026):** `go test -race -count=1 ./internal/database/` took 16.9, 17.2 and 16.9 s before the change, and 5.8, 5.4 and 5.4 s after (5.6 s inside `check.sh`): about three times faster. The break-it failed there with `waited 17 times (304ms in all)`.
 
 ## Experiment: the naive dual write loses a job
 
