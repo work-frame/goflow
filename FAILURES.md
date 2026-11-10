@@ -719,6 +719,19 @@ Each case was reproduced on a real machine (Arch Linux, Go 1.27, PostgreSQL 17) 
 - **Why:** capping each copy at 3 connections is what lets 77 tests share PostgreSQL's 100 connections while they run in parallel. But a race test whose 20 callers queue for 3 connections runs them at most 3 at a time: it still passes, and it no longer tests what it says. The test never complains; only the pool's statistics show it. Before the change, a probe that capped every copy at 3 and printed each pool's `WaitCount` found 4 tests waiting: these three, and the case 26 test, which waits on purpose. Measured peaks while the package ran: 7 connections with 2 tests at a time, 16 with 8.
 - **Measured on the development laptop (10 November 2026):** `go test -race -count=1 ./internal/database/` took 16.9, 17.2 and 16.9 s before the change, and 5.8, 5.4 and 5.4 s after (5.6 s inside `check.sh`): about three times faster. The break-it failed there with `waited 17 times (304ms in all)`.
 
+## 51. Every test has its own database, queue keys and events channel
+
+- **Safeguard:** in `cmd/api`, every test gets its own copy of a migrated template database (`testDatabaseURL`; `TestMain` builds the template), and `testConfig` names the test's Redis queue keys and events channel after that copy: `goflow:test:<database>:jobs:*` and `goflow:test:<database>:events`. The servers of one test share them, like the processes of one deployment; two tests never do. Production leaves the two new settings (`RedisKeyPrefix`, `EventsChannel`) empty and keeps `goflow:jobs:*` and `goflow:events`; `TestLoadConfigDefaults`, `TestDefaultKeysAreTheProductionNames` and `TestAnotherChannelMovesEventsSubscriptionAndCanaries` hold them there.
+- **Removed:** the per-test prefix in `testConfig`: every test server used the queue keys `goflow:test:shared:jobs:*`, while each test kept its own events channel.
+- **Caught by:** `TestTwoTestServersShareNoJobsAndNoEvents`: two servers side by side, five jobs each; every job must finish on its own server on the first attempt, and each server's events channel must carry its own jobs and none of the other's.
+- **Observed:** five runs, five failures:
+  ```text
+  isolation_test.go:116: server A's job 8e573a7b42e5de70ebd56175835071c0 still queued after 10s: the other server's workers took its ID from a shared queue
+  ```
+  The job never ran anywhere. Server B's worker took its ID, found no such job in B's database, treated it as finished elsewhere and acknowledged it: the ID was gone from Redis, and the job stayed `queued` in A's database.
+- **The channel on its own:** with the prefixes kept apart and one events channel for both servers instead, the queue part passed and the events part failed: `server A's job b0cf6ec2... appeared 4 times on the other server's events channel`. Keys and Pub/Sub channels are separate namespaces in Redis; a key prefix doesn't move a channel, so each is set, and checked, on its own.
+- **Why it matters now:** until this task, the tests in `cmd/api` all shared the `goflow_test` database and the production key names, and ran one at a time, so nothing crossed. Run two at once (Task 55) and each server's relay, workers and lease reaper would act on the other test's jobs.
+
 ## Experiment: the naive dual write loses a job
 
 Not a removed safeguard but the design of Task 22, run live on 2 November 2026 to see the failure Task 23 fixes. `POST /api/v1/jobs` saved the job in PostgreSQL, then pushed its ID to Redis, with nothing tying the two together.

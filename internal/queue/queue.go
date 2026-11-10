@@ -39,6 +39,17 @@ const (
 	LeasesKey = "goflow:jobs:leases"
 )
 
+// DefaultPrefix starts the names of the queue's keys: PendingKey and the
+// others are DefaultPrefix + "jobs:...". Keys(DefaultPrefix) gives them.
+const DefaultPrefix = "goflow:"
+
+// Keys returns the queue's four key names under prefix. Production uses
+// DefaultPrefix; tests give every test its own, so two test servers never
+// take each other's jobs (Task 54).
+func Keys(prefix string) (pending, processing, delayed, leases string) {
+	return prefix + "jobs:pending", prefix + "jobs:processing", prefix + "jobs:delayed", prefix + "jobs:leases"
+}
+
 // ErrEmpty means Take waited and no job ID arrived.
 var ErrEmpty = errors.New("queue: no job waiting")
 
@@ -200,6 +211,12 @@ func (q *Queue) ExpiredLeases(ctx context.Context, now time.Time, limit int) ([]
 // keys. Tests use it so they never touch the real ones.
 func (q *Queue) WithKeys(pending, processing, delayed, leases string) *Queue {
 	return &Queue{rdb: q.rdb, key: pending, processing: processing, delayed: delayed, leases: leases}
+}
+
+// WithPrefix returns a Queue on the same connection whose keys start with
+// prefix instead of DefaultPrefix (see Keys).
+func (q *Queue) WithPrefix(prefix string) *Queue {
+	return q.WithKeys(Keys(prefix))
 }
 
 // Schedule puts a job ID in the delayed set, due at `at`. Scheduling an ID

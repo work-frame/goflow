@@ -26,6 +26,8 @@ type Hub struct {
 	streams map[string]map[*stream]struct{} // by owner's user ID
 	closed  bool
 
+	channel string // the Pub/Sub channel Listen subscribes to and Watch sends canaries on
+
 	subscribed     chan struct{} // closed once the Redis subscription is first live
 	subscribedOnce sync.Once
 
@@ -43,9 +45,16 @@ type stream struct {
 
 // NewHub returns an empty Hub.
 func NewHub() *Hub {
+	return NewHubOn(Channel)
+}
+
+// NewHubOn is NewHub for another channel: Listen subscribes to it and
+// Watch sends its canaries there. The publisher must use the same one
+// (NewPublisherOn).
+func NewHubOn(channel string) *Hub {
 	b := make([]byte, 8)
 	rand.Read(b) // never fails (crypto/rand, Go 1.24+)
-	return &Hub{streams: make(map[string]map[*stream]struct{}), subscribed: make(chan struct{}), id: hex.EncodeToString(b)}
+	return &Hub{streams: make(map[string]map[*stream]struct{}), subscribed: make(chan struct{}), id: hex.EncodeToString(b), channel: channel}
 }
 
 // Subscribed is closed once the hub's Redis subscription has been live at
@@ -182,7 +191,7 @@ func Listen(ctx context.Context, l Listener, h *Hub, logger *slog.Logger) (stop 
 	go func() {
 		defer close(done)
 		for ctx.Err() == nil {
-			err := l.Listen(ctx, Channel,
+			err := l.Listen(ctx, h.channel,
 				func() {
 					h.markSubscribed()
 					if !h.Paused() {

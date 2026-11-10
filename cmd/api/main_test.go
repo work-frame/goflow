@@ -16,16 +16,11 @@ import (
 	"syscall"
 	"testing"
 	"time"
-)
 
-func testDatabaseURL(t *testing.T) string {
-	t.Helper()
-	url := os.Getenv("GOFLOW_TEST_DATABASE_URL")
-	if url == "" {
-		t.Skip("GOFLOW_TEST_DATABASE_URL not set; skipping test that needs PostgreSQL")
-	}
-	return url
-}
+	"github.com/redis/go-redis/v9"
+
+	"github.com/work-frame/goflow/internal/queue"
+)
 
 // testRedisURL returns GOFLOW_TEST_REDIS_URL, or skips the test without it.
 func testRedisURL(t *testing.T) string {
@@ -51,6 +46,11 @@ func startServer(t *testing.T, dbURL string) (base string, stop func()) {
 func startServerWith(t *testing.T, cfg config) (base string, stop func()) {
 	t.Helper()
 
+	if cfg.RedisURL != "" && cfg.RedisKeyPrefix != "" {
+		// Registered before stop, so it runs after the server has stopped:
+		// whatever is left in this test's queue goes, and only that.
+		t.Cleanup(func() { deleteQueueKeys(t, cfg.RedisURL, cfg.RedisKeyPrefix) })
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	addrCh := make(chan string, 1)
 	runErr := make(chan error, 1)
@@ -252,5 +252,24 @@ func TestRunFailsWhenPortIsTaken(t *testing.T) {
 	err = run(context.Background(), discardLogger(), testConfig(ln.Addr().String(), dbURL), nil)
 	if !errors.Is(err, syscall.EADDRINUSE) {
 		t.Errorf("err = %v, want address already in use", err)
+	}
+}
+
+// deleteQueueKeys removes a test's four queue keys from Redis. Best effort:
+// a test that pointed its server at a Redis that isn't there (on purpose)
+// has nothing to remove, and leftovers in the test Redis are harmless.
+func deleteQueueKeys(t *testing.T, redisURL, prefix string) {
+	t.Helper()
+	opts, err := redis.ParseURL(redisURL)
+	if err != nil {
+		t.Logf("cleanup: %v", err)
+		return
+	}
+	opts.DialTimeout, opts.MaxRetries = 500*time.Millisecond, -1 // no retries
+	rdb := redis.NewClient(opts)
+	defer rdb.Close()
+	pending, processing, delayed, leases := queue.Keys(prefix)
+	if err := rdb.Del(context.Background(), pending, processing, delayed, leases).Err(); err != nil {
+		t.Logf("cleanup: this test's queue keys stay in Redis: %v", err)
 	}
 }

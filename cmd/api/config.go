@@ -61,6 +61,16 @@ type config struct {
 	// zero means worker.DefaultTakeTimeout (2 s). Tests shorten it, because
 	// a test server stops at the end of every test (Task 52).
 	TakeTimeout time.Duration
+	// RedisKeyPrefix starts the queue's key names in Redis. Not read from
+	// the environment: empty means queue.DefaultPrefix, so production's
+	// keys stay goflow:jobs:*. Tests give every test its own, so two test
+	// servers never take each other's jobs (Task 54).
+	RedisKeyPrefix string
+	// EventsChannel is the Pub/Sub channel for job events and delivery
+	// canaries. Not read from the environment: empty means events.Channel
+	// (goflow:events). Set separately from RedisKeyPrefix: Pub/Sub channels
+	// aren't keys, so moving the keys doesn't move the channel (Task 54).
+	EventsChannel string
 }
 
 // loadConfig reads the API settings through getenv (os.Getenv in production,

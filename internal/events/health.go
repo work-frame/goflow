@@ -109,7 +109,7 @@ func Watch(ctx context.Context, send Sender, h *Hub, logger *slog.Logger, interv
 			// doesn't come back, and that is what check measures. The
 			// publisher already logs Redis errors.
 			sendCtx, cancelSend := context.WithTimeout(ctx, interval)
-			_ = send.Publish(sendCtx, Channel, canary)
+			_ = send.Publish(sendCtx, h.channel, canary)
 			cancelSend()
 
 			if silentFor, paused := h.check(time.Now(), timeout); paused {

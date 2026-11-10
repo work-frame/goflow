@@ -35,7 +35,8 @@ func TestCreatedJobsReachTheQueue(t *testing.T) {
 	// Cleanups run last-registered first: remove this test's ID (other IDs
 	// in the list are left alone), then close the client.
 	t.Cleanup(func() { rdb.Close() })
-	t.Cleanup(func() { rdb.LRem(ctx, queue.PendingKey, 0, id) })
+	pending, _, _, _ := queue.Keys(cfg.RedisKeyPrefix) // this test's list, not production's
+	t.Cleanup(func() { rdb.LRem(ctx, pending, 0, id) })
 
 	// The relay runs in the background, woken by the create. It pushes the ID
 	// to Redis first and commits "queued" a moment later, so wait for both.
@@ -45,7 +46,7 @@ func TestCreatedJobsReachTheQueue(t *testing.T) {
 	}
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		ids, err = rdb.LRange(ctx, queue.PendingKey, 0, -1).Result()
+		ids, err = rdb.LRange(ctx, pending, 0, -1).Result()
 		if err != nil {
 			t.Fatalf("LRANGE: %v", err)
 		}
@@ -61,7 +62,7 @@ func TestCreatedJobsReachTheQueue(t *testing.T) {
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("after 5s: job %s in %s = %v, status = %q; want the ID there and status queued",
-				id, queue.PendingKey, slices.Contains(ids, id), got.Status)
+				id, pending, slices.Contains(ids, id), got.Status)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
