@@ -8,6 +8,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/work-frame/goflow/internal/worker"
 )
 
 // Stopping a test server takes well under a second, even when the client
@@ -78,5 +80,34 @@ func TestStoppingTheServerDoesNotWaitForSpareConnections(t *testing.T) {
 	})
 	if took > limit {
 		t.Fatalf("stopping the server took %v, want under %v: it waited for a connection the client dialed and never used", took.Round(time.Millisecond), limit)
+	}
+}
+
+// A test server whose workers have nothing to do doesn't wait out the full
+// 2-second production take when it stops. Each idle worker waits in Redis's
+// BLMOVE until its take timeout runs out, and cancelling doesn't interrupt
+// it: with 2 s, every test server with workers took about 2 s to stop, some
+// 15 s of cmd/api's 40. testConfig sets testTakeTimeout, 1 s (Task 52;
+// FAILURES.md, case 49).
+//
+// This checks the test configuration, not a shutdown guarantee. The
+// workers start their first take at about the time the 100 ms wait ends, so
+// stopping waits out nearly a whole take: measured 0.96 to 0.99 s with 1 s,
+// 1.98 to 1.99 s with 2 s. The limit, 1.5 s, sits between them.
+func TestTestServersDoNotWaitOutTheProductionTake(t *testing.T) {
+	cfg := testConfig("127.0.0.1:0", testDatabaseURL(t))
+	cfg.RedisURL = testRedisURL(t)
+	cfg.Workers = 4
+	_, stop := startServerWith(t, cfg)
+
+	time.Sleep(100 * time.Millisecond)
+	started := time.Now()
+	stop()
+	if took := time.Since(started); took > 1500*time.Millisecond {
+		take := cfg.TakeTimeout
+		if take == 0 {
+			take = worker.DefaultTakeTimeout
+		}
+		t.Fatalf("stopping a test server with idle workers took %v, want under 1.5s: its workers waited out the rest of a %v take", took.Round(time.Millisecond), take)
 	}
 }
