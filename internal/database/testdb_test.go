@@ -8,8 +8,23 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"strings"
+	"sync"
 	"testing"
+	"time"
 )
+
+// testDBConns is how many connections one test's database copy may open.
+// Tests run in parallel (Task 53), and each copy's pool counts against
+// PostgreSQL's limit of 100, which cmd/api's tests share at the same time.
+// A test that needs more at once asks for them with withConns; one that
+// waits for a connection without asking fails (see createTestDB), because
+// a race test whose callers queue for 3 connections no longer races.
+const testDBConns = 3
+
+// connWaitsExpected holds the pools of tests that make callers queue for
+// connections on purpose (see expectConnWaits).
+var connWaitsExpected sync.Map
 
 // templateName is the migrated template database for this test run.
 // TestMain sets it. It stays empty when no test database is configured.
@@ -104,6 +119,7 @@ func createTestDB(t *testing.T, template string) *sql.DB {
 	if err != nil {
 		t.Fatalf("open admin connection: %v", err)
 	}
+	admin.SetMaxOpenConns(1) // one CREATE now, one DROP at the end
 
 	// Identifiers can't be $1 parameters. Both names are generated in this file,
 	// never taken from user input, so building the SQL with + is safe here.
@@ -131,8 +147,31 @@ func createTestDB(t *testing.T, template string) *sql.DB {
 	if err != nil {
 		t.Fatalf("open test database: %v", err)
 	}
-	t.Cleanup(func() { db.Close() }) // runs before the drop: cleanups are last-in-first-out
+	db.SetMaxOpenConns(testDBConns)
+	db.SetMaxIdleConns(testDBConns)
+	// Runs before the drop: cleanups are last-in-first-out.
+	t.Cleanup(func() {
+		st := db.Stats()
+		db.Close()
+		if _, ok := connWaitsExpected.Load(db); !ok && st.WaitCount > 0 {
+			t.Errorf("this test waited %d times (%v in all) for one of its %d database connections: it needs more at once. Give it enough with withConns, or its concurrent callers queue instead of racing",
+				st.WaitCount, st.WaitDuration.Round(time.Millisecond), st.MaxOpenConnections)
+		}
+	})
 	return db
+}
+
+// withConns lets one test's database copy open n connections, for a test
+// that runs n callers at once and means them to overlap.
+func withConns(db *sql.DB, n int) {
+	db.SetMaxOpenConns(n)
+	db.SetMaxIdleConns(n)
+}
+
+// expectConnWaits marks a test whose callers queue for connections on
+// purpose, so the check in createTestDB lets it wait.
+func expectConnWaits(db *sql.DB) {
+	connWaitsExpected.Store(db, true)
 }
 
 // withDatabase returns baseURL pointed at a different database name.
@@ -149,4 +188,40 @@ func randomName(prefix string) string {
 	b := make([]byte, 6)
 	rand.Read(b)
 	return prefix + hex.EncodeToString(b)
+}
+
+// A test's cleanup drops its own copy and no other: with tests running in
+// parallel, dropping another test's database would fail that test midway.
+// The subtest's copy is gone once the subtest ends; this test's copy, made
+// first and still in use, is untouched.
+func TestCleanupDropsOnlyTheTestsOwnCopy(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	mine := newMigratedTestDB(t)
+	var myName, theirName string
+	if err := mine.QueryRowContext(ctx, "SELECT current_database()").Scan(&myName); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("other", func(t *testing.T) {
+		theirs := newMigratedTestDB(t)
+		if err := theirs.QueryRowContext(ctx, "SELECT current_database()").Scan(&theirName); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	if theirName == "" || theirName == myName || !strings.HasPrefix(theirName, "goflow_test_") {
+		t.Fatalf("copies %q and %q: want two different goflow_test_ databases", myName, theirName)
+	}
+	var left int
+	if err := mine.QueryRowContext(ctx, "SELECT count(*) FROM pg_database WHERE datname IN ($1, $2)", myName, theirName).Scan(&left); err != nil {
+		t.Fatalf("this test's copy stopped working when the other's was dropped: %v", err)
+	}
+	if left != 1 {
+		t.Fatalf("%d of the two copies left after the subtest, want 1 (this test's own)", left)
+	}
+	var users int
+	if err := mine.QueryRowContext(ctx, "SELECT count(*) FROM users").Scan(&users); err != nil {
+		t.Fatalf("this test's copy lost its schema: %v", err)
+	}
 }

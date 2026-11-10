@@ -40,6 +40,7 @@ func leaseOf(t *testing.T, f *jobsFixture, id string) string {
 }
 
 func TestClaimThenComplete(t *testing.T) {
+	t.Parallel()
 	f := newJobsFixture(t)
 	w := NewWorkStore(f.db)
 	id := addJobs(t, f, "do it")[0]
@@ -63,6 +64,7 @@ func TestClaimThenComplete(t *testing.T) {
 
 // The second copy of a duplicate ID finds the job finished and skips it.
 func TestClaimSkipsFinishedAndMissingJobs(t *testing.T) {
+	t.Parallel()
 	f := newJobsFixture(t)
 	w := NewWorkStore(f.db)
 	ctx := context.Background()
@@ -86,6 +88,7 @@ func TestClaimSkipsFinishedAndMissingJobs(t *testing.T) {
 
 // A processing job is someone else's: claiming it again must lose.
 func TestClaimRefusesAProcessingJob(t *testing.T) {
+	t.Parallel()
 	f := newJobsFixture(t)
 	w := NewWorkStore(f.db)
 	id := addJobs(t, f, "taken")[0]
@@ -102,6 +105,7 @@ func TestClaimRefusesAProcessingJob(t *testing.T) {
 // against real PostgreSQL. Exactly one may win each time. The goroutines use
 // separate pooled connections, so this is the same race as two processes.
 func TestClaimHasExactlyOneWinner(t *testing.T) {
+	t.Parallel()
 	f := newJobsFixture(t)
 	w := NewWorkStore(f.db)
 	ctx := context.Background()
@@ -167,6 +171,7 @@ func jobRow(t *testing.T, f *jobsFixture, id string) (status string, attempts in
 
 // Every claim counts an attempt, and a retrying job is claimable again.
 func TestRetryThenClaimCountsAttempts(t *testing.T) {
+	t.Parallel()
 	f := newJobsFixture(t)
 	w := NewWorkStore(f.db)
 	ctx := context.Background()
@@ -199,6 +204,7 @@ func TestRetryThenClaimCountsAttempts(t *testing.T) {
 }
 
 func TestBuryMarksDeadAndKeepsTheError(t *testing.T) {
+	t.Parallel()
 	f := newJobsFixture(t)
 	w := NewWorkStore(f.db)
 	ctx := context.Background()
@@ -220,6 +226,7 @@ func TestBuryMarksDeadAndKeepsTheError(t *testing.T) {
 
 // Retry only applies to a job this worker is running.
 func TestRetryNeedsAProcessingJob(t *testing.T) {
+	t.Parallel()
 	f := newJobsFixture(t)
 	w := NewWorkStore(f.db)
 	id := addJobs(t, f, "not started")[0]
@@ -231,6 +238,7 @@ func TestRetryNeedsAProcessingJob(t *testing.T) {
 
 // The database refuses a retrying job without a due time.
 func TestRetryingNeedsADueTime(t *testing.T) {
+	t.Parallel()
 	f := newJobsFixture(t)
 	id := addJobs(t, f, "no time")[0]
 	_, err := f.db.ExecContext(context.Background(), `UPDATE jobs SET status = 'retrying' WHERE id = $1`, id)
@@ -242,6 +250,7 @@ func TestRetryingNeedsADueTime(t *testing.T) {
 // Redis lost an overdue retry: the reconciler sends it again; one that
 // isn't overdue stays put.
 func TestRequeueStaleResendsOverdueRetries(t *testing.T) {
+	t.Parallel()
 	f := newJobsFixture(t)
 	w := NewWorkStore(f.db)
 	o := NewOutboxStore(f.db)

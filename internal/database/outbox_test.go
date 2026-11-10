@@ -46,6 +46,7 @@ func statusOf(t *testing.T, f *jobsFixture, id string) job.Status {
 }
 
 func TestAddWritesAnOutboxRow(t *testing.T) {
+	t.Parallel()
 	f := newJobsFixture(t)
 	o := NewOutboxStore(f.db)
 	id := addJobs(t, f, "send welcome email")[0]
@@ -62,6 +63,7 @@ func TestAddWritesAnOutboxRow(t *testing.T) {
 // The job and its outbox row are written together or not at all. Renaming
 // the outbox table makes the second insert fail after the first succeeded.
 func TestAddIsAllOrNothing(t *testing.T) {
+	t.Parallel()
 	f := newJobsFixture(t)
 	ctx := context.Background()
 	if _, err := f.db.ExecContext(ctx, `ALTER TABLE job_outbox RENAME TO job_outbox_gone`); err != nil {
@@ -78,6 +80,7 @@ func TestAddIsAllOrNothing(t *testing.T) {
 }
 
 func TestRelaySendsOldestFirstThenClears(t *testing.T) {
+	t.Parallel()
 	f := newJobsFixture(t)
 	o := NewOutboxStore(f.db)
 	want := addJobs(t, f, "first", "second", "third")
@@ -104,6 +107,7 @@ func TestRelaySendsOldestFirstThenClears(t *testing.T) {
 }
 
 func TestRelayKeepsRowsWhenSendFails(t *testing.T) {
+	t.Parallel()
 	f := newJobsFixture(t)
 	o := NewOutboxStore(f.db)
 	ids := addJobs(t, f, "one", "two")
@@ -124,6 +128,7 @@ func TestRelayKeepsRowsWhenSendFails(t *testing.T) {
 }
 
 func TestRelayTakesAtMostLimit(t *testing.T) {
+	t.Parallel()
 	f := newJobsFixture(t)
 	o := NewOutboxStore(f.db)
 	ids := addJobs(t, f, "a", "b", "c")
@@ -144,6 +149,7 @@ func TestRelayTakesAtMostLimit(t *testing.T) {
 // While one relay holds rows (its send is still talking to Redis), a second
 // relay skips them instead of sending the same IDs again.
 func TestRelaySkipsRowsAnotherRelayHolds(t *testing.T) {
+	t.Parallel()
 	f := newJobsFixture(t)
 	o := NewOutboxStore(f.db)
 	ids := addJobs(t, f, "held", "free")
@@ -177,6 +183,7 @@ func TestRelaySkipsRowsAnotherRelayHolds(t *testing.T) {
 }
 
 func TestDeletingAJobRemovesItsOutboxRow(t *testing.T) {
+	t.Parallel()
 	f := newJobsFixture(t)
 	o := NewOutboxStore(f.db)
 	id := addJobs(t, f, "changed my mind")[0]
@@ -191,6 +198,7 @@ func TestDeletingAJobRemovesItsOutboxRow(t *testing.T) {
 
 // Jobs created before the outbox existed get a row, so they are queued too.
 func TestMigration6QueuesExistingPendingJobs(t *testing.T) {
+	t.Parallel()
 	db := newTestDB(t)
 	ctx := context.Background()
 
@@ -260,6 +268,7 @@ func relayAll(t *testing.T, o *OutboxStore) {
 }
 
 func TestRequeueStaleResendsOnlyOldQueuedJobs(t *testing.T) {
+	t.Parallel()
 	f := newJobsFixture(t)
 	o := NewOutboxStore(f.db)
 	ctx := context.Background()
@@ -295,6 +304,7 @@ func TestRequeueStaleResendsOnlyOldQueuedJobs(t *testing.T) {
 }
 
 func TestRequeueStaleKeepsJobsStaleWhenSendFails(t *testing.T) {
+	t.Parallel()
 	f := newJobsFixture(t)
 	o := NewOutboxStore(f.db)
 	ctx := context.Background()

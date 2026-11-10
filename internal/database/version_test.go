@@ -26,6 +26,7 @@ func versionOf(t *testing.T, f *jobsFixture, id string) int64 {
 // Every change a job goes through adds exactly 1 to its version, and the
 // announced job carries the version the database has.
 func TestEveryChangeRaisesTheVersion(t *testing.T) {
+	t.Parallel()
 	f := newJobsFixture(t)
 	ctx := context.Background()
 	r := &recorder{}
@@ -131,6 +132,7 @@ func TestEveryJobUpdateBumpsTheVersion(t *testing.T) {
 }
 
 func TestReadsReturnTheVersion(t *testing.T) {
+	t.Parallel()
 	f := newJobsFixture(t)
 	ctx := context.Background()
 	id := addJobs(t, f, "read me")[0]

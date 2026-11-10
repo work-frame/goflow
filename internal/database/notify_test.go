@@ -52,6 +52,7 @@ func expectEvents(t *testing.T, r *recorder, step string, want ...string) {
 // Every status change a job goes through is heard once, after it is
 // committed, with the job as the database has it.
 func TestStoresAnnounceEveryStatusChange(t *testing.T) {
+	t.Parallel()
 	f := newJobsFixture(t)
 	ctx := context.Background()
 	r := &recorder{}
@@ -106,6 +107,7 @@ func TestStoresAnnounceEveryStatusChange(t *testing.T) {
 
 // The announced job is the committed row: owner, attempts and times included.
 func TestAnnouncedJobMatchesTheDatabase(t *testing.T) {
+	t.Parallel()
 	f := newJobsFixture(t)
 	ctx := context.Background()
 	r := &recorder{}
@@ -125,6 +127,7 @@ func TestAnnouncedJobMatchesTheDatabase(t *testing.T) {
 
 // Nothing is announced when nothing changed.
 func TestNoAnnouncementWithoutAChange(t *testing.T) {
+	t.Parallel()
 	f := newJobsFixture(t)
 	ctx := context.Background()
 	r := &recorder{}
@@ -161,6 +164,7 @@ func TestNoAnnouncementWithoutAChange(t *testing.T) {
 // Jobs taken back from an expired lease are announced as queued again;
 // renewing a lease announces nothing (the status didn't change).
 func TestReclaimAnnouncesEachJob(t *testing.T) {
+	t.Parallel()
 	f := newJobsFixture(t)
 	ctx := context.Background()
 	r := &recorder{}
@@ -190,6 +194,7 @@ func TestReclaimAnnouncesEachJob(t *testing.T) {
 
 // Stores built without a notifier work as before.
 func TestStoresWithoutANotifier(t *testing.T) {
+	t.Parallel()
 	f := newJobsFixture(t)
 	id := addJobs(t, f, "quiet")[0]
 	w := NewWorkStore(f.db)

@@ -706,6 +706,18 @@ Each case was reproduced on a real machine (Arch Linux, Go 1.27, PostgreSQL 17) 
 - **Why:** an idle worker waits in Redis's `BLMOVE` until its take timeout runs out, and go-redis doesn't interrupt that wait when the context is cancelled. In production that delays a deploy's shutdown by up to 2 s, which nobody notices, so it stays. A test server stops at the end of every test, and timing each one (Task 52) showed every server with workers spending about 2 s on that wait: some 15 s of `cmd/api`'s 40. With 1 s, `cmd/api` takes 32.3 to 32.8 s in the sandbox (39 to 42 s before).
 - **Why not 100 ms:** that was the plan. go-redis rounds any blocking timeout under 1 s up to 1 s (its `formatSec`, v9.23.0) and logs a warning each time, so 100 ms behaved as 1 s, and a 1-second limit on the stop passed at 0.74 to 0.79 s: by luck. Redis itself accepts `BLMOVE ... 0.1`; sending that directly would have changed production Redis handling and run into the 2-second read deadline GoFlow sets, so it wasn't done.
 
+## 50. A race test gets the connections its callers race on
+
+- **Safeguard:** in `internal/database`, every test's database copy has 3 connections, and a test that waits for one fails. The tests whose callers are meant to overlap ask for one connection per caller with `withConns`: 20 for concurrent adds with one idempotency key, 10 for concurrent reruns, 5 for concurrent migrations. They stay sequential. The case 26 test queues 50 callers for production's 10 connections on purpose and says so with `expectConnWaits`.
+- **Removed:** `withConns(f.db, n)` in `TestConcurrentAddsWithOneKeyHaveOneWinner`, so its 20 inserts shared the default 3 connections.
+- **Caught by:** the check in `createTestDB`'s cleanup, which reads the pool's `WaitCount`.
+- **Observed:**
+  ```text
+  --- FAIL: TestConcurrentAddsWithOneKeyHaveOneWinner (0.14s)
+      testdb_test.go:157: this test waited 17 times (138ms in all) for one of its 3 database connections: it needs more at once. Give it enough with withConns, or its concurrent callers queue instead of racing
+  ```
+- **Why:** capping each copy at 3 connections is what lets 77 tests share PostgreSQL's 100 connections while they run in parallel. But a race test whose 20 callers queue for 3 connections runs them at most 3 at a time: it still passes, and it no longer tests what it says. The test never complains; only the pool's statistics show it. Before the change, a probe that capped every copy at 3 and printed each pool's `WaitCount` found 4 tests waiting: these three, and the case 26 test, which waits on purpose. Measured peaks while the package ran: 7 connections with 2 tests at a time, 16 with 8.
+
 ## Experiment: the naive dual write loses a job
 
 Not a removed safeguard but the design of Task 22, run live on 2 November 2026 to see the failure Task 23 fixes. `POST /api/v1/jobs` saved the job in PostgreSQL, then pushed its ID to Redis, with nothing tying the two together.
