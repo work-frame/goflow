@@ -50,7 +50,9 @@ services:
       # they only exist on this private network (urlcheck).
       GOFLOW_DATABASE_URL: postgres://goflow:goflow@postgres:5432/goflow?sslmode=disable
       GOFLOW_REDIS_URL: redis://valkey:6379/0
-      GOFLOW_WORKERS: "2"
+      # The API's own workers. scripts/loadtest.sh sets GOFLOW_API_WORKERS=0,
+      # so only the worker containers run jobs and the count is exact.
+      GOFLOW_WORKERS: "${GOFLOW_API_WORKERS:-2}"
       GOFLOW_REGISTRATION: open # local only: create your development account
       # Turns on /metrics for Prometheus (monitoring/prometheus.yml has the
       # same value). A development value, not a secret: Render generates

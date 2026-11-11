@@ -179,6 +179,19 @@ go test -count=1 -timeout 10s ./internal/cli/        # fail fast if something lo
 
 See the Testing section of [ARCHITECTURE.md](ARCHITECTURE.md) for what each package's tests cover.
 
+### Load testing
+
+`cmd/loadgen` creates jobs through the real API on this machine, follows each one to `completed`, and reports jobs completed per second and the time from create to completion (p50, p95, p99). It refuses any API that isn't `localhost` or a loopback address, before sending anything: never point load at the hosted API. It reads live events for speed and asks the API about jobs no event has finished yet, because events can be missed. Jobs that end dead or don't finish within `-wait` are listed by ID, and the command then exits 1. It deletes the jobs it created after the report (`-keep` keeps them).
+
+```bash
+docker compose up -d --wait
+go build -o bin/goflow ./cmd/goflow && ./bin/goflow login   # the local development account
+./scripts/loadtest.sh                                        # 1, 3 and 6 worker containers, 500 jobs, 3 runs each
+GOFLOW_LOADTEST_JOBS=100 GOFLOW_LOADTEST_RUNS=1 ./scripts/loadtest.sh   # a quick look
+```
+
+`loadtest.sh` recreates the `api` and `worker` containers for each step with the API's own workers off (`GOFLOW_API_WORKERS=0`), so only the worker containers run jobs, and counts the workers that actually started from their logs. PostgreSQL and Valkey keep running. At the end it puts the stack back: three worker containers, API workers on.
+
 ### Finding slow tests
 
 `go test -json` reports every test's time. The slowest ten in a package, top-level tests only:
