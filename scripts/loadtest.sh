@@ -23,6 +23,15 @@ runs=${GOFLOW_LOADTEST_RUNS:-3}
 
 go build -o bin/loadgen ./cmd/loadgen
 
+# A first job on the stack as it is, before anything is recreated: a missing
+# or expired login, or a stack that isn't up, stops the script here.
+# Loadgen exits 2 when it couldn't run at all, 1 when jobs went wrong.
+echo "==> preflight: one job"
+if ! ./bin/loadgen -jobs 1 -wait 30s -label preflight >/dev/null; then
+	echo "stop: loadgen couldn't run one job. Is the stack up (docker compose up -d --wait) and are you logged in (./bin/goflow login)?" >&2
+	exit 1
+fi
+
 # started_workers prints how many workers the running api and worker
 # containers started, from each pool's "worker pool started workers=N".
 started_workers() {
@@ -56,9 +65,16 @@ for containers in 1 3 6; do
 
 	for run in $(seq "$runs"); do
 		echo "--- run $run of $runs"
-		if ! ./bin/loadgen -jobs "$jobs" -workers "$workers" -label "$containers containers, run $run"; then
-			echo "    (this run had jobs that failed or didn't finish: see above)"
-		fi
+		status=0
+		./bin/loadgen -jobs "$jobs" -workers "$workers" -label "$containers containers, run $run" || status=$?
+		case $status in
+		0) ;;
+		1) echo "    (this run had jobs that failed or didn't finish: see above)" ;;
+		*)
+			echo "stop: loadgen couldn't run (exit $status): see above" >&2
+			exit 1
+			;;
+		esac
 	done
 done
 

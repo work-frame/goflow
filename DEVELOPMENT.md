@@ -190,7 +190,17 @@ go build -o bin/goflow ./cmd/goflow && ./bin/goflow login   # the local developm
 GOFLOW_LOADTEST_JOBS=100 GOFLOW_LOADTEST_RUNS=1 ./scripts/loadtest.sh   # a quick look
 ```
 
-`loadtest.sh` recreates the `api` and `worker` containers for each step with the API's own workers off (`GOFLOW_API_WORKERS=0`), so only the worker containers run jobs, and counts the workers that actually started from their logs. PostgreSQL and Valkey keep running. At the end it puts the stack back: three worker containers, API workers on.
+It starts with one job on the stack as it is, so a missing login or a stack that isn't up stops it before anything is recreated. `loadtest.sh` then recreates the `api` and `worker` containers for each step with the API's own workers off (`GOFLOW_API_WORKERS=0`), so only the worker containers run jobs, and counts the workers that actually started from their logs. PostgreSQL and Valkey keep running. At the end it puts the stack back: three worker containers, API workers on.
+
+Measured on the development laptop (11 November 2026; 8 threads, everything in Docker on the same machine, 500 `sleep:0s` jobs, 20 creates in flight, API workers off):
+
+| Worker containers | Workers | Jobs/s (3 runs) | Mean | p50 create→done | p95 create→done | Seen by polls |
+|---|---|---|---|---|---|---|
+| 1 | 2 | 290, 398, 334 | 341 | 448–587 ms | 0.88–1.21 s | 0, 7, 1 |
+| 3 | 6 | 751, 840, 832 | 807 | 204–211 ms | 222–225 ms | 0 |
+| 6 | 12 | 496, 334, 636 | 489 | 94–190 ms | 161–283 ms | 0 |
+
+Every job completed in every run. Two workers are the limit at the first step: jobs wait for one, so the time to completion is long and the rate low. Six workers give 2.4 times the rate, with steady times. Twelve give a *lower* rate than six, and vary from run to run, although each job, once claimed, finishes sooner (lower p50). The cause hasn't been measured. Everything shares one laptop, so the twelve workers, the API, PostgreSQL and the generator compete for its 8 threads; PostgreSQL's row locks and connections are the other candidates. The generator's elapsed time also includes creating the jobs, so a slower create rate would show here as a lower rate. On this laptop, adding workers past six makes GoFlow slower.
 
 ### Finding slow tests
 
