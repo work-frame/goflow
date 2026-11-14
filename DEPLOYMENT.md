@@ -511,6 +511,10 @@ Run `backup.sh` regularly (weekly, and before any risky migration): what a backu
 | 2: restore, first try | 14 Nov 2026 | stopped at once | Failed: stock PostgreSQL rejected Neon's `pg_attver` column options, and `--exit-on-error` stopped the restore ([FAILURES.md](FAILURES.md#what-tests-did-not-catch)) |
 | 2: restore, by hand, `pg_attver` lines removed | 14 Nov 2026 | 0.22 s | Every count equal to production: users 1, sessions 3, jobs 17 (11 completed), secrets 1, attempts 2, migrations 12, newest job 20:23:48 UTC |
 | 2: passphrase recalled | 14 Nov 2026 | | gpg's cache cleared (`gpgconf --reload gpg-agent`), passphrase pasted from 1Password, backup decrypted |
+| 2: restore with `restore-drill.sh` (Task 69b) | 14 Nov 2026 | 9 s, including typing the passphrase | 18 `pg_attver` lines removed and printed (`jobs.type`, `jobs.payload`, every column of `webhook_attempts` and `webhook_secrets`). Foreign keys 5/5, indexes 18/18, CHECKs 29/29. Rows equal to production: users 1, sessions 3, jobs 17, outbox 0, secrets 1, attempts 2, migrations 12, newest job 20:23:48 UTC |
+| Uptime check, run by hand | 14 Nov 2026, 21:41:34 UTC | | `try 1: HTTP 200` (run 43644145208; the instance was awake, so no cold start was tested) |
+
+The drill branches were deleted in the Neon console afterwards.
 
 **First numbers.** RPO: up to 6 hours from Neon's history; past that, everything since the last `backup.sh` run. RTO: not measured. The restore itself takes under a second at this size; the time goes to the manual steps of the [disaster recovery runbook](#disaster-recovery-restoring-production-from-a-backup), estimated at 15 to 30 minutes until someone times it.
 

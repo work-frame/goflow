@@ -207,6 +207,35 @@ A new vulnerability in a dependency or the Go standard library blocks every pull
 2. If a fixed version exists and GoFlow reaches the code: upgrade that module (or Go) in its own pull request, run the full check, merge.
 3. If the report looks wrong or GoFlow's use isn't affected: write down why, with the call path, before deciding anything. Don't upgrade blindly to make it go green, and don't remove the job.
 
+#### Dependabot alerts (Phase 16)
+
+Dependabot **alerts** are on; Dependabot's automatic pull requests (security updates) are off, so nothing changes dependencies without a person. The two tools see different things: `govulncheck` blocks merges for vulnerable code GoFlow actually calls; Dependabot also lists vulnerable modules GoFlow doesn't call yet, and the GitHub Actions pinned in the workflows. An alert doesn't block anything. Read it, check `govulncheck ./...` for a call path, and fix it in its own pull request.
+
+```bash
+gh api repos/work-frame/goflow/dependabot/alerts --jq '.[] | select(.state=="open") | [.number, .security_advisory.severity, .dependency.package.name, .security_advisory.summary] | @tsv'
+gh api repos/work-frame/goflow/automated-security-fixes --jq .enabled   # must print false
+```
+
+#### Secret scanning alerts
+
+GitHub scans every commit for strings shaped like known secrets. GoFlow's signing secrets start with `whsec_`, the prefix Stripe uses too, so GitHub reports any `whsec_` value as a "Stripe Webhook Signing Secret".
+
+The tests contain three, all fake on purpose: the [Standard Webhooks](https://www.standardwebhooks.com) specification's published example (`internal/webhook/webhook_test.go`), and two whose base64 decodes to readable text, so anyone can see they aren't real (`echo dGVzdC1zaWduaW5nLXNlY3JldC0xMjM0NTY3OA== | base64 -d` prints `test-signing-secret-12345678`; the other prints `receiver-test-secret-32-bytes!!`). A new test secret should follow the same rule: readable once decoded.
+
+Their three alerts (14 November 2026) were checked and closed as **used in tests**. For any new alert:
+
+1. Find where it is, without printing the secret (`N` is the alert's number):
+   ```bash
+   gh api repos/work-frame/goflow/secret-scanning/alerts/N/locations --jq '.[] | [.details.path, .details.start_line, .details.commit_sha[0:7]] | @tsv'
+   ```
+2. Open that line. Close the alert as used in tests only if it's a `_test.go` file and the value is one of the fake ones, or decodes to readable text:
+   ```bash
+   gh api -X PATCH repos/work-frame/goflow/secret-scanning/alerts/N -f state=resolved -f resolution=used_in_tests --jq '[.number, .state, .resolution] | @tsv'
+   ```
+3. Anything else is a leak: rotate the secret first (DEPLOYMENT.md), then deal with the history. Removing it from the code doesn't take it back; it stays in every clone and in GitHub's history.
+
+Test files stay scanned. Excluding them would hide a real secret pasted into a test.
+
 ## Tests
 
 ```bash
