@@ -544,6 +544,15 @@ For when Neon's 6 hours of history can't help: the project is gone, or the damag
 
 What comes back is the database as it was at the backup: anything later is lost, and users who logged in after it log in again. Webhook signing secrets come back only if `GOFLOW_SECRETS_KEY` on Render is the same key that encrypted them; with a different key the API refuses to start (`MissingKeysError`), and recovering from that isn't written down yet.
 
+## Relay claims live (Task 72)
+
+Phase 17 changed how the relay and the reconciler talk to Redis (no row lock held, claims with tokens, 2 s per send; [ARCHITECTURE.md](ARCHITECTURE.md#the-outbox)). Checked on the hosted API on 14 November 2026, after the merge (`61b927d`, PR #87):
+
+- **Migration:** `time=2026-11-14T22:38:10.030Z level=INFO msg="migrations applied" versions=[13]` in `goflow-api`'s log. `job_outbox` now has `claim_token` and `claimed_until`.
+- **A job end to end:** `flaky:1` (`67a2484a`), created at 22:42:23 UTC from the dashboard, reached `completed` on its second try (`2/3`). So the new path works against Neon and Render's Key Value: claim, send, finish, then the failed first attempt through the delayed set and back.
+
+Not tested live: a Redis that hangs. That is what the tests cover (FAILURES.md, case 66); doing it on Render would mean breaking the hosted queue on purpose.
+
 ## Rolling back
 
 Render keeps previous deploys. In the dashboard: `goflow-api` → **Deploys** → pick the last good one → **Rollback**. A rollback doesn't undo migrations, so a migration must keep working with the code before it (add columns before using them, drop them a release later).

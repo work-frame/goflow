@@ -1,6 +1,6 @@
 # Architecture
 
-This describes GoFlow at the end of Phase 16, with Phase 17 in progress. It changes as each phase lands.
+This describes GoFlow at the end of Phase 17. It changes as each phase lands.
 
 ## Overview
 
