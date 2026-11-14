@@ -59,6 +59,13 @@ services:
       # instance awake all month (Phase 10 decision).
       - key: GOFLOW_METRICS_TOKEN
         generateValue: true
+      # The master key that encrypts every user's webhook signing secret
+      # (Phase 15). Render generates 32 random bytes, base64, once; nobody
+      # needs to see or copy it. Never delete or regenerate it: the secrets
+      # it encrypted become unreadable, and the API refuses to start rather
+      # than lose them silently. Rotation: DEPLOYMENT.md.
+      - key: GOFLOW_SECRETS_KEY
+        generateValue: true
 
   # Redis-compatible queue (Valkey). Free: no persistence, so a restart
   # empties the lists; the API's reconciler re-sends stuck jobs.

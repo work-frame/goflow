@@ -136,6 +136,7 @@ export GOFLOW_TEST_REDIS_URL='redis://127.0.0.1:6379/1'
 | `GOFLOW_QUICK_CHECK` | `check.sh`; `1` runs without the two test URLs and says it was a quick check | none |
 | `GOFLOW_API_URL` | CLI | `http://localhost:8080` |
 | `GOFLOW_TOKEN` | CLI; overrides the saved login from `goflow login` (scripts, CI) | none |
+| `GOFLOW_SECRETS_KEY` | API and worker, from Task 65b: base64 of exactly 32 random bytes, the master key for webhook signing secrets. Render generates it; Compose uses a fixed development key | none |
 
 Tests must never point at the development database.
 

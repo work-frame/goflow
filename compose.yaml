@@ -58,6 +58,10 @@ services:
       # same value). A development value, not a secret: Render generates
       # its own.
       GOFLOW_METRICS_TOKEN: local-development-metrics-token-not-a-secret
+      # Encrypts webhook signing secrets (Phase 15). 32 bytes, base64: the
+      # text "goflow local dev key: NOT SECRET". Development only; Render
+      # generates its own. The workers need the same key to sign.
+      GOFLOW_SECRETS_KEY: &secrets-key Z29mbG93IGxvY2FsIGRldiBrZXk6IE5PVCBTRUNSRVQ=
     ports:
       - "127.0.0.1:8080:8080"
     depends_on:
@@ -81,6 +85,7 @@ services:
       GOFLOW_DATABASE_URL: postgres://goflow:goflow@postgres:5432/goflow?sslmode=disable
       GOFLOW_REDIS_URL: redis://valkey:6379/0
       GOFLOW_WORKERS: "2"
+      GOFLOW_SECRETS_KEY: *secrets-key
     deploy:
       replicas: 3
     depends_on:
