@@ -193,6 +193,8 @@ git ls-remote https://github.com/actions/setup-go 'refs/tags/v7*'
 - **Branch behind `main`:** `gh pr update-branch` merges `main` into it; CI runs again, then you can merge.
 - **Read the settings:** `gh api repos/work-frame/goflow/branches/main/protection --jq '{checks: .required_status_checks.checks, strict: .required_status_checks.strict, admins: .enforce_admins.enabled, force_pushes: .allow_force_pushes.enabled, deletions: .allow_deletions.enabled}'`
 - The required checks name the GitHub Actions app (`app_id` 15368), so a status called `check` from anywhere else doesn't count.
+- Seen on PR #73 (Task 60), merged a moment after it was opened, before CI had run: `X Pull request work-frame/goflow#73 is not mergeable: the base branch policy prohibits the merge.` After both checks passed (`check` 1m41s, `govulncheck` 18s), the same command merged it.
+- Right after a push, `gh pr checks --watch` can exit with nothing to show: GitHub hasn't registered the checks yet. Wait a few seconds and run it again.
 
 #### When govulncheck fails
 
