@@ -3,11 +3,14 @@
 # A backup counts only once it has been restored.
 #
 #   ./scripts/restore-drill.sh ~/goflow-backups/goflow-<time>.dump.gpg
+#   ./scripts/restore-drill.sh ~/Downloads/goflow-<time>.dump.age
 #
 # What it does, and nothing else:
-#   - decrypts the file with gpg (asks for the passphrase) and turns the
-#     dump into SQL with pg_restore -f -, in memory: the decrypted dump
-#     never touches the disk
+#   - decrypts the file, a .gpg one with gpg (asks for the passphrase) or a
+#     .age one with age (asks for the private key, AGE-SECRET-KEY-1..., from
+#     your password manager; it reaches age through a pipe and is never
+#     written to disk), and turns the dump into SQL with pg_restore -f -, in
+#     memory: the decrypted dump never touches the disk
 #   - checks ALL of that SQL with scripts/restore-filter.awk before psql
 #     sees any of it: the dump must be complete, and the only lines removed
 #     are Neon's "ALTER COLUMN ... SET (pg_attver=N);" options, which stock
@@ -40,8 +43,7 @@
 set -euo pipefail
 
 file="${1:-}"
-[ -n "$file" ] && [ -f "$file" ] || { echo "usage: $0 <backup.dump.gpg>" >&2; exit 2; }
-command -v gpg >/dev/null || { echo "stop: gpg is not installed" >&2; exit 1; }
+[ -n "$file" ] && [ -f "$file" ] || { echo "usage: $0 <backup.dump.gpg or .age>" >&2; exit 2; }
 command -v awk >/dev/null || { echo "stop: awk is not installed" >&2; exit 1; }
 here="$(cd "$(dirname "$0")" && pwd)"
 tools="${GOFLOW_PG_TOOLS:-docker}"
@@ -51,6 +53,23 @@ gpg_args=(--decrypt --quiet)
 if [ -n "${GOFLOW_GPG_PASSFILE:-}" ]; then
   gpg_args=(--batch --pinentry-mode loopback --passphrase-file "$GOFLOW_GPG_PASSFILE" "${gpg_args[@]}")
 fi
+
+# decrypt_ writes the plain dump to stdout, never to a file.
+case "$file" in
+  *.gpg)
+    command -v gpg >/dev/null || { echo "stop: gpg is not installed" >&2; exit 1; }
+    decrypt_() { gpg "${gpg_args[@]}" "$file"; }
+    asks="gpg will ask for the passphrase" ;;
+  *.age)
+    command -v age >/dev/null || { echo "stop: age is not installed" >&2; exit 1; }
+    read -rsp "age private key, AGE-SECRET-KEY-1... (not shown): " identity
+    echo
+    [[ "$identity" =~ ^AGE-SECRET-KEY-1[0-9A-Z]{58}$ ]] || { unset identity; echo "stop: that isn't an age private key (one line, AGE-SECRET-KEY-1...)" >&2; exit 1; }
+    # <(...) hands age a pipe, not a file: the key stays in this shell's memory.
+    decrypt_() { age --decrypt --identity <(printf '%s\n' "$identity") "$file"; }
+    asks="age key read" ;;
+  *) echo "stop: $file is neither .gpg nor .age" >&2; exit 2 ;;
+esac
 
 if [ "$tools" = docker ]; then
   cd "$here/.."
@@ -81,12 +100,14 @@ if [ "$(psql_ postgres "SELECT count(*) FROM pg_database WHERE datname = '$db'")
 fi
 
 start=$(date +%s)
-echo "==> decrypting and checking the whole dump (gpg will ask for the passphrase)"
+echo "==> decrypting and checking the whole dump ($asks)"
 # Every stage must succeed (pipefail): a failed gpg or pg_restore, or a
 # failed check, stops here, before any database is created.
-if ! sql="$(gpg "${gpg_args[@]}" "$file" | to_sql_ | awk -f "$here/restore-filter.awk")"; then
+if ! sql="$(decrypt_ | to_sql_ | awk -f "$here/restore-filter.awk")"; then
+  unset identity
   echo "stop: the dump didn't pass its checks; nothing was restored" >&2; exit 1
 fi
+unset identity
 counts="${sql##*$'\n'}"   # the filter's last line: -- goflow-drill: removed=N ...
 case "$counts" in
   "-- goflow-drill: removed="*) ;;

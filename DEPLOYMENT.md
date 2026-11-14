@@ -518,6 +518,29 @@ The drill branches were deleted in the Neon console afterwards.
 
 **First numbers.** RPO: up to 6 hours from Neon's history; past that, everything since the last `backup.sh` run. RTO: not measured. The restore itself takes under a second at this size; the time goes to the manual steps of the [disaster recovery runbook](#disaster-recovery-restoring-production-from-a-backup), estimated at 15 to 30 minutes until someone times it.
 
+### Automated backups (Phase 18, in progress)
+
+Phase 16's backups depend on someone remembering to run `backup.sh`. Phase 18 runs them on a schedule. Decided on 14 November 2026; nothing below exists yet except the `age` support in the scripts (Task 74):
+
+| Part | Choice | Why |
+|---|---|---|
+| Where it runs | A scheduled workflow in a separate **private** repository, `goflow-backups` | This repository stays public and holds no secrets. Scheduled workflows in a public repository stop after 60 days without activity |
+| Encryption | [age](https://age-encryption.org), to a **public key**. The private key lives only in the password manager | Whoever steals the workflow's secrets can make new backups but can't read any |
+| Database login | A dedicated read-only role | A leaked backup login can read production, but not change or drop it |
+| Storage | A private Backblaze B2 bucket, outside GitHub. The workflow's key can upload but not delete. Object Lock in compliance mode keeps each file for 35 days, then a lifecycle rule removes it | A thief with the workflow's secrets can't delete the backups either. Compliance mode can't be lifted, even by the account owner |
+| Checks | Each run restores the dump in a throwaway database (`restore-filter.awk` and the structure checks) before encrypting it. GitHub emails on a failed run. A heartbeat service alerts when no successful run arrives. Once a month, a drill from a downloaded backup | A failed run, a run that never starts, and a key that no longer decrypts are each caught by a different layer |
+
+Order: the scripts read `.age` (Task 74), then a test bucket with a 1-day compliance lock (delete refused, lifecycle still removes it), then the production bucket, the role, the key and the workflow. Administrative credentials (B2 master key, Neon owner) never go into GitHub.
+
+To make or restore an age backup by hand (`age` from your package manager, e.g. `sudo pacman -S age`):
+
+```bash
+GOFLOW_AGE_RECIPIENT=age1... ./scripts/backup.sh                     # the public key: no passphrase asked
+./scripts/restore-drill.sh ~/goflow-backups/goflow-<time>.dump.age    # paste the AGE-SECRET-KEY-1... line at the hidden prompt
+```
+
+`restore-drill.sh` hands the private key to age through a pipe (`<(...)`): it is never written to disk, and it is cleared from the script's memory once the dump is decrypted. Old `.gpg` backups restore exactly as before. An age file is about the size of the plain dump (age doesn't compress; gpg does).
+
 ### Disaster recovery: restoring production from a backup
 
 For when Neon's 6 hours of history can't help: the project is gone, or the damage is older than 6 hours. Nothing here is scripted on purpose: `restore-drill.sh` only ever writes to the local Compose database, and every step that touches a real database is typed by a person who has read it first. Do it in a `bash` shell, from the repository.
