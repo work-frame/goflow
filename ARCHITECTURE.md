@@ -1,6 +1,6 @@
 # Architecture
 
-This describes GoFlow at the end of Phase 15. It changes as each phase lands.
+This describes GoFlow at the end of Phase 15, with Phase 16 in progress. It changes as each phase lands.
 
 ## Overview
 
@@ -485,6 +485,7 @@ golang:1.27-trixie                         gcr.io/distroless/static-debian13:non
 | `internal/cli` (webhooks) | Creating from `@file` and from the command line (which warns about shell history), refusals before anything is sent (no JSON, missing file, over 64 KiB, `--body` without `--webhook`), the attempts table, and the secret printed alone on stdout with its one-time warning |
 | `internal/web` | Static checks on `app.js`: no way for server text to become HTML, every event type handled, and a webhook's URL read only by `hostOf`, with no body, path, query or signing secret anywhere (case 61) |
 | `cmd/receiver` | Each check in order: a wrong secret `401`, a timestamp 6 minutes off either way `400`, a repeat `200` and processed once, a changed body `401`, `?fail=N` per webhook-id; the body never logged; the secret never repeated in an error (case 63) |
+| `scripts/backup.sh`, `scripts/restore-drill.sh`, `.github/workflows/uptime.yml` | Read, not run (they need Neon, Docker or a schedule): every dump is piped into `gpg`, never redirected to a file; the drill decrypts straight into `pg_restore` and refuses an existing database; the uptime workflow has no permissions, no secrets, no actions, and runs every 6 hours (case 64). Run once by hand in the sandbox: a dump that contains no readable email, restored with every count equal |
 | `.github/workflows/ci.yml` | `cmd/api/ci_test.go` reads the workflow: actions pinned to commit SHAs, a read-only token, no secrets, the same database images as `compose.yaml` and the same Go minor version as the Dockerfile (case 55). The workflow itself is tested by running: its first green run is on its own pull request |
 | `internal/loadgen`, `cmd/loadgen` | Only addresses on this machine are accepted, and a remote API is refused before anything is sent. Jobs finish through polling alone, with no events at all. Against a real test server, a job that never finishes is listed by ID and the run counts as failed (case 53). The load itself is measured by hand, never in `check.sh` (DEVELOPMENT.md, Load testing and Benchmarks) |
 
@@ -538,6 +539,8 @@ Everything runs with the race detector (`./scripts/check.sh`). Tests that need P
 
 ## Known limitations
 
+- **Neon's Free plan keeps 6 hours of history.** A mistake noticed within 6 hours can be undone by branching from a moment before it; anything older needs one of your own encrypted backups (`scripts/backup.sh`), which are as recent as the last time you ran it. How much can be lost (RPO) and how long a restore takes (RTO) are being measured by the Phase 16 drills, not promised.
+- **The uptime check runs every 6 hours.** A failure just after a good check can go unnoticed that long, and GitHub may start scheduled runs late.
 - Demo jobs are placeholders (`worker.Demo` picks a behaviour from the title).
 - **Webhooks retry for minutes, not days.** The existing backoff with at most 10 attempts covers about 13 minutes; real providers retry for hours. A receiver down longer than that leaves the job `dead`, and its owner re-runs it (Phase 15, decision 4a).
 - **A slow receiver holds a worker for up to 10 seconds.** On Render the API runs 2 workers, so two receivers that time out stop every other job for that long. To be measured before raising the worker count.
