@@ -452,6 +452,18 @@ The merge adds a second service, `goflow-receiver`, from the same image. Expect 
 6. `./bin/goflow job attempts <job id>`, and the receiver's logs. Expected: possibly a first attempt that times out (the receiver was asleep: up to about 50 s to wake, past the 10 s limit), then `retry 503` (the planned failure), then `delivered 200`; in the receiver's log `webhook refused on purpose (?fail)`, then `webhook processed` with the same `webhook_id`.
 7. Afterwards, `rm order.json`. The receiver can stay: it sleeps when unused.
 
+Result on 14 November 2026 (deploy `40d23f0`), times in WAT (UTC+1):
+
+```text
+ATTEMPT  STARTED              TOOK   STATUS  OUTCOME    ERROR
+1        2026-11-14 21:23:48  108ms  503     retry      webhook: receiver answered 503
+2        2026-11-14 21:23:49  19ms   200     delivered
+```
+
+- **The `503` is the proof.** The receiver checks the signature, then the timestamp, and only then `?fail`: attempt 1 could only reach `503` with a signature made by the secret it holds and a fresh timestamp. A wrong secret answers `401`.
+- **One second** between the attempts: the first backoff (1–2 s). No cold-start timeout: the receiver had just been deployed and was awake.
+- **What went wrong on the way, and was caught:** the receiver's first two deploys failed with `RECEIVER_SECRET is required` (a Blueprint update ignores `sync: false`, as planned). A value made with Render's **Generate** button was refused at startup (`must start with whsec_`): it isn't a GoFlow secret, and the receiver can't use one GoFlow didn't create. And `goflow webhook-secret` was run four times: each run rotates, keeping only the one before as "previous", so a receiver given the second secret would have answered `401` once the third existed. Make one secret, paste it, then delete the file.
+
 ## Rolling back
 
 Render keeps previous deploys. In the dashboard: `goflow-api` → **Deploys** → pick the last good one → **Rollback**. A rollback doesn't undo migrations, so a migration must keep working with the code before it (add columns before using them, drop them a release later).
