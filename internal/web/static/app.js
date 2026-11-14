@@ -10,6 +10,10 @@
 //   - PostgreSQL is the truth. Live events only update what the page shows;
 //     after "ready", "resync", "resumed" or any reconnect, the page reloads
 //     the list.
+//   - A webhook job shows only its URL's host (hostOf), never the path,
+//     the query (often a token), the body or anything about the signing
+//     secret, which the dashboard never asks for. Attempts are shown as the
+//     API gives them: errors already cut to 300 characters, without URLs.
 //   - The dot has three states: live (stream open, events arriving),
 //     paused (stream open, but the server says events stopped reaching it,
 //     so the list may be stale) and offline/reconnecting (stream closed).
@@ -24,6 +28,10 @@ const API = "/api/v1";
 // one back.
 const jobs = new Map();
 const deleted = new Set();
+
+// attempts holds the delivery attempts shown under webhook jobs whose
+// "Attempts" button is open, by job ID.
+const attempts = new Map();
 
 let events = null;      // the open EventSource, if any
 let retryDelay = 1000;  // reconnect backoff, doubling to 30 s
@@ -82,6 +90,8 @@ function apply(job) {
   const have = jobs.get(job.id);
   if (have && have.version >= job.version) return;
   jobs.set(job.id, job);
+  // An open attempts list is out of date when its job changes.
+  if (attempts.has(job.id)) loadAttempts(job.id);
 }
 
 // loadAll reads every job from PostgreSQL and merges it in. Jobs the page
@@ -211,18 +221,99 @@ function button(label, onClick) {
   return b;
 }
 
+// hostOf is the only thing the page shows of a webhook's URL.
+function hostOf(url) {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return "webhook";
+  }
+}
+
+// attemptsRow is the row under a webhook job that lists its attempts.
+function attemptsRow(id) {
+  const tr = document.createElement("tr");
+  tr.className = "attempts";
+  const td = cell("", "attempts");
+  td.colSpan = 6;
+  const list = attempts.get(id);
+  if (list === null) {
+    td.textContent = "Loading attempts…";
+  } else if (list.length === 0) {
+    td.textContent = "No attempts yet.";
+  } else {
+    const table = document.createElement("table");
+    const head = document.createElement("tr");
+    for (const h of ["#", "Started", "Took", "Status", "Outcome", "Error"]) {
+      const th = document.createElement("th");
+      th.textContent = h;
+      head.append(th);
+    }
+    table.append(head);
+    for (const a of list) {
+      const row = document.createElement("tr");
+      row.append(
+        cell(String(a.attempt)),
+        cell(new Date(a.started_at).toLocaleString()),
+        cell(a.duration_ms + " ms"),
+        cell(a.status_code ? String(a.status_code) : "–"),
+        cell(a.outcome, "outcome " + a.outcome),
+        cell(a.error || ""),
+      );
+      table.append(row);
+    }
+    td.append(table);
+  }
+  tr.append(td);
+  return tr;
+}
+
+async function loadAttempts(id) {
+  try {
+    const data = await api("GET", "/jobs/" + id + "/attempts");
+    if (attempts.has(id)) attempts.set(id, data.attempts);
+  } catch (err) {
+    if (err instanceof Unauthorized) {
+      logout(false);
+      return;
+    }
+    attempts.delete(id);
+    $("jobs-error").textContent = err.message;
+    $("jobs-error").hidden = false;
+  }
+  render();
+}
+
+function toggleAttempts(id) {
+  if (attempts.has(id)) {
+    attempts.delete(id);
+    render();
+    return;
+  }
+  attempts.set(id, null); // null: loading
+  render();
+  loadAttempts(id);
+}
+
 function render() {
   const list = [...jobs.values()].sort(
     (a, b) => b.created_at.localeCompare(a.created_at) || b.id.localeCompare(a.id));
-  const rows = list.map((job) => {
+  const rows = list.flatMap((job) => {
     const tr = document.createElement("tr");
     const status = cell(job.status, "status " + job.status);
     if (job.status === "retrying" && job.next_attempt_at) {
       status.title = "next attempt " + new Date(job.next_attempt_at).toLocaleTimeString();
     }
+    const title = cell(job.title, "title");
+    if (job.type === "webhook" && job.webhook) {
+      const host = document.createElement("span");
+      host.className = "host";
+      host.textContent = " → " + hostOf(job.webhook.url);
+      title.append(host);
+    }
     tr.append(
       status,
-      cell(job.title, "title"),
+      title,
       cell(job.attempts + "/" + job.max_attempts),
       cell(new Date(job.created_at).toLocaleString(), "created"),
       cell(job.id.slice(0, 8), "id"),
@@ -231,9 +322,12 @@ function render() {
     if (job.status === "dead" || job.status === "failed") {
       actions.append(button("Retry", () => retryJob(job.id)), " ");
     }
+    if (job.type === "webhook") {
+      actions.append(button(attempts.has(job.id) ? "Hide" : "Attempts", () => toggleAttempts(job.id)), " ");
+    }
     actions.append(button("Delete", () => deleteJob(job.id, job.title)));
     tr.append(actions);
-    return tr;
+    return attempts.has(job.id) ? [tr, attemptsRow(job.id)] : [tr];
   });
   $("jobs").replaceChildren(...rows);
   $("empty").hidden = rows.length > 0;
@@ -310,6 +404,7 @@ async function logout(tellServer = true) {
   if (events) events.close();
   events = null;
   jobs.clear();
+  attempts.clear();
   deleted.clear();
   render();
   $("session").hidden = true;

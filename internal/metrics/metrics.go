@@ -63,6 +63,7 @@ func New() *Metrics {
 		m.JobStatusChanges,
 		m.AttemptDuration,
 		m.RateLimited,
+		m.WebhookDuration,
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 	)

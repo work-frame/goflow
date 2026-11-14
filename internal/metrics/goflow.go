@@ -21,6 +21,11 @@ type goflowMetrics struct {
 	AttemptDuration *prometheus.HistogramVec
 	// RateLimited counts refused requests by rule ("login_email", ...).
 	RateLimited *prometheus.CounterVec
+	// WebhookDuration records each webhook delivery attempt by outcome:
+	// "delivered", "retry" or "permanent". Its _count is the number of
+	// attempts. No host label: it would put users' receivers in /metrics
+	// and add a series for every new one.
+	WebhookDuration *prometheus.HistogramVec
 }
 
 func newGoflowMetrics() goflowMetrics {
@@ -40,6 +45,12 @@ func newGoflowMetrics() goflowMetrics {
 			Name: "goflow_rate_limited_total",
 			Help: "Requests refused with 429, by rate-limit rule.",
 		}, []string{"rule"}),
+		WebhookDuration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Name: "goflow_webhook_delivery_duration_seconds",
+			Help: "How long each webhook delivery attempt took, by outcome: delivered, retry or permanent. _count is attempts.",
+			// Up to the 10 s limit for a whole request.
+			Buckets: []float64{0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 15},
+		}, []string{"outcome"}),
 	}
 }
 
@@ -59,6 +70,12 @@ func (m *Metrics) JobDeleted(context.Context, string, string) {
 // worker.Pool.Observe.
 func (m *Metrics) ObserveAttempt(outcome string, took time.Duration) {
 	m.AttemptDuration.WithLabelValues(outcome).Observe(took.Seconds())
+}
+
+// ObserveWebhook records one delivery attempt. It fits
+// webhook.Deliverer.Observe. outcome is one of job's three Outcome values.
+func (m *Metrics) ObserveWebhook(outcome string, took time.Duration) {
+	m.WebhookDuration.WithLabelValues(outcome).Observe(took.Seconds())
 }
 
 // WatchQueue reports the queue's sizes each time /metrics is read, from

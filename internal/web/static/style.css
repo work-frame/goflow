@@ -102,3 +102,11 @@ td.actions { white-space: nowrap; text-align: right; }
 @media (max-width: 640px) {
   td.id, th:nth-child(5), td.created, th:nth-child(4) { display: none; }
 }
+
+/* Webhook jobs: the host after the title, and the attempts under the row. */
+.host { color: var(--muted); font-size: 0.85rem; }
+tr.attempts td.attempts { background: var(--bg); padding: 8px 12px; }
+tr.attempts table { width: 100%; font-size: 0.85rem; }
+.outcome.delivered { color: var(--ok); }
+.outcome.retry { color: var(--warn); }
+.outcome.permanent { color: var(--bad); }

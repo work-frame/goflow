@@ -851,6 +851,19 @@ Each case was reproduced on a real machine (Arch Linux, Go 1.27, PostgreSQL 17) 
   (Sandbox run, the secret shortened here. The test's secrets are random and thrown away.)
 - **Why:** every other test still passed. Encryption alone kept the secret unreadable to anyone without the key, but someone who could write to the database (not read the key) could give bob's account alice's secret: bob's deliveries would carry alice's signature, which alice's receivers accept. The answer to the Task 65 question: encryption protects what the secret is, the bound ID protects whose it is.
 
+## 61. The dashboard shows a webhook's whole URL
+
+- **Safeguard:** `app.js` reads a webhook job's URL in one place, `hostOf(job.webhook.url)`, and shows only the host (Daniel's condition for Task 66).
+- **Removed:** the break-it shows `job.webhook.url` itself after the title.
+- **Caught by:** `TestScriptShowsOnlyTheWebhookHost`.
+- **Observed:**
+  ```text
+  --- FAIL: TestScriptShowsOnlyTheWebhookHost (0.00s)
+      web_test.go:125: app.js doesn't show a webhook through hostOf(job.webhook.url): the whole URL may be on the page
+  ```
+  (Sandbox run.)
+- **Why:** a webhook URL often carries its receiver's token in the path or query (`?token=...`). On the page it ends up in screenshots and screen shares, the places this project already keeps secrets out of. The API still returns the URL to its owner; the rule is about what the page displays. A browser check in the sandbox before this change: with a URL ending `?token=SECRET123`, the page showed `hooks.example.com` and no part of the path, query or body.
+
 ## Experiment: the naive dual write loses a job
 
 Not a removed safeguard but the design of Task 22, run live on 2 November 2026 to see the failure Task 23 fixes. `POST /api/v1/jobs` saved the job in PostgreSQL, then pushed its ID to Redis, with nothing tying the two together.

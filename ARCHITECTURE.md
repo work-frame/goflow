@@ -404,6 +404,7 @@ webhook_attempts (
   | `goflow_events_published_total`, `goflow_events_dropped_total` | counter | by the events publisher |
   | `goflow_event_streams` | gauge | open event streams on this instance |
   | `goflow_rate_limited_total{rule}` | counter | each `429` |
+  | `goflow_webhook_delivery_duration_seconds{outcome}` | histogram | each webhook attempt in the API's workers: `delivered`, `retry` or `permanent`; `_count` is attempts. No host label: it would list users' receivers and grow with every new one. `cmd/worker` processes have no `/metrics` |
   | `goflow_rate_limit_fallback` | gauge | 1 while limits are counted in memory because Redis is unreachable |
   | `goflow_event_delivery_ok` | gauge | 1 while this API's canaries come back, 0 while live delivery is paused (Task 42) |
 
@@ -480,6 +481,8 @@ golang:1.27-trixie                         gcr.io/distroless/static-debian13:non
 | `internal/egress` | The address policy over every refused range and its IPv6 disguises; the dialer with a fake resolver: one blocked address refuses the name before any connection (case 58), the connection goes to the checked IP after one lookup, a second connection is checked again (rebinding), blocked literals and ports never reach the resolver; the socket's own check; against a local HTTPS server: redirects returned, not followed, and the 10 s limit covering a body that never ends |
 | `internal/secrets` | Key parsing refusals that never repeat the key; seal and open; a ciphertext for one owner fails for another, and modified bytes fail; old keys decrypt but never encrypt, and a missing key is reported by ID |
 | `internal/webhook` | Signature against the Standard Webhooks spec's own example; a delivery to a local HTTPS receiver checked header by header and verified; every status class's outcome; no redirect followed; a timeout retried; no secret, a blocked address and an untrusted certificate permanent; errors without the URL |
+| `internal/cli` (webhooks) | Creating from `@file` and from the command line (which warns about shell history), refusals before anything is sent (no JSON, missing file, over 64 KiB, `--body` without `--webhook`), the attempts table, and the secret printed alone on stdout with its one-time warning |
+| `internal/web` | Static checks on `app.js`: no way for server text to become HTML, every event type handled, and a webhook's URL read only by `hostOf`, with no body, path, query or signing secret anywhere (case 61) |
 | `.github/workflows/ci.yml` | `cmd/api/ci_test.go` reads the workflow: actions pinned to commit SHAs, a read-only token, no secrets, the same database images as `compose.yaml` and the same Go minor version as the Dockerfile (case 55). The workflow itself is tested by running: its first green run is on its own pull request |
 | `internal/loadgen`, `cmd/loadgen` | Only addresses on this machine are accepted, and a remote API is refused before anything is sent. Jobs finish through polling alone, with no events at all. Against a real test server, a job that never finishes is listed by ID and the run counts as failed (case 53). The load itself is measured by hand, never in `check.sh` (DEVELOPMENT.md, Load testing and Benchmarks) |
 
