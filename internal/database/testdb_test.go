@@ -97,20 +97,20 @@ func createTemplate(baseURL string) (string, func(), error) {
 
 // newTestDB returns an empty database for one test, dropped when the test ends.
 // Use it to test migrations themselves.
-func newTestDB(t *testing.T) *sql.DB {
+func newTestDB(t testing.TB) *sql.DB {
 	t.Helper()
 	return createTestDB(t, "")
 }
 
 // newMigratedTestDB returns a private copy of the migrated template,
 // dropped when the test ends. Use it for anything that needs the schema.
-func newMigratedTestDB(t *testing.T) *sql.DB {
+func newMigratedTestDB(t testing.TB) *sql.DB {
 	t.Helper()
 	testDatabaseURL(t) // skip early if no test database is configured
 	return createTestDB(t, templateName)
 }
 
-func createTestDB(t *testing.T, template string) *sql.DB {
+func createTestDB(t testing.TB, template string) *sql.DB {
 	t.Helper()
 	ctx := context.Background()
 	baseURL := testDatabaseURL(t)

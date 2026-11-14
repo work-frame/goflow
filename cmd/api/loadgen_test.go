@@ -92,6 +92,9 @@ func TestLoadgenReportsTheJobThatNeverFinishes(t *testing.T) {
 	if rep.P50 <= 0 || rep.P99 < rep.P95 || rep.P95 < rep.P50 || rep.P99 > 3*time.Second {
 		t.Errorf("p50 %v, p95 %v, p99 %v: want ordered times from the 19 completed jobs, none as long as the lost one's wait", rep.P50, rep.P95, rep.P99)
 	}
+	if rep.CreatesTook <= 0 || rep.CreateRate != float64(rep.Created)/rep.CreatesTook.Seconds() {
+		t.Errorf("create rate %v over %v, want 20 created divided by the time the creates took", rep.CreateRate, rep.CreatesTook)
+	}
 	if rep.SeenByEvent+rep.SeenByPoll != 19 {
 		t.Errorf("seen by events %d + polls %d, want the 19 completed jobs", rep.SeenByEvent, rep.SeenByPoll)
 	}

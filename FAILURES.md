@@ -757,6 +757,18 @@ Each case was reproduced on a real machine (Arch Linux, Go 1.27, PostgreSQL 17) 
   ```
 - **Why:** without the loop the report still said 20 created and 19 completed, but nothing named the missing job, and the command exited 0: a script would have recorded the run as a clean result, with a rate that looks right because it only counts what finished. A load test that drops what it can't measure overstates the system. A job that never finishes is the most important line in the report.
 
+## 54. A benchmark fails when its operation is refused
+
+- **Safeguard:** `BenchmarkClaimAndComplete` checks that every `Claim` wins and every `Complete` is accepted, and stops with `b.Fatalf` otherwise. `BenchmarkRelayPass` checks that every pass relays exactly 100 rows and leaves none behind.
+- **Removed:** nothing in the benchmark. The break-it changes `Claim` to return a lease token PostgreSQL never stored, so every `Complete` is refused.
+- **Caught by:** the benchmark itself.
+- **Observed:**
+  ```text
+  --- FAIL: BenchmarkClaimAndComplete
+      bench_test.go:75: complete 1 of 1 refused: database: complete job cdf4d328e18195caa3037e1f537a91da: lease lost: the job is not processing under this lease (a benchmark of writes that didn't happen measures nothing)
+  ```
+- **Why:** a refused `Complete` returns quickly. A benchmark that ignored the error would have reported a faster time than the working code, for jobs that were never completed. The numbers would have looked like an improvement. Benchmarks measure only what they check succeeded.
+
 ## Experiment: the naive dual write loses a job
 
 Not a removed safeguard but the design of Task 22, run live on 2 November 2026 to see the failure Task 23 fixes. `POST /api/v1/jobs` saved the job in PostgreSQL, then pushed its ID to Redis, with nothing tying the two together.

@@ -56,6 +56,11 @@ type Report struct {
 	Completed          int
 	Dead               []string // job IDs that ended dead
 	Unfinished         []string // job IDs neither completed nor dead in time
+	// CreatesTook runs from the first create request to the last create
+	// response; CreateRate is Created / CreatesTook. If creating is slow,
+	// it caps PerSecond, whatever the workers do (Task 57).
+	CreatesTook time.Duration
+	CreateRate  float64
 	// Elapsed runs from the first create request to the last completion.
 	Elapsed time.Duration
 	// PerSecond is Completed / Elapsed. Unfinished and dead jobs aren't in
@@ -277,7 +282,12 @@ func Run(ctx context.Context, cfg Config) (Report, error) {
 		}()
 	}
 	wg.Wait()
+	createsTook := time.Since(start)
 	r.mu.Lock()
+	r.report.CreatesTook = createsTook
+	if createsTook > 0 {
+		r.report.CreateRate = float64(r.report.Created) / createsTook.Seconds()
+	}
 	r.created = true
 	r.checkAllDone()
 	r.mu.Unlock()

@@ -90,6 +90,8 @@ func printReport(w io.Writer, label string, workers int, r loadgen.Report) {
 	}
 	fmt.Fprintf(w, "jobs:         %d requested, %d created, %d completed, %d dead, %d unfinished, %d create errors\n",
 		r.Requested, r.Created, r.Completed, len(r.Dead), len(r.Unfinished), len(r.CreateErrors))
+	fmt.Fprintf(w, "creates:      %.1f jobs/s (%d created in %v, first request to last response)\n",
+		r.CreateRate, r.Created, r.CreatesTook.Round(time.Millisecond))
 	fmt.Fprintf(w, "throughput:   %.1f jobs/s (%d completed in %v, first create to last completion)\n",
 		r.PerSecond, r.Completed, r.Elapsed.Round(time.Millisecond))
 	fmt.Fprintf(w, "create→done:  p50 %v  p95 %v  p99 %v\n", r.P50.Round(time.Millisecond), r.P95.Round(time.Millisecond), r.P99.Round(time.Millisecond))
