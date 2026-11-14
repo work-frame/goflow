@@ -379,6 +379,12 @@ The dashboard showed `7eb723a1` `completed 1/3`, with the dot `live`. The deadli
 - **Check once, after that merge:** in the dashboard, `goflow-api` → **Settings** → Auto-Deploy shows that deploys wait for checks to pass. Settings only: not the Environment page.
 - **Check on the next merge:** `gh run list --branch main --limit 1` shows the push run in progress, and **Events** shows no new deploy until it is green.
 
+Result on 14 November 2026 (merge `b27c2af`, PR #73):
+
+- The push run on `main` started at 08:49:43 UTC. Render was already building `b27c2af` by 08:50, while that run was still in progress: the deploy started under the old setting, as expected. The run then passed.
+- At 08:53 Settings → Deploy still showed **On Commit**. That page had been open since before the sync; only its `#deploy` anchor had changed, so it was never reloaded. The Blueprint listed `goflow-api` as updated around 08:51, a **Manual sync** at 08:55 found "Resources already up to date", and the reloaded page showed **After CI Checks Pass**. The automatic sync had applied it within about two minutes of the merge. Reload a settings page before trusting it.
+- Render's Deploy Hook sits on the same page, masked. It is a secret: anyone with the URL can trigger a deploy. Keep it masked in screenshots.
+
 ## Rolling back
 
 Render keeps previous deploys. In the dashboard: `goflow-api` → **Deploys** → pick the last good one → **Rollback**. A rollback doesn't undo migrations, so a migration must keep working with the code before it (add columns before using them, drop them a release later).
