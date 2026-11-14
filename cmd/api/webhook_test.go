@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"net/netip"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -45,6 +46,7 @@ func TestWebhookIsDeliveredSignedRetriedAndRecorded(t *testing.T) {
 	cfg := testConfig("127.0.0.1:0", testDatabaseURL(t))
 	cfg.RedisURL = testRedisURL(t)
 	cfg.Workers = 2
+	cfg.MetricsToken = "webhook-test-metrics-token-of-32-characters"
 	cfg.WebhookClient = egress.NewTestClient(t, egress.TestOptions{
 		Allow:   []netip.Prefix{netip.MustParsePrefix("127.0.0.1/32")},
 		Hosts:   map[string]netip.AddrPort{"example.com": netip.MustParseAddrPort(recv.Listener.Addr().String())},
@@ -103,5 +105,17 @@ func TestWebhookIsDeliveredSignedRetriedAndRecorded(t *testing.T) {
 		list.Attempts[0].Outcome != job.OutcomeRetry || list.Attempts[0].StatusCode != 503 ||
 		list.Attempts[1].Outcome != job.OutcomeDelivered || list.Attempts[1].StatusCode != 200 {
 		t.Errorf("attempts: %d %s, want retry 503 then delivered 200", status, body)
+	}
+
+	// Both attempts reach /metrics: the API's deliverer is wired to them
+	// (FAILURES.md, case 62: Task 66 merged without that line).
+	status, _, body = requestAs(t, client, http.MethodGet, base+"/metrics", cfg.MetricsToken, "")
+	for _, want := range []string{
+		`goflow_webhook_delivery_duration_seconds_count{outcome="retry"} 1`,
+		`goflow_webhook_delivery_duration_seconds_count{outcome="delivered"} 1`,
+	} {
+		if status != http.StatusOK || !strings.Contains(string(body), want) {
+			t.Errorf("/metrics (%d) lacks %s", status, want)
+		}
 	}
 }

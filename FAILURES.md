@@ -864,6 +864,20 @@ Each case was reproduced on a real machine (Arch Linux, Go 1.27, PostgreSQL 17) 
   (Sandbox run.)
 - **Why:** a webhook URL often carries its receiver's token in the path or query (`?token=...`). On the page it ends up in screenshots and screen shares, the places this project already keeps secrets out of. The API still returns the URL to its owner; the rule is about what the page displays. A browser check in the sandbox before this change: with a URL ending `?token=SECRET123`, the page showed `hooks.example.com` and no part of the path, query or body.
 
+## 62. The delivery metrics were never switched on
+
+- **Safeguard:** `cmd/api` gives its webhook deliverer the metrics (`deliverer.Observe = m.ObserveWebhook`), and since Task 66b `TestWebhookIsDeliveredSignedRetriedAndRecorded` reads `/metrics` after its two attempts.
+- **Removed:** the break-it deletes that line. Nothing else changes: `Observe` is optional, so the code builds and every other test passes.
+- **Caught by:** `TestWebhookIsDeliveredSignedRetriedAndRecorded`.
+- **Observed:**
+  ```text
+  --- FAIL: TestWebhookIsDeliveredSignedRetriedAndRecorded (3.19s)
+      webhook_test.go:118: /metrics (200) lacks goflow_webhook_delivery_duration_seconds_count{outcome="retry"} 1
+      webhook_test.go:118: /metrics (200) lacks goflow_webhook_delivery_duration_seconds_count{outcome="delivered"} 1
+  ```
+  (Sandbox run.)
+- **Why:** not planted: it happened. Task 66's commit step listed `git add internal ...` without `cmd`, so the one-line change in `cmd/api/main.go` stayed in the working tree. CI checked what was pushed, which built and passed: the metric existed, its own unit test passed, and nothing asked whether the running API fed it. PR #80 merged with webhook delivery metrics that would always read zero. Two lessons: a unit test of a part doesn't show the parts are connected, and `git status` after a commit must be clean (`M cmd/api/main.go` was on screen, and `gh pr create` warned "1 uncommitted change").
+
 ## Experiment: the naive dual write loses a job
 
 Not a removed safeguard but the design of Task 22, run live on 2 November 2026 to see the failure Task 23 fixes. `POST /api/v1/jobs` saved the job in PostgreSQL, then pushed its ID to Redis, with nothing tying the two together.

@@ -115,6 +115,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg config, ready func(addr s
 		webhookClient = egress.NewClient()
 	}
 	deliverer := &webhook.Deliverer{Client: webhookClient, Secrets: secretStore, Attempts: attemptStore, Logger: logger}
+	// deliverer.Observe is set once the metrics exist, below.
 
 	// The queue is optional until workers exist (Phase 6). Without it, jobs
 	// and their outbox rows are saved and wait until a relay runs.
@@ -127,6 +128,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg config, ready func(addr s
 	// stores report every job change to them, and with Redis also to the
 	// events publisher.
 	m := metrics.New()
+	deliverer.Observe = m.ObserveWebhook
 	var notifier database.Notifier = m
 	var live *events.Live
 	// Rate-limit counters go to Redis when there is one. counter stays a
