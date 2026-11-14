@@ -29,8 +29,8 @@ func TestUptimeWorkflowNeedsNothing(t *testing.T) {
 
 // The backup (Phase 16, decision H2) never exists unencrypted on disk: the
 // dump is piped straight into gpg, and the drill decrypts straight into
-// pg_restore. A backup script runs rarely and by hand, so this reads it
-// (FAILURES.md, case 64).
+// pg_restore and a check in memory (Task 69b). A backup script runs rarely
+// and by hand, so this reads it (FAILURES.md, case 64).
 func TestBackupIsEncryptedBeforeItTouchesTheDisk(t *testing.T) {
 	parallelTest(t)
 	b := readRepoFile(t, "scripts/backup.sh")
@@ -57,7 +57,7 @@ func TestBackupIsEncryptedBeforeItTouchesTheDisk(t *testing.T) {
 	}
 
 	d := readRepoFile(t, "scripts/restore-drill.sh")
-	for _, want := range []string{"set -euo pipefail", `gpg "${gpg_args[@]}" "$file" | restore_`, "already exists", "db=goflow_restore_drill"} {
+	for _, want := range []string{"set -euo pipefail", `gpg "${gpg_args[@]}" "$file" | to_sql_ | awk`, "already exists", "db=goflow_restore_drill"} {
 		if !strings.Contains(d, want) {
 			t.Errorf("restore-drill.sh lacks %q", want)
 		}

@@ -10,6 +10,8 @@
 #   - reads the database URL without echo (or from GOFLOW_BACKUP_DATABASE_URL)
 #   - runs pg_dump (custom format) in the postgres:17 image, the same major
 #     version as Neon, so this machine needs no PostgreSQL install
+#   - connects with sslmode=verify-full against this machine's CA bundle,
+#     whatever sslmode the URL says (scripts/pgurl.sh)
 #   - pipes the dump straight into gpg --symmetric (AES-256): the dump is
 #     never written to disk unencrypted. gpg asks for a passphrase twice
 #   - writes ~/goflow-backups/goflow-<UTC time>.dump.gpg (folder mode 700,
@@ -29,6 +31,8 @@ set -euo pipefail
 dir="${GOFLOW_BACKUP_DIR:-$HOME/goflow-backups}"
 tools="${GOFLOW_PG_TOOLS:-docker}"
 ca=/etc/ssl/certs/ca-certificates.crt
+# shellcheck source=scripts/pgurl.sh
+. "$(dirname "$0")/pgurl.sh"
 
 need() { command -v "$1" >/dev/null || { echo "stop: $1 is not installed" >&2; exit 1; }; }
 need gpg
@@ -64,15 +68,14 @@ fi
 start=$(date +%s)
 echo "==> dumping and encrypting (gpg will ask for a passphrase twice)"
 if [ "$tools" = docker ]; then
-  # libpq checks the server's certificate against this machine's CA
-  # bundle, mounted read-only: verify-full works in any image.
-  sep='?'; case "$url" in *\?*) sep='&' ;; esac
-  PGURL="${url}${sep}sslrootcert=/etc/goflow-ca.crt" \
+  # libpq checks the server's certificate and name against this machine's
+  # CA bundle, mounted read-only: verify-full works in any image.
+  PGURL="$(verified_url "$url" /etc/goflow-ca.crt)" \
     docker run --rm -i -e PGURL -v "$ca:/etc/goflow-ca.crt:ro" postgres:17 \
       sh -c 'exec pg_dump --format=custom --no-owner --no-privileges --dbname="$PGURL"' </dev/null |
     gpg "${gpg_args[@]}"
 else
-  pg_dump --format=custom --no-owner --no-privileges --dbname="$url" </dev/null | gpg "${gpg_args[@]}"
+  pg_dump --format=custom --no-owner --no-privileges --dbname="$(verified_url "$url" "$ca")" </dev/null | gpg "${gpg_args[@]}"
 fi
 unset url
 mv "$tmp" "$out"
