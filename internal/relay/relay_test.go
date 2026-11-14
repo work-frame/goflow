@@ -299,3 +299,58 @@ func TestPromoterMovesRetriesWhenDue(t *testing.T) {
 		t.Fatal("a retry due in an hour was promoted")
 	}
 }
+
+// deadlineQueue records how much time each Enqueue was given.
+type deadlineQueue struct {
+	mu   sync.Mutex
+	left []time.Duration // -1: no deadline
+}
+
+func (q *deadlineQueue) Enqueue(ctx context.Context, _ ...string) error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	d, ok := ctx.Deadline()
+	if !ok {
+		q.left = append(q.left, -1)
+	} else {
+		q.left = append(q.left, time.Until(d))
+	}
+	return nil
+}
+
+func (q *deadlineQueue) first() (time.Duration, bool) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if len(q.left) == 0 {
+		return 0, false
+	}
+	return q.left[0], true
+}
+
+// wantSendTimeout is the time each send to Redis gets of its own (Phase 17,
+// decision P2), not what is left of the 10-second pass.
+const wantSendTimeout = 2 * time.Second
+
+func checkSendDeadline(t *testing.T, q *deadlineQueue) {
+	t.Helper()
+	eventually(t, "a send", func() bool { _, ok := q.first(); return ok })
+	left, _ := q.first()
+	if left < 0 || left > wantSendTimeout || left < wantSendTimeout-time.Second {
+		t.Errorf("a send was given %v; want about %v of its own (-1: no deadline)", left.Round(time.Millisecond), wantSendTimeout)
+	}
+}
+
+func TestEachRelaySendHasItsOwnDeadline(t *testing.T) {
+	o, q := &memOutbox{}, &deadlineQueue{}
+	o.add("a")
+	stop := New(o, q, discardLogger(), time.Hour).Start(context.Background())
+	defer stop()
+	checkSendDeadline(t, q)
+}
+
+func TestEachReconcilerSendHasItsOwnDeadline(t *testing.T) {
+	s, q := &memStale{stale: []string{"lost"}}, &deadlineQueue{}
+	stop := NewReconciler(s, q, discardLogger(), time.Hour, time.Minute).Start(context.Background())
+	defer stop()
+	checkSendDeadline(t, q)
+}
