@@ -1,8 +1,10 @@
 # GoFlow's container image (Phase 11): the API, with the worker binary
-# beside it. Build: docker build -t goflow .   Run: see compose.yaml.
+# beside it, and the example webhook receiver (Task 67), which Render runs
+# as its own service from this same image. Build: docker build -t goflow .
+# Run: see compose.yaml.
 #
 # Two stages. The first has Go and the source and compiles. The second
-# gets only the two binaries: no compiler, no source, no shell, no package
+# gets only the three binaries: no compiler, no source, no shell, no package
 # manager. Whatever isn't in the image can't be exploited or leak.
 #
 # No secrets here, ever: no ARG or ENV holding a URL, password or token.
@@ -30,12 +32,13 @@ COPY internal ./internal
 # debug tables (panics still show file and line).
 ENV CGO_ENABLED=0
 RUN go build -trimpath -ldflags="-s -w" -o /out/api ./cmd/api \
- && go build -trimpath -ldflags="-s -w" -o /out/worker ./cmd/worker
+ && go build -trimpath -ldflags="-s -w" -o /out/worker ./cmd/worker \
+ && go build -trimpath -ldflags="-s -w" -o /out/receiver ./cmd/receiver
 
 # distroless "static": CA certificates (for verify-full to Neon), time
 # zone data, and a user called nonroot. About 2 MiB before the binaries.
 FROM gcr.io/distroless/static-debian13:nonroot
-COPY --from=build /out/api /out/worker /usr/local/bin/
+COPY --from=build /out/api /out/worker /out/receiver /usr/local/bin/
 # Not root: a bug in GoFlow can't change anything the image owns.
 USER nonroot:nonroot
 # Documentation only. The API listens on GOFLOW_ADDR, else PORT (Render

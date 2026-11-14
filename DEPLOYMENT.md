@@ -430,6 +430,28 @@ If step 2 is skipped or the old key is wrong, the deploy fails with `webhook sec
 - **The previous secret retires** at `rotated_at` + 24 hours. Nothing deletes it; deliveries simply stop using it, and the next rotation overwrites it.
 - **Two rotations within 24 hours:** the second one's "previous" is the first one's new secret; the oldest stops signing at once.
 
+## The first live webhook (Task 67)
+
+The merge adds a second service, `goflow-receiver`, from the same image. Expect its **first deploy to fail** with `RECEIVER_SECRET is required`: a Blueprint update ignores `sync: false` variables, so the secret has to be added by hand. Paste each block on its own.
+
+1. Log in to the hosted API with your hosted account, and make your signing secret straight into a file only you can read:
+   ```bash
+   export GOFLOW_API_URL=https://goflow-api-hewh.onrender.com
+   ./bin/goflow login
+   (umask 077; ./bin/goflow webhook-secret > ~/receiver-secret.txt)
+   ```
+   The secret never appears on screen; the warning does.
+2. In Render, `goflow-receiver` → **Environment** → add `RECEIVER_SECRET` and paste the file's contents (open it in your editor and copy). Save: Render deploys again. Don't screenshot that page.
+3. `rm ~/receiver-secret.txt`. The receiver has it now, and GoFlow can't show it again.
+4. `goflow-receiver` → **Logs** shows `receiver listening`. Its URL is at the top of its page (`https://goflow-receiver-....onrender.com`).
+5. Send one webhook that fails once on purpose:
+   ```bash
+   printf '{"order": 1042, "note": "first live webhook"}' > order.json
+   ./bin/goflow job create --webhook "https://<receiver host>/hook?fail=1" --body @order.json --max-attempts 5 first live webhook
+   ```
+6. `./bin/goflow job attempts <job id>`, and the receiver's logs. Expected: possibly a first attempt that times out (the receiver was asleep: up to about 50 s to wake, past the 10 s limit), then `retry 503` (the planned failure), then `delivered 200`; in the receiver's log `webhook refused on purpose (?fail)`, then `webhook processed` with the same `webhook_id`.
+7. Afterwards, `rm order.json`. The receiver can stay: it sleeps when unused.
+
 ## Rolling back
 
 Render keeps previous deploys. In the dashboard: `goflow-api` → **Deploys** → pick the last good one → **Rollback**. A rollback doesn't undo migrations, so a migration must keep working with the code before it (add columns before using them, drop them a release later).

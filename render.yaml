@@ -79,3 +79,25 @@ services:
     # Empty list: no connections from the internet at all, only from
     # services in this workspace and region.
     ipAllowList: []
+
+  # GoFlow's example webhook receiver (Phase 15, Task 67): the same image,
+  # started as /usr/local/bin/receiver. It checks each delivery's signature
+  # with RECEIVER_SECRET, its timestamp and its webhook-id, then logs it.
+  # A demonstration: its memory of processed IDs ends at every restart.
+  - type: web
+    name: goflow-receiver
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    # Overrides the image's ENTRYPOINT (the API).
+    dockerCommand: /usr/local/bin/receiver
+    region: frankfurt
+    plan: free
+    healthCheckPath: /healthz
+    autoDeployTrigger: checksPass
+    envVars:
+      # The output of goflow webhook-secret, pasted in the dashboard. A
+      # Blueprint update ignores sync: false, so the first deploy fails
+      # with "RECEIVER_SECRET is required" until it is set (DEPLOYMENT.md).
+      - key: RECEIVER_SECRET
+        sync: false

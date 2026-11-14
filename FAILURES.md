@@ -878,6 +878,20 @@ Each case was reproduced on a real machine (Arch Linux, Go 1.27, PostgreSQL 17) 
   (Sandbox run.)
 - **Why:** not planted: it happened. Task 66's commit step listed `git add internal ...` without `cmd`, so the one-line change in `cmd/api/main.go` stayed in the working tree. CI checked what was pushed, which built and passed: the metric existed, its own unit test passed, and nothing asked whether the running API fed it. PR #80 merged with webhook delivery metrics that would always read zero. Two lessons: a unit test of a part doesn't show the parts are connected, and `git status` after a commit must be clean (`M cmd/api/main.go` was on screen, and `gh pr create` warned "1 uncommitted change").
 
+## 63. The receiver accepts a replayed delivery
+
+- **Safeguard:** `cmd/receiver` refuses a delivery whose `webhook-timestamp` is more than 5 minutes from its clock, after the signature check.
+- **Removed:** the break-it deletes the timestamp check; the signature check stays.
+- **Caught by:** `TestTheFourChecks`.
+- **Observed:**
+  ```text
+  --- FAIL: TestTheFourChecks (0.00s)
+      main_test.go:64: signed 6 minutes ago: 200, want 400 (a replay)
+      main_test.go:67: signed 6 minutes in the future: 200, want 400
+  ```
+  (Sandbox run.)
+- **Why:** a signature proves who sent a request, not when. Anyone who saw one delivery (a log, a proxy, a stolen capture) could send the same bytes again a week later, and the signature would still verify. The timestamp is inside what is signed, so it can't be changed without breaking the signature; checking it limits a replay to a 5-minute window, and the `webhook-id` check closes that window for anything already processed.
+
 ## Experiment: the naive dual write loses a job
 
 Not a removed safeguard but the design of Task 22, run live on 2 November 2026 to see the failure Task 23 fixes. `POST /api/v1/jobs` saved the job in PostgreSQL, then pushed its ID to Redis, with nothing tying the two together.
