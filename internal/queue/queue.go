@@ -97,6 +97,12 @@ func New(rawURL string) (*Queue, error) {
 	opts.DialTimeout = 2 * time.Second
 	opts.ReadTimeout = 2 * time.Second
 	opts.WriteTimeout = 2 * time.Second
+	// Without this, go-redis ignores a context's deadline and cancellation
+	// for reads and writes: only the timeouts above would stop a call to a
+	// Redis that accepted the connection and never answers (Phase 17,
+	// FAILURES.md case 66). With it, the relay's 2-second send limit and a
+	// shutdown reach the call itself.
+	opts.ContextTimeoutEnabled = true
 	return &Queue{rdb: redis.NewClient(opts), key: PendingKey, processing: ProcessingKey, delayed: DelayedKey, leases: LeasesKey}, nil
 }
 
@@ -111,10 +117,35 @@ func (q *Queue) Enqueue(ctx context.Context, jobIDs ...string) error {
 	for i, id := range jobIDs {
 		args[i] = id
 	}
-	if err := q.rdb.LPush(ctx, q.key, args...).Err(); err != nil {
+	if err := untilDone(ctx, func() error { return q.rdb.LPush(ctx, q.key, args...).Err() }); err != nil {
 		return fmt.Errorf("queue: enqueue %d job(s): %w", len(jobIDs), err)
 	}
 	return nil
+}
+
+// untilDone runs call and returns its error, or ctx's error as soon as ctx
+// is cancelled, whichever comes first.
+//
+// ContextTimeoutEnabled makes go-redis honour a context's deadline, but not
+// a plain cancellation: a read from a Redis that never answers would go on
+// until ReadTimeout (2 s). Here the caller gets control back at once, and
+// the abandoned call ends on its own within ReadTimeout, then returns its
+// connection to the pool. If the cancellation and Redis's answer arrive
+// together, the caller may see an error for IDs that did reach Redis; they
+// are sent again later, and a duplicate is harmless (Claim lets one worker
+// win).
+func untilDone(ctx context.Context, call func() error) error {
+	if ctx.Done() == nil {
+		return call() // can never be cancelled
+	}
+	errc := make(chan error, 1)
+	go func() { errc <- call() }()
+	select {
+	case err := <-errc:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // Take waits up to timeout for a job ID and moves it from the pending list

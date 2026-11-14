@@ -264,3 +264,61 @@ func TestAWorkerClaimsWhileTheReconcilerSends(t *testing.T) {
 		t.Errorf("the reconciler overwrote a newer state: updated_at %v → %v, version %d → %d; want both unchanged", before, after, versionBefore, versionAfter)
 	}
 }
+
+// A failed send gives the claim back at once: the next try sends the rows
+// without waiting 30 seconds for the claim to run out.
+func TestAFailedSendReleasesTheClaim(t *testing.T) {
+	t.Parallel()
+	f := newJobsFixture(t)
+	o := NewOutboxStore(f.db)
+	id := addJobs(t, f, "redis refused")[0]
+	down := errors.New("redis: connection refused")
+
+	if _, err := o.Relay(context.Background(), 100, func(context.Context, []string) error { return down }); !errors.Is(err, down) {
+		t.Fatalf("Relay err = %v, want the send error", err)
+	}
+	var claimed int
+	if err := f.db.QueryRowContext(context.Background(), `SELECT count(*) FROM job_outbox WHERE claim_token IS NOT NULL`).Scan(&claimed); err != nil {
+		t.Fatal(err)
+	}
+	if claimed != 0 {
+		t.Errorf("claimed rows after a failed send: %d, want 0", claimed)
+	}
+	var sent []string
+	n, err := o.Relay(context.Background(), 100, func(_ context.Context, ids []string) error { sent = append(sent, ids...); return nil })
+	if err != nil || n != 1 || len(sent) != 1 || sent[0] != id {
+		t.Errorf("next Relay = %d, %v, sent %v; want 1, nil, [%s]", n, err, sent, id)
+	}
+}
+
+// While another pass holds every waiting row, Relay says so instead of
+// reporting an empty outbox: the relay then tries again later, so rows left
+// claimed by a pass that died are sent once the claim runs out.
+func TestRelayReportsRowsClaimedElsewhere(t *testing.T) {
+	t.Parallel()
+	f := newJobsFixture(t)
+	withConns(f.db, 4)
+	o := NewOutboxStore(f.db)
+	addJobs(t, f, "claimed by another pass")
+
+	h := newHeldSend(t)
+	done := make(chan error, 1)
+	go func() {
+		_, err := o.Relay(context.Background(), 100, h.send)
+		done <- err
+	}()
+	h.waitEntered(t, "the first pass never called send")
+
+	called := false
+	n, err := o.Relay(context.Background(), 100, func(context.Context, []string) error { called = true; return nil })
+	if !errors.Is(err, ErrOutboxBusy) || n != 0 || called {
+		t.Errorf("second pass = %d, %v (send called: %v); want 0, ErrOutboxBusy, no send", n, err, called)
+	}
+	h.let()
+	if err := <-done; err != nil {
+		t.Errorf("first pass: %v", err)
+	}
+	if n, err := o.Relay(context.Background(), 100, func(context.Context, []string) error { return nil }); n != 0 || err != nil {
+		t.Errorf("Relay on an empty outbox = %d, %v; want 0, nil", n, err)
+	}
+}

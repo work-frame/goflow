@@ -24,7 +24,18 @@ const (
 	BatchSize = 100
 	// maxRetry caps the wait between attempts while Redis is unreachable.
 	maxRetry = 5 * time.Minute
+	// SendTimeout is how long one send to Redis may take (Phase 17, decision
+	// P2), whatever is left of the pass. The queue's client honours it for
+	// connecting, writing and reading (queue.New sets ContextTimeoutEnabled).
+	SendTimeout = 2 * time.Second
 )
+
+// send gives one Enqueue its own SendTimeout.
+func send(ctx context.Context, q Queue, ids []string) error {
+	ctx, cancel := context.WithTimeout(ctx, SendTimeout)
+	defer cancel()
+	return q.Enqueue(ctx, ids...)
+}
 
 // Outbox is what the relay needs from the database. *database.OutboxStore
 // satisfies it.
@@ -141,6 +152,6 @@ func (r *Relay) pass(ctx context.Context) (int, error) {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	return r.outbox.Relay(ctx, BatchSize, func(ctx context.Context, ids []string) error {
-		return r.queue.Enqueue(ctx, ids...)
+		return send(ctx, r.queue, ids)
 	})
 }

@@ -90,6 +90,6 @@ func (r *Reconciler) pass(ctx context.Context) (int, error) {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	return r.store.RequeueStale(ctx, r.staleAfter, BatchSize, func(ctx context.Context, ids []string) error {
-		return r.queue.Enqueue(ctx, ids...)
+		return send(ctx, r.queue, ids)
 	})
 }
