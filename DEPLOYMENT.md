@@ -69,7 +69,7 @@ print -r -- "end: ${(q+)NEON[-30,-1]}"    # shows only the end, never the passwo
 3. **Render:** New → Blueprint → the `goflow` repository. Give Render's GitHub app access to only the repositories it deploys. Fill in `GOFLOW_DATABASE_URL` and `GOFLOW_REGISTRATION=closed`. Don't screenshot that form: it shows the URL in plain text.
 4. **Check the logs** for `starting ... registration_open=false`, `database connected`, `migrations applied`, `listening`, then the status **Live**.
 
-After that, every merge to `main` deploys automatically (`autoDeployTrigger: commit`).
+After that, every merge to `main` deploys automatically once its CI checks pass (`autoDeployTrigger: checksPass`, Task 60; before that, `commit`: on every merge).
 
 ## Checks after a deploy
 
@@ -370,6 +370,14 @@ Result on 9 November 2026 (deploy `d4ba590`):
 ```
 
 The dashboard showed `7eb723a1` `completed 1/3`, with the dot `live`. The deadline is 29.998 s after the log line's time: PostgreSQL set it (`now()` + 30 s) a moment before the worker wrote the line.
+
+## Deploys wait for CI (Task 60)
+
+`autoDeployTrigger: checksPass`: Render deploys a commit on `main` only after GitHub reports its checks passed, here `check` and `govulncheck` from the push run of [.github/workflows/ci.yml](.github/workflows/ci.yml). A commit whose checks fail is never deployed. Branch protection already keeps failing code off `main`; this covers what branch protection can't see, such as a check that passed on the pull request and fails after the merge.
+
+- **The merge that brings the setting:** like Task 38, Render may deploy that commit with the old setting (at once) before the Blueprint sync applies the new one. Expected, and harmless: the commit passed CI on its pull request.
+- **Check once, after that merge:** in the dashboard, `goflow-api` → **Settings** → Auto-Deploy shows that deploys wait for checks to pass. Settings only: not the Environment page.
+- **Check on the next merge:** `gh run list --branch main --limit 1` shows the push run in progress, and **Events** shows no new deploy until it is green.
 
 ## Rolling back
 

@@ -781,6 +781,18 @@ Each case was reproduced on a real machine (Arch Linux, Go 1.27, PostgreSQL 17) 
   ```
 - **Why:** a tag is a name its owner can move. Pinned to `v7`, the workflow would run whatever `v7` points to on the day of the run, with this repository checked out, without a single change here. That has happened to real projects: in March 2025 the tags of `tj-actions/changed-files` were moved to a commit that printed CI secrets into public logs. A SHA can't be moved; changing it is a change to this file, reviewed like any other.
 
+## 56. Render deploys without waiting for CI
+
+- **Safeguard:** `render.yaml` sets `autoDeployTrigger: checksPass`, and `TestRenderRunsTheImage` fails unless it does.
+- **Removed:** the break-it sets it back to `commit`, GoFlow's setting before Task 60.
+- **Caught by:** `TestRenderRunsTheImage`.
+- **Observed:**
+  ```text
+  --- FAIL: TestRenderRunsTheImage (0.00s)
+      image_test.go:123: render.yaml's goflow-api doesn't wait for CI: want autoDeployTrigger: checksPass, or a commit that fails CI still reaches production
+  ```
+- **Why:** with `commit`, Render deploys every commit on `main` the moment it lands, while CI is still running on it. Branch protection keeps failing pull requests out, but the squash-merged commit is new code nobody has tested yet; if it fails, production already runs it. The setting lives in a file anyone can change in a pull request without noticing, and nothing else would complain.
+
 ## Experiment: the naive dual write loses a job
 
 Not a removed safeguard but the design of Task 22, run live on 2 November 2026 to see the failure Task 23 fixes. `POST /api/v1/jobs` saved the job in PostgreSQL, then pushed its ID to Redis, with nothing tying the two together.

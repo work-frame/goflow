@@ -150,9 +150,12 @@ git checkout -b feat/short-description
 ./scripts/check.sh && git add . && git status && git commit -m "feat(scope): what changed"
 git push -u origin feat/short-description
 gh pr create --base main --title "feat(scope): what changed" --body "Why, and what to look at."
+gh pr checks --watch                                 # wait for CI: merging is refused until it passes
 gh pr merge --squash --subject "feat(scope): what changed" --delete-branch
 git checkout main && git pull && ./scripts/check.sh && git log --oneline -3 && git fetch --prune
 ```
+
+Run a task script in one paste block and commit or merge in the next, only after it printed `ALL CHECKS PASSED`: a failed step must not reach `gh pr merge`.
 
 Branch prefixes: `feat/`, `fix/`, `test/`, `docs/`, `chore/`. Commit messages follow [Conventional Commits](https://www.conventionalcommits.org/).
 
@@ -182,6 +185,22 @@ The workflow's rules are tested in `cmd/api/ci_test.go` (FAILURES.md, case 55): 
 ```bash
 git ls-remote https://github.com/actions/setup-go 'refs/tags/v7*'
 ```
+
+#### Protected `main` (Task 60)
+
+`main` changes only through a pull request whose `check` and `govulncheck` both passed, on a branch that is up to date with `main`. Nobody can bypass that, administrators included. Force pushes to `main` and deleting it are refused. No approval is required: GitHub doesn't let you approve your own pull request, so one required approval would block every merge while one person works on GoFlow.
+
+- **Branch behind `main`:** `gh pr update-branch` merges `main` into it; CI runs again, then you can merge.
+- **Read the settings:** `gh api repos/work-frame/goflow/branches/main/protection --jq '{checks: .required_status_checks.checks, strict: .required_status_checks.strict, admins: .enforce_admins.enabled, force_pushes: .allow_force_pushes.enabled, deletions: .allow_deletions.enabled}'`
+- The required checks name the GitHub Actions app (`app_id` 15368), so a status called `check` from anywhere else doesn't count.
+
+#### When govulncheck fails
+
+A new vulnerability in a dependency or the Go standard library blocks every pull request, a docs change included, until it is dealt with. That is on purpose. Read the finding before changing anything:
+
+1. `govulncheck ./...` locally (install it at the version in `ci.yml`) shows the vulnerability, the fixed version, and the call path from GoFlow's code to the vulnerable function.
+2. If a fixed version exists and GoFlow reaches the code: upgrade that module (or Go) in its own pull request, run the full check, merge.
+3. If the report looks wrong or GoFlow's use isn't affected: write down why, with the call path, before deciding anything. Don't upgrade blindly to make it go green, and don't remove the job.
 
 ## Tests
 
@@ -337,7 +356,7 @@ docker compose exec postgres psql -U goflow -c "SELECT id, status, attempts, nex
 
 ## Deploying
 
-The hosted API deploys itself from `main` on Render. Setup, settings, measurements and limits are in [DEPLOYMENT.md](DEPLOYMENT.md).
+The hosted API deploys itself from `main` on Render, once CI has passed on the commit. Setup, settings, measurements and limits are in [DEPLOYMENT.md](DEPLOYMENT.md).
 
 ## Debugging
 

@@ -20,7 +20,9 @@ services:
     # Liveness only: /readyz would also wait for the database, and a paused
     # free Neon database could make a fresh deploy look unhealthy.
     healthCheckPath: /healthz
-    autoDeployTrigger: commit
+    # Deploy a commit on main only after its CI checks pass (Task 60). A
+    # commit that fails .github/workflows/ci.yml never reaches production.
+    autoDeployTrigger: checksPass
     # No maxShutdownDelaySeconds: Render refuses it on free services (the
     # first sync of Task 27 failed on it). The worker pool drains for 20 s
     # after SIGTERM; if Render kills the API sooner, unfinished jobs stay
