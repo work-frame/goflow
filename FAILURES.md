@@ -769,6 +769,18 @@ Each case was reproduced on a real machine (Arch Linux, Go 1.27, PostgreSQL 17) 
   ```
 - **Why:** a refused `Complete` returns quickly. A benchmark that ignored the error would have reported a faster time than the working code, for jobs that were never completed. The numbers would have looked like an improvement. Benchmarks measure only what they check succeeded.
 
+## 55. A CI action runs from a tag
+
+- **Safeguard:** `TestCIWorkflowPinsEveryActionAndOnlyReads` reads `.github/workflows/ci.yml` and fails unless every `uses:` names a full 40-character commit SHA. It also checks `permissions: contents: read`, no write access, `persist-credentials: false` on each checkout, no `secrets.`, no `pull_request_target`, no `@latest`, the images `compose.yaml` runs, and the Dockerfile's Go minor version in both jobs.
+- **Removed:** the break-it changes the check job's `actions/setup-go` from its SHA to the tag `v7`. The workflow still works, which is the point.
+- **Caught by:** `TestCIWorkflowPinsEveryActionAndOnlyReads`.
+- **Observed:**
+  ```text
+  --- FAIL: TestCIWorkflowPinsEveryActionAndOnlyReads (0.00s)
+      ci_test.go:27: action actions/setup-go@v7 isn't pinned to a full commit SHA: whoever controls its tag controls what runs here
+  ```
+- **Why:** a tag is a name its owner can move. Pinned to `v7`, the workflow would run whatever `v7` points to on the day of the run, with this repository checked out, without a single change here. That has happened to real projects: in March 2025 the tags of `tj-actions/changed-files` were moved to a commit that printed CI secrets into public logs. A SHA can't be moved; changing it is a change to this file, reviewed like any other.
+
 ## Experiment: the naive dual write loses a job
 
 Not a removed safeguard but the design of Task 22, run live on 2 November 2026 to see the failure Task 23 fixes. `POST /api/v1/jobs` saved the job in PostgreSQL, then pushed its ID to Redis, with nothing tying the two together.
