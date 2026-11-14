@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/work-frame/goflow/internal/database"
+	"github.com/work-frame/goflow/internal/job"
 	"github.com/work-frame/goflow/internal/queue"
 )
 
@@ -1003,4 +1004,19 @@ func TestObserveHearsEachOutcome(t *testing.T) {
 		defer mu.Unlock()
 		return heard["completed"] == "x" && heard["retry"] == "x" && heard["dead"] == "x"
 	})
+}
+
+func TestRouteRunsTheJobsTypeHandler(t *testing.T) {
+	var ran []string
+	h := Route(map[job.Type]Handler{
+		job.TypeDemo: func(context.Context, Run) error { ran = append(ran, "demo"); return nil },
+	})
+	if err := h(context.Background(), Run{JobID: "a", Type: job.TypeDemo}); err != nil || !slices.Equal(ran, []string{"demo"}) {
+		t.Fatalf("demo job: err %v, ran %v", err, ran)
+	}
+	// No handler for the type: dead at once, since retrying can't add one.
+	err := h(context.Background(), Run{JobID: "b", Type: job.TypeWebhook})
+	if !IsPermanent(err) || !strings.Contains(err.Error(), `no handler for job type "webhook"`) {
+		t.Errorf("webhook job: err %v, want a permanent 'no handler' error", err)
+	}
 }

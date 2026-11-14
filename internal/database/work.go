@@ -60,6 +60,7 @@ type Claimed struct {
 	Attempt     int // 1 for the first run
 	MaxAttempts int
 	Title       string
+	Type        job.Type
 	// LeaseToken must accompany every later write for this attempt.
 	LeaseToken string
 	// LeaseExpires is when the lease runs out unless renewed, on the
@@ -105,7 +106,7 @@ func (s *WorkStore) Claim(ctx context.Context, id string, leaseFor time.Duration
 		return Claimed{}, false, fmt.Errorf("database: claim job %s: %w", id, err)
 	}
 	notifyChanged(ctx, s.notify, j)
-	return Claimed{Attempt: j.Attempts, MaxAttempts: j.MaxAttempts, Title: j.Title,
+	return Claimed{Attempt: j.Attempts, MaxAttempts: j.MaxAttempts, Title: j.Title, Type: j.Type,
 		LeaseToken: token, LeaseExpires: expires.UTC()}, true, nil
 }
 

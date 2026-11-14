@@ -25,7 +25,9 @@ type Notifier interface {
 // jobColumns is every column scanJob reads, in its order. Status-changing
 // statements return them (RETURNING), so the notification carries the job
 // exactly as committed without a second query.
-const jobColumns = `id, user_id, title, status, created_at, updated_at, attempts, max_attempts, next_attempt_at, version`
+// A webhook's URL is read from its payload, but not its body: lists and
+// notifications never carry the body (job.Job.WithoutBody).
+const jobColumns = `id, user_id, title, status, created_at, updated_at, attempts, max_attempts, next_attempt_at, version, type, payload->>'url'`
 
 func notifyChanged(ctx context.Context, n Notifier, jobs ...*job.Job) {
 	if n == nil {

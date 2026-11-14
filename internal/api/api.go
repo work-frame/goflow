@@ -217,6 +217,40 @@ func (h *handler) notReady(w http.ResponseWriter, r *http.Request, dependency st
 
 type createJobRequest struct {
 	Title string `json:"title"`
+	// Type is "demo" (the default) or "webhook"; a webhook job needs
+	// Webhook, and no other job may have one.
+	Type        job.Type     `json:"type"`
+	Webhook     *job.Webhook `json:"webhook"`
+	MaxAttempts *int         `json:"max_attempts"`
+}
+
+// applyCreateRequest sets j's type, payload and attempt limit from req. A
+// *job.InvalidError's message is safe to show to the client.
+func applyCreateRequest(j *job.Job, req createJobRequest) error {
+	switch req.Type {
+	case "", job.TypeDemo:
+		if req.Webhook != nil {
+			return job.Invalidf(`"webhook" is only allowed with "type": "webhook"`)
+		}
+	case job.TypeWebhook:
+		if req.Webhook == nil {
+			return job.Invalidf(`a webhook job needs "webhook": {"url": ..., "body": ...}`)
+		}
+		if err := job.ValidateWebhook(*req.Webhook); err != nil {
+			return err
+		}
+		j.Type = job.TypeWebhook
+		j.Webhook = req.Webhook
+	default:
+		return job.Invalidf(`type must be "demo" or "webhook"`)
+	}
+	if req.MaxAttempts != nil {
+		if err := job.ValidateMaxAttempts(*req.MaxAttempts); err != nil {
+			return err
+		}
+		j.MaxAttempts = *req.MaxAttempts
+	}
+	return nil
 }
 
 // Idempotency-Key: a client sends a unique value with a create, and sends
@@ -273,6 +307,15 @@ func (h *handler) createJob(w http.ResponseWriter, r *http.Request) {
 		h.internalError(w, r, err)
 		return
 	}
+	if err := applyCreateRequest(j, req); err != nil {
+		var invalid *job.InvalidError
+		if errors.As(err, &invalid) {
+			writeError(w, http.StatusBadRequest, invalid.Error())
+			return
+		}
+		h.internalError(w, r, err)
+		return
+	}
 
 	ctx, cancel := dbContext(r)
 	defer cancel()
@@ -325,6 +368,10 @@ func (h *handler) replayCreate(ctx context.Context, w http.ResponseWriter, r *ht
 		writeError(w, http.StatusUnprocessableEntity, "this Idempotency-Key was already used with a different title")
 		return
 	}
+	if !sameWork(first, req) {
+		writeError(w, http.StatusUnprocessableEntity, "this Idempotency-Key was already used for a different job")
+		return
+	}
 
 	w.Header().Set("Location", "/api/v1/jobs/"+first.ID)
 	w.Header().Set(replayedHeader, "true")
@@ -371,6 +418,9 @@ func (h *handler) listJobs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	for i, j := range page.Jobs {
+		page.Jobs[i] = j.WithoutBody()
+	}
 	resp := listJobsResponse{Jobs: page.Jobs}
 	if page.Next != nil {
 		resp.NextCursor = encodeCursor(*page.Next)

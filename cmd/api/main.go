@@ -193,7 +193,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg config, ready func(addr s
 			pool := &worker.Pool{
 				Queue:        q,
 				Store:        work,
-				Handle:       worker.Demo(cfg.SimulatedWork),
+				Handle:       worker.Handlers(cfg.SimulatedWork),
 				JobTimeout:   jobTimeout,
 				Logger:       logger,
 				Workers:      cfg.Workers,

@@ -3,7 +3,10 @@ package job
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"net/url"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -31,6 +34,94 @@ const (
 
 // DefaultMaxAttempts is how many times a job runs before it is dead.
 const DefaultMaxAttempts = 3
+
+// MaxMaxAttempts matches the CHECK on jobs.max_attempts: a client may ask
+// for 1 to 10 attempts.
+const MaxMaxAttempts = 10
+
+// Type says what a job does: which handler runs it and what its payload
+// holds.
+type Type string
+
+const (
+	// TypeDemo jobs have no payload; the title picks what worker.Demo does.
+	TypeDemo Type = "demo"
+	// TypeWebhook jobs POST a JSON body to an HTTPS URL (Phase 15).
+	TypeWebhook Type = "webhook"
+)
+
+// Limits on a webhook job's payload. The URL limit is the de facto limit of
+// browsers and most servers; the body limit keeps one job from filling a
+// worker's memory or the database.
+const (
+	MaxWebhookURLLength = 2048
+	MaxWebhookBodyBytes = 64 << 10
+)
+
+// Webhook is a webhook job's payload: where to POST, and what. Body is only
+// filled in where it's needed (one job's details, the worker); lists and
+// live events leave it out (WithoutBody).
+type Webhook struct {
+	URL  string          `json:"url"`
+	Body json.RawMessage `json:"body,omitempty"`
+}
+
+// InvalidError is a validation failure whose message can be shown to the
+// client as it is. It never repeats the URL or the body: a URL often holds
+// a token in its path or query.
+type InvalidError struct{ msg string }
+
+func (e *InvalidError) Error() string { return e.msg }
+
+// Invalidf returns an *InvalidError with a formatted message.
+func Invalidf(format string, a ...any) error {
+	return &InvalidError{fmt.Sprintf(format, a...)}
+}
+
+// ValidateWebhook checks what can be checked without the network: an
+// absolute https URL on port 443, with no username, password or fragment,
+// and a JSON body of at most MaxWebhookBodyBytes. Whether the host's
+// addresses may be reached is decided when connecting, every time, because
+// a DNS answer can change after this check.
+func ValidateWebhook(w Webhook) error {
+	if len(w.URL) > MaxWebhookURLLength {
+		return Invalidf("webhook.url must be at most %d bytes", MaxWebhookURLLength)
+	}
+	u, err := url.Parse(w.URL)
+	if err != nil || u.Opaque != "" || u.Hostname() == "" {
+		return Invalidf("webhook.url must be an absolute https:// URL")
+	}
+	if u.Scheme != "https" {
+		return Invalidf("webhook.url must use https")
+	}
+	if u.User != nil {
+		return Invalidf("webhook.url must not contain a username or password")
+	}
+	if p := u.Port(); p != "" && p != "443" {
+		return Invalidf("webhook.url must use port 443")
+	}
+	if u.Fragment != "" || strings.Contains(w.URL, "#") {
+		return Invalidf("webhook.url must not contain a #fragment")
+	}
+	if len(w.Body) == 0 {
+		return Invalidf("webhook.body is required")
+	}
+	if len(w.Body) > MaxWebhookBodyBytes {
+		return Invalidf("webhook.body must be at most %d bytes", MaxWebhookBodyBytes)
+	}
+	if !json.Valid(w.Body) {
+		return Invalidf("webhook.body must be JSON")
+	}
+	return nil
+}
+
+// ValidateMaxAttempts accepts 1 to MaxMaxAttempts.
+func ValidateMaxAttempts(n int) error {
+	if n < 1 || n > MaxMaxAttempts {
+		return Invalidf("max_attempts must be between 1 and %d", MaxMaxAttempts)
+	}
+	return nil
+}
 
 // MaxIdempotencyKeyLength matches the CHECK on jobs.idempotency_key.
 const MaxIdempotencyKeyLength = 255
@@ -82,6 +173,7 @@ type Job struct {
 	ID        string    `json:"id"`
 	UserID    string    `json:"-"` // the owner; clients only ever see their own jobs
 	Title     string    `json:"title"`
+	Type      Type      `json:"type"`
 	Status    Status    `json:"status"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
@@ -100,6 +192,23 @@ type Job struct {
 	// IdempotencyKey is the client's Idempotency-Key header, or "" if it
 	// sent none. Never returned: the client already knows it.
 	IdempotencyKey string `json:"-"`
+
+	// Webhook is set on webhook jobs only.
+	Webhook *Webhook `json:"webhook,omitempty"`
+}
+
+// WithoutBody returns j itself if it carries no webhook body, or else a
+// copy without it. Lists and live events use it: a page of 100 jobs with
+// 64 KiB bodies would be 6 MiB.
+func (j *Job) WithoutBody() *Job {
+	if j == nil || j.Webhook == nil || j.Webhook.Body == nil {
+		return j
+	}
+	c := *j
+	w := *j.Webhook
+	w.Body = nil
+	c.Webhook = &w
+	return &c
 }
 
 // New validates the title and returns a pending job.
@@ -116,6 +225,7 @@ func New(title string) (*Job, error) {
 	return &Job{
 		ID:          newID(),
 		Title:       title,
+		Type:        TypeDemo,
 		Status:      StatusPending,
 		CreatedAt:   now,
 		UpdatedAt:   now,
