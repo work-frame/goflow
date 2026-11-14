@@ -168,6 +168,21 @@ GOFLOW_QUICK_CHECK=1 ./scripts/check.sh   # ends with QUICK CHECK PASSED, never 
 
 Only `ALL CHECKS PASSED` counts before a commit.
 
+### CI
+
+[.github/workflows/ci.yml](.github/workflows/ci.yml) runs on every pull request and every push to `main`, with two jobs:
+
+- **check:** `./scripts/check.sh` on a fresh Ubuntu runner, with PostgreSQL 17 and Valkey 8 as service containers (the images `compose.yaml` runs) and the latest Go of the minor version the Dockerfile builds with. The database password exists only inside the run.
+- **govulncheck:** [govulncheck](https://pkg.go.dev/golang.org/x/vuln/cmd/govulncheck) at a pinned version. It reports known vulnerabilities in GoFlow's dependencies and in the Go standard library, and fails only for code GoFlow actually calls.
+
+`gh pr checks --watch` follows a pull request's checks from the terminal. A green CI run says the code passed the check on a clean machine. It says nothing about the docs: keeping DEVELOPMENT.md, ARCHITECTURE.md and the README true stays part of reviewing each pull request.
+
+The workflow's rules are tested in `cmd/api/ci_test.go` (FAILURES.md, case 55): every action pinned to a full commit SHA with its tag in a comment, `permissions: contents: read`, `persist-credentials: false` on every checkout, no secrets, no `@latest`. To update an action, look up the tag's commit and read the release notes before pasting the SHA:
+
+```bash
+git ls-remote https://github.com/actions/setup-go 'refs/tags/v7*'
+```
+
 ## Tests
 
 ```bash

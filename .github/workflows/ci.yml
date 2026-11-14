@@ -1,0 +1,79 @@
+# Runs the full check on every pull request and every push to main
+# (Task 59). The rules for this file, checked by
+# cmd/api/ci_test.go (FAILURES.md, case 55):
+#   - every action is pinned to a full commit SHA; the tag is in a comment
+#   - the token can only read the repository; no step uses a secret
+#   - the services are the images compose.yaml runs, and Go is the minor
+#     version the Dockerfile builds with
+# To update an action: git ls-remote https://github.com/OWNER/REPO 'refs/tags/vN*'
+# gives each tag's commit; read what changed before pasting the new SHA.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          # Exists only inside this run, like the test database itself.
+          POSTGRES_USER: goflow
+          POSTGRES_PASSWORD: goflow
+          POSTGRES_DB: goflow_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U goflow -d goflow_test"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 30
+      valkey:
+        image: valkey/valkey:8
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "valkey-cli ping"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 30
+    env:
+      GOFLOW_TEST_DATABASE_URL: postgres://goflow:goflow@127.0.0.1:5432/goflow_test?sslmode=disable
+      GOFLOW_TEST_REDIS_URL: redis://127.0.0.1:6379/1
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.27.x"
+          check-latest: true
+      - run: ./scripts/check.sh
+
+  govulncheck:
+    name: govulncheck
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.27.x"
+          check-latest: true
+      - run: go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
+      - run: "$(go env GOPATH)/bin/govulncheck ./..."
