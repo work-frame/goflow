@@ -363,6 +363,7 @@ worker claims a webhook job      Claim returns its URL, body and owner (lists an
 ```
 
 - **At least once, never exactly once.** Every attempt and re-run of a job carries the same `webhook-id`, so a receiver that remembers the IDs it processed can drop repeats. GoFlow can't do this alone: the receiver may process a delivery whose `2xx` never reached GoFlow's database.
+- **The example receiver (`cmd/receiver`)** checks what a receiver must, in this order: the signature (`401`), the timestamp within 5 minutes (`400`: a correctly signed request replayed later), and the `webhook-id` (a repeat answers `200` without being processed again). It runs from the same image as the API, as its own Render service (`dockerCommand`), so a delivery from the hosted API crosses the internet like a user's would.
 - **Errors never contain the URL.** `*url.Error` puts the whole URL in front of its cause; the deliverer keeps only the cause, because `last_error`, the attempt and the logs would otherwise hold any token in the path or query.
 
 ### Signing secrets and the master key
@@ -483,6 +484,7 @@ golang:1.27-trixie                         gcr.io/distroless/static-debian13:non
 | `internal/webhook` | Signature against the Standard Webhooks spec's own example; a delivery to a local HTTPS receiver checked header by header and verified; every status class's outcome; no redirect followed; a timeout retried; no secret, a blocked address and an untrusted certificate permanent; errors without the URL |
 | `internal/cli` (webhooks) | Creating from `@file` and from the command line (which warns about shell history), refusals before anything is sent (no JSON, missing file, over 64 KiB, `--body` without `--webhook`), the attempts table, and the secret printed alone on stdout with its one-time warning |
 | `internal/web` | Static checks on `app.js`: no way for server text to become HTML, every event type handled, and a webhook's URL read only by `hostOf`, with no body, path, query or signing secret anywhere (case 61) |
+| `cmd/receiver` | Each check in order: a wrong secret `401`, a timestamp 6 minutes off either way `400`, a repeat `200` and processed once, a changed body `401`, `?fail=N` per webhook-id; the body never logged; the secret never repeated in an error (case 63) |
 | `.github/workflows/ci.yml` | `cmd/api/ci_test.go` reads the workflow: actions pinned to commit SHAs, a read-only token, no secrets, the same database images as `compose.yaml` and the same Go minor version as the Dockerfile (case 55). The workflow itself is tested by running: its first green run is on its own pull request |
 | `internal/loadgen`, `cmd/loadgen` | Only addresses on this machine are accepted, and a remote API is refused before anything is sent. Jobs finish through polling alone, with no events at all. Against a real test server, a job that never finishes is listed by ID and the run counts as failed (case 53). The load itself is measured by hand, never in `check.sh` (DEVELOPMENT.md, Load testing and Benchmarks) |
 
