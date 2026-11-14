@@ -892,6 +892,21 @@ Each case was reproduced on a real machine (Arch Linux, Go 1.27, PostgreSQL 17) 
   (Sandbox run.)
 - **Why:** a signature proves who sent a request, not when. Anyone who saw one delivery (a log, a proxy, a stolen capture) could send the same bytes again a week later, and the signature would still verify. The timestamp is inside what is signed, so it can't be changed without breaking the signature; checking it limits a replay to a 5-minute window, and the `webhook-id` check closes that window for anything already processed.
 
+## 64. The backup is written unencrypted
+
+- **Safeguard:** `scripts/backup.sh` pipes `pg_dump` straight into `gpg --symmetric`, so the dump never exists unencrypted on disk; `TestBackupIsEncryptedBeforeItTouchesTheDisk` reads the script and fails if any `pg_dump` output goes anywhere but `gpg`.
+- **Removed:** the break-it writes the dump to the output file directly on the `GOFLOW_PG_TOOLS=local` path; the Docker path still encrypts.
+- **Caught by:** `TestBackupIsEncryptedBeforeItTouchesTheDisk`.
+- **Observed:**
+  ```text
+  --- FAIL: TestBackupIsEncryptedBeforeItTouchesTheDisk (0.00s)
+      uptime_test.go:45: backup.sh lacks "</dev/null | gpg \"${gpg_args[@]}\""
+      uptime_test.go:50: backup.sh has 2 pg_dump calls and 1 into gpg; want each dump piped into gpg
+      uptime_test.go:53: backup.sh redirects pg_dump into a file
+  ```
+  (Sandbox run.)
+- **Why:** a script run by hand once a week isn't exercised by CI, and the broken path still "works": it writes a file, prints a size and a SHA-256, and restores fine. That file would hold every user's email, password hash and webhook URL in plain form, in a folder that gets copied to other disks. Reading the script in a test is weaker than running it, but running it needs Neon and Docker; this catches the change that matters.
+
 ## Experiment: the naive dual write loses a job
 
 Not a removed safeguard but the design of Task 22, run live on 2 November 2026 to see the failure Task 23 fixes. `POST /api/v1/jobs` saved the job in PostgreSQL, then pushed its ID to Redis, with nothing tying the two together.

@@ -1,0 +1,39 @@
+# Is the hosted API up? (Phase 16, decision H3.) Every 6 hours, and on
+# demand (Actions → Uptime → Run workflow), ask /readyz, which also checks
+# the database. A failed run is emailed to the repository's owner by
+# GitHub. Each run wakes the free instance once: 4 times a day, not the
+# around-the-clock polling decision 10 ruled out.
+#
+# Limits, on purpose: a failure right after a good check goes unnoticed
+# for up to 6 hours; GitHub may start scheduled runs late; and it turns
+# scheduled workflows off in a repository with no activity for 60 days.
+#
+# No secrets, no actions from other repositories, no token permissions:
+# cmd/api/uptime_test.go keeps it that way.
+name: Uptime
+
+on:
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  readyz:
+    name: readyz
+    runs-on: ubuntu-24.04
+    timeout-minutes: 6
+    steps:
+      - name: GET /readyz on the hosted API
+        run: |
+          # A sleeping free instance takes up to about a minute to wake, so
+          # each try waits up to 90 s, and a failed one is tried again.
+          for try in 1 2 3; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 90 https://goflow-api-hewh.onrender.com/readyz || true)
+            echo "try $try: HTTP $code"
+            if [ "$code" = 200 ]; then exit 0; fi
+            sleep 20
+          done
+          echo "::error::the hosted API's /readyz didn't answer 200 in 3 tries"
+          exit 1

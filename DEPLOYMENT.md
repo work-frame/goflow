@@ -464,6 +464,51 @@ ATTEMPT  STARTED              TOOK   STATUS  OUTCOME    ERROR
 - **One second** between the attempts: the first backoff (1–2 s). No cold-start timeout: the receiver had just been deployed and was awake.
 - **What went wrong on the way, and was caught:** the receiver's first two deploys failed with `RECEIVER_SECRET is required` (a Blueprint update ignores `sync: false`, as planned). A value made with Render's **Generate** button was refused at startup (`must start with whsec_`): it isn't a GoFlow secret, and the receiver can't use one GoFlow didn't create. And `goflow webhook-secret` was run four times: each run rotates, keeping only the one before as "previous", so a receiver given the second secret would have answered `401` once the third existed. Make one secret, paste it, then delete the file.
 
+## Backups, restore drills and the uptime check (Phase 16)
+
+Neon's Free plan keeps **6 hours** of history (at most 1 GB of changes): within them, a branch can be made from any past moment without touching production; after them, nothing older can be restored from Neon. So there are two drills, and an encrypted backup of your own. Record every time below: they are the first real numbers for how much GoFlow can lose and how long getting it back takes.
+
+The passphrase for backups lives in your **password manager**, nowhere else: not in the repository, not in a file next to the backups, not in a chat. Without it a backup can't be read, by anyone.
+
+### Drill 1: restore from Neon's history (non-destructive)
+
+1. Note the time (UTC). In the Neon console: your project → **Branches** → **Create branch** → from a **past point in time** a few minutes ago. Don't touch the `production` branch.
+2. Count production's rows, then the new branch's, with each branch's connection string (copied from the console, pasted at the hidden prompt):
+   ```bash
+   ./scripts/count-rows.sh
+   ```
+   The counts match, except anything created after the chosen moment (`newest job created` shows it).
+3. Delete the drill branch in the console. Note the time again.
+
+### Drill 2: an encrypted backup, restored
+
+1. `docker compose up -d --wait postgres` (the restore goes into the Compose PostgreSQL).
+2. Back up, pasting production's URL at the hidden prompt; gpg asks for the passphrase twice:
+   ```bash
+   ./scripts/backup.sh
+   ```
+   It writes `~/goflow-backups/goflow-<time>.dump.gpg` (folder 700, file 600), outside the repository, and prints the size, SHA-256 and seconds taken.
+3. Restore it into a new local database, `goflow_restore_drill`, decrypted straight into `pg_restore`:
+   ```bash
+   ./scripts/restore-drill.sh ~/goflow-backups/goflow-<time>.dump.gpg
+   ```
+   Compare its counts with production's from Drill 1.
+4. Drop the drill database: `docker compose exec -T postgres dropdb -U goflow goflow_restore_drill`. Keep the backup file.
+
+Run `backup.sh` regularly (weekly, and before any risky migration): what a backup can recover is only as recent as the last one.
+
+### Uptime check
+
+`.github/workflows/uptime.yml` asks `/readyz` every 6 hours (and on demand: **Actions** → **Uptime** → **Run workflow**). GitHub emails the repository's owner when a scheduled run fails. In Render, also turn on email for failed deploys: `goflow-api` → **Settings** → **Notifications**.
+
+### Results
+
+| Drill | Date | Steps timed | Result |
+|---|---|---|---|
+| 1: Neon branch from the past | | | |
+| 2: backup | | | |
+| 2: restore | | | |
+
 ## Rolling back
 
 Render keeps previous deploys. In the dashboard: `goflow-api` → **Deploys** → pick the last good one → **Rollback**. A rollback doesn't undo migrations, so a migration must keep working with the code before it (add columns before using them, drop them a release later).
