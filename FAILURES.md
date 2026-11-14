@@ -793,6 +793,18 @@ Each case was reproduced on a real machine (Arch Linux, Go 1.27, PostgreSQL 17) 
   ```
 - **Why:** with `commit`, Render deploys every commit on `main` the moment it lands, while CI is still running on it. Branch protection keeps failing pull requests out, but the squash-merged commit is new code nobody has tested yet; if it fails, production already runs it. The setting lives in a file anyone can change in a pull request without noticing, and nothing else would complain.
 
+## 57. A CHECK that compares with NULL lets a webhook without a URL in
+
+- **Safeguard:** migration 0011's `jobs_payload_matches_type` requires a webhook payload's `url` to be a string with `jsonb_typeof(payload -> 'url') IS NOT DISTINCT FROM 'string'`.
+- **Removed:** the break-it writes `= 'string'` instead, which reads the same.
+- **Caught by:** `TestPayloadMustMatchTheType`, which inserts bad rows with SQL and expects each to be refused.
+- **Observed:**
+  ```text
+  --- FAIL: TestPayloadMustMatchTheType (0.31s)
+      webhook_test.go:117: webhook without url: inserted, want a CHECK violation
+  ```
+- **Why:** found while writing Task 63, not planted. Without a `url` key, `jsonb_typeof` returns NULL, `NULL = 'string'` is NULL, and PostgreSQL only rejects a row when a CHECK is false: NULL passes. A webhook with a numeric URL was refused, so the constraint looked right; only the missing key slipped through. In SQL, a comparison that can meet NULL needs `IS [NOT] DISTINCT FROM` or `coalesce`, and a constraint needs a test with the column missing, not just wrong.
+
 ## Experiment: the naive dual write loses a job
 
 Not a removed safeguard but the design of Task 22, run live on 2 November 2026 to see the failure Task 23 fixes. `POST /api/v1/jobs` saved the job in PostgreSQL, then pushed its ID to Redis, with nothing tying the two together.

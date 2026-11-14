@@ -7,7 +7,18 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/work-frame/goflow/internal/job"
 )
+
+// Handlers returns the Handler both programs run: each job type with its
+// own handler. Only demo jobs have one so far; a webhook job is refused by
+// Route until Task 65 adds delivery.
+func Handlers(demoWork time.Duration) Handler {
+	return Route(map[job.Type]Handler{
+		job.TypeDemo: Demo(demoWork),
+	})
+}
 
 // maxDemoSleep caps "sleep:" titles, so one job can't hold a worker for long.
 const maxDemoSleep = time.Minute

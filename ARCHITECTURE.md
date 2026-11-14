@@ -1,6 +1,6 @@
 # Architecture
 
-This describes GoFlow at the end of Phase 14. It changes as each phase lands.
+This describes GoFlow at the end of Phase 14, with Phase 15 in progress. It changes as each phase lands.
 
 ## Overview
 
@@ -103,6 +103,9 @@ jobs (
   version         BIGINT      NOT NULL DEFAULT 1   -- every UPDATE adds 1
   lease_token     TEXT                             -- the worker holding a processing job (Task 48)
   lease_expires_at TIMESTAMPTZ                     -- when that lease runs out, PostgreSQL's clock
+  type            TEXT        NOT NULL DEFAULT 'demo'  -- 'demo' or 'webhook' (Task 63)
+  payload         JSONB                            -- webhook jobs only: {"url": "...", "body": ...}
+  CHECK (type = 'webhook') = (payload IS NOT NULL), and a webhook payload has a string url and a body
   CHECK (status = 'processing') = (lease_token IS NOT NULL AND lease_expires_at IS NOT NULL)
 )
 UNIQUE INDEX (user_id, idempotency_key) WHERE idempotency_key IS NOT NULL
@@ -267,7 +270,7 @@ Claim     UPDATE ... status = 'processing', attempts = attempts + 1,
             WHERE id = $1 AND status IN ('pending','queued','retrying') RETURNING ..., lease_expires_at
             0 rows (already processing, finished, dead or deleted) → skip, Ack
           ZADD goflow:jobs:leases <expiry ms> <id>
-Handle    the work, under a 15 s deadline (worker.Demo: test behaviours picked by title)
+Handle    the work, under a 15 s deadline (worker.Handlers: each job type's handler; demo jobs pick test behaviours by title)
           every 10 s: UPDATE ... lease_expires_at = now() + 30 s WHERE id AND lease_token = <token>
             0 rows → the lease is gone: cancel the handler, record nothing
 Outcome   (every UPDATE also WHERE lease_token = <token>, and ends the lease)
@@ -466,7 +469,7 @@ Everything runs with the race detector (`./scripts/check.sh`). Tests that need P
 
 ## Known limitations
 
-- The work itself is a placeholder (`worker.Demo` picks a behaviour from the title); real job types with their own payloads come later.
+- Demo jobs are placeholders (`worker.Demo` picks a behaviour from the title). Webhook jobs (Task 63) are stored and validated but not sent yet: with no handler for their type, `worker.Route` buries them as `dead`.
 - On Render the pool runs inside the single free API instance. Several processes are safe (leases, Task 48) but only run locally so far, in the Compose stack's three worker containers.
 - A worker frozen for longer than its lease (30 s) can still be *running* its handler while another worker runs the same job: fencing stops it from recording anything, not from working. Handlers with outside effects must be idempotent ([Handler contract](#handler-contract)).
 - Jobs reach Redis at least once, and a handler can run more than once. Handlers must follow the [handler contract](#handler-contract); nothing enforces it.

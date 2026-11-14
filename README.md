@@ -20,6 +20,7 @@ I'm building it to learn production Go: the standard library first, then HTTP, P
 - **Phase 12 (done):** distributed workers. A claimed job is held under a lease (a token valid for 30 s on PostgreSQL's clock, renewed every 10 s while the job runs), and only the current token can record a result. A reaper takes back jobs whose lease ran out. Any number of worker processes can share one database and one Redis; the Compose stack runs three worker containers from the API's image, and a SIGKILL test shows a killed worker's jobs coming back on another worker only after their leases run out ([DEVELOPMENT.md](DEVELOPMENT.md#crash-test-kill-a-worker-mid-job)). `./scripts/check.sh` refuses to run unless the PostgreSQL and Redis tests can run too, because a skipped test prints `ok`.
 - **Phase 13 (done):** integration and load testing. Found first: the end-to-end tests that sometimes took 5.4 s were waiting for an HTTP connection the client never used ([FAILURES.md](FAILURES.md), case 48). Then: test servers' workers wait 1 s in Redis instead of the production 2 s, so stopping each one no longer waits out a 2 s take (case 49; `cmd/api` about 40 s → 32 s). The database tests now run in parallel, each on its own copy with 3 connections (case 50). Each end-to-end test now has its own database, Redis queue keys and events channel (case 51), and they run in parallel, except seven that measure time (case 52). `cmd/loadgen` and `scripts/loadtest.sh` measure jobs per second on the local stack with 1, 3 and 6 worker containers (DEVELOPMENT.md, Load testing). On the development laptop, with 2000-job runs, six workers finished about 720 jobs per second and fell behind the API; twelve kept up with it at about 900, so their own limit wasn't reached (DEVELOPMENT.md, Load testing). An earlier 500-job run had twelve slower than six; the longer runs didn't repeat that. `scripts/bench.sh` benchmarks one job's database writes (about 4.2 ms for a claim and completion on the laptop), one relay pass (20 ms for 100 rows), and the old Lock-versus-RLock question: with eight readers `Lock` is 4.3 times slower (DEVELOPMENT.md, Benchmarks).
 - **Phase 14 (done):** CI/CD. GitHub Actions runs `./scripts/check.sh` with PostgreSQL and Valkey, and `govulncheck`, on every pull request and every push to `main` (DEVELOPMENT.md, CI). `main` accepts only pull requests that passed both, with no bypass, and Render deploys a commit only after CI passed on it (DEPLOYMENT.md, Deploys wait for CI).
+- **Phase 15 (in progress):** webhook delivery. A job can now be a `webhook` job: an HTTPS URL on port 443 and a JSON body of up to 64 KiB, stored with the job (see Job types below). Nothing is sent yet: until delivery is built, a webhook job ends `dead` with `no handler for job type "webhook"`. Next: an HTTP client that refuses private and internal addresses, then signed delivery with retries.
 
 ## Requirements
 
@@ -78,7 +79,7 @@ The server stops on `Ctrl+C` or `SIGTERM`, finishing in-flight requests first (u
 | `POST` | `/api/v1/auth/logout-all` | `200 {"sessions_ended":n}`, every device including this one (needs token) | `401` |
 | `POST` | `/api/v1/auth/password` | `200 {"sessions_ended":n}`, ends your other sessions (needs token) | `400`, `401`, `403` wrong current password, `429` |
 | `GET` | `/api/v1/auth/me` | `200` + user (needs token) | `401` |
-| `POST` | `/api/v1/jobs` | `201` + job, `Location` header (needs token). With a repeated `Idempotency-Key`: `200` + the first job and `Idempotent-Replayed: true` | `400`, `401`, `413`, `415`, `422` key reused with a different title |
+| `POST` | `/api/v1/jobs` | `201` + job, `Location` header (needs token). With a repeated `Idempotency-Key`: `200` + the first job and `Idempotent-Replayed: true` | `400`, `401`, `413`, `415`, `422` key reused with a different title or for a different job |
 | `GET` | `/api/v1/jobs` | `200 {"jobs":[...]}`, your jobs only (needs token) | `400` invalid `status` filter, `401` |
 | `GET` | `/api/v1/jobs/{id}` | `200` + job (needs token) | `401`, `404` |
 | `DELETE` | `/api/v1/jobs/{id}` | `204`, no body (needs token) | `401`, `404` |
@@ -97,6 +98,21 @@ The server stops on `Ctrl+C` or `SIGTERM`, finishing in-flight requests first (u
 The response includes `next_cursor` until the last page, where it is omitted.
 
 Every job belongs to the user who created it. Users only ever see their own jobs: someone else's job answers `404`, exactly like a job that doesn't exist.
+
+### Job types
+
+| `type` | What it does | Extra fields |
+|---|---|---|
+| `demo` (default) | Test behaviour picked by the title: `sleep:3s`, `fail`, `fail:permanent`, `flaky:2`, `hang` | none |
+| `webhook` | POSTs `body` to `url` (Phase 15; not sent yet) | `webhook.url`: `https://` on port 443, no username or password, no `#fragment`, at most 2,048 bytes. `webhook.body`: any JSON value, at most 64 KiB |
+
+Any job may set `max_attempts`, 1 to 10 (default 3).
+
+```json
+{"title": "order 1042 paid", "type": "webhook", "webhook": {"url": "https://example.com/hooks/goflow", "body": {"order": 1042}}, "max_attempts": 5}
+```
+
+`GET /api/v1/jobs/{id}` returns the webhook with its body. Lists and live events show the type and URL but leave the body out. With an `Idempotency-Key`, a second create must ask for the same work (title, type, URL, body and `max_attempts`) or it answers `422`; the body is compared as JSON, so spacing, key order and `1e2` versus `100` don't count as differences.
 
 ### Examples
 
@@ -307,5 +323,6 @@ render.yaml            Render deployment (see DEPLOYMENT.md)
 12. Distributed workers (done: leases on PostgreSQL's clock, fenced results, three worker containers locally, and a SIGKILL test)
 13. Integration and load testing (done: every test isolated and the slow ones found; `cmd/api` about 45 s → 26 s and the database tests 17 s → 5.5 s on the laptop; a load generator and benchmarks for the local stack)
 14. CI/CD (done: GitHub Actions runs the full check and govulncheck on every pull request and push to `main`; `main` is protected with no bypass; Render deploys only after CI passes on the commit)
+15. Webhook delivery (in progress)
 
 See [FAILURES.md](FAILURES.md) for what breaks when each safeguard is removed, with real output, and [DEPLOYMENT.md](DEPLOYMENT.md) for how the hosted API is set up.

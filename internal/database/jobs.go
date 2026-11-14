@@ -3,6 +3,7 @@ package database
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -59,6 +60,11 @@ func (s *JobStore) Add(ctx context.Context, j *job.Job) error {
 		return job.ErrNoOwner
 	}
 
+	typ, payload, err := typeAndPayload(j)
+	if err != nil {
+		return fmt.Errorf("database: add job %s: %w", j.ID, err)
+	}
+
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("database: add job %s: begin: %w", j.ID, err)
@@ -66,9 +72,10 @@ func (s *JobStore) Add(ctx context.Context, j *job.Job) error {
 	defer tx.Rollback() // does nothing once Commit has succeeded
 
 	_, err = tx.ExecContext(ctx,
-		`INSERT INTO jobs (id, user_id, title, status, created_at, updated_at, max_attempts, idempotency_key)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+		`INSERT INTO jobs (id, user_id, title, status, created_at, updated_at, max_attempts, idempotency_key, type, payload)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
 		j.ID, j.UserID, j.Title, string(j.Status), j.CreatedAt, j.UpdatedAt, maxAttempts(j), nullIfEmpty(j.IdempotencyKey),
+		typ, payload,
 	)
 	// With a key, a second request waits here until the first one's
 	// transaction ends, then fails with this error if it committed.
@@ -94,16 +101,50 @@ func (s *JobStore) Add(ctx context.Context, j *job.Job) error {
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("database: add job %s: commit: %w", j.ID, err)
 	}
-	notifyChanged(ctx, s.notify, j)
+	notifyChanged(ctx, s.notify, j.WithoutBody())
 	return nil
+}
+
+// typeAndPayload returns j's type for the type column (demo for a job built
+// without job.New) and its payload: the webhook as JSON, or nil (NULL).
+func typeAndPayload(j *job.Job) (string, any, error) {
+	typ := j.Type
+	if typ == "" {
+		typ = job.TypeDemo
+	}
+	if j.Webhook == nil {
+		return string(typ), nil, nil
+	}
+	b, err := json.Marshal(j.Webhook)
+	if err != nil {
+		return "", nil, fmt.Errorf("webhook payload: %w", err)
+	}
+	return string(typ), string(b), nil
+}
+
+// selectJobWithBody reads one job and, for a webhook, its body.
+const selectJobWithBody = `SELECT ` + jobColumns + `, payload->'body' FROM jobs`
+
+// scanJobWithBody reads a row of selectJobWithBody.
+func scanJobWithBody(s scanner) (*job.Job, error) {
+	var body []byte
+	j, err := scanJobAnd(s, &body)
+	if err != nil {
+		return nil, err
+	}
+	if j.Webhook != nil && body != nil {
+		j.Webhook.Body = json.RawMessage(body)
+	}
+	return j, nil
 }
 
 // Get returns the job with the given ID if userID owns it, or job.ErrNotFound.
 // "Owned by someone else" and "doesn't exist" are the same answer on purpose.
+// A webhook job comes with its body.
 func (s *JobStore) Get(ctx context.Context, userID, id string) (*job.Job, error) {
-	row := s.db.QueryRowContext(ctx, selectJobColumns+` WHERE id = $1 AND user_id = $2`, id, userID)
+	row := s.db.QueryRowContext(ctx, selectJobWithBody+` WHERE id = $1 AND user_id = $2`, id, userID)
 
-	j, err := scanJob(row)
+	j, err := scanJobWithBody(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, job.ErrNotFound
 	}
@@ -114,11 +155,12 @@ func (s *JobStore) Get(ctx context.Context, userID, id string) (*job.Job, error)
 }
 
 // GetByIdempotencyKey returns userID's job created with key, or
-// job.ErrNotFound. Like Get, it never finds another user's job.
+// job.ErrNotFound. Like Get, it never finds another user's job, and a
+// webhook job comes with its body.
 func (s *JobStore) GetByIdempotencyKey(ctx context.Context, userID, key string) (*job.Job, error) {
-	row := s.db.QueryRowContext(ctx, selectJobColumns+` WHERE user_id = $1 AND idempotency_key = $2`, userID, key)
+	row := s.db.QueryRowContext(ctx, selectJobWithBody+` WHERE user_id = $1 AND idempotency_key = $2`, userID, key)
 
-	j, err := scanJob(row)
+	j, err := scanJobWithBody(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, job.ErrNotFound
 	}
@@ -273,11 +315,12 @@ func scanJobAnd(s scanner, extra ...any) (*job.Job, error) {
 type scanned struct {
 	j    job.Job
 	next sql.NullTime
+	url  sql.NullString
 }
 
 func (s *scanned) targets() []any {
 	return []any{&s.j.ID, &s.j.UserID, &s.j.Title, &s.j.Status, &s.j.CreatedAt, &s.j.UpdatedAt,
-		&s.j.Attempts, &s.j.MaxAttempts, &s.next, &s.j.Version}
+		&s.j.Attempts, &s.j.MaxAttempts, &s.next, &s.j.Version, &s.j.Type, &s.url}
 }
 
 func (s *scanned) job() *job.Job {
@@ -287,6 +330,9 @@ func (s *scanned) job() *job.Job {
 	if s.next.Valid {
 		t := s.next.Time.UTC()
 		j.NextAttemptAt = &t
+	}
+	if s.url.Valid {
+		j.Webhook = &job.Webhook{URL: s.url.String}
 	}
 	return &j
 }

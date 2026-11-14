@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/work-frame/goflow/internal/database"
+	"github.com/work-frame/goflow/internal/job"
 	"github.com/work-frame/goflow/internal/queue"
 )
 
@@ -83,6 +84,7 @@ type Store interface {
 type Run struct {
 	JobID   string
 	Title   string
+	Type    job.Type
 	Attempt int // 1 for the first run
 }
 
@@ -92,6 +94,20 @@ type Run struct {
 // Go can't stop a goroutine from outside, so a handler that ignores ctx
 // keeps its worker busy until it finishes on its own.
 type Handler func(ctx context.Context, run Run) error
+
+// Route returns a Handler that runs each job with the handler for its
+// type. A job whose type has no handler fails permanently: trying again
+// can't add one. Until webhook delivery exists (Task 65), webhook jobs end
+// here, dead, with that error.
+func Route(handlers map[job.Type]Handler) Handler {
+	return func(ctx context.Context, run Run) error {
+		h, ok := handlers[run.Type]
+		if !ok {
+			return Permanent(fmt.Errorf("no handler for job type %q", run.Type))
+		}
+		return h(ctx, run)
+	}
+}
 
 // Pool runs Workers goroutines until its context ends.
 type Pool struct {
@@ -338,7 +354,7 @@ func (p *Pool) process(ctx context.Context, log *slog.Logger, id string) {
 	}()
 
 	start := time.Now()
-	err = p.runHandler(runCtx, Run{JobID: id, Title: claimed.Title, Attempt: claimed.Attempt}, log)
+	err = p.runHandler(runCtx, Run{JobID: id, Title: claimed.Title, Type: claimed.Type, Attempt: claimed.Attempt}, log)
 	took := time.Since(start)
 	close(stopBeat)
 	<-beatDone

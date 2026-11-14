@@ -125,7 +125,7 @@ func run(ctx context.Context, logger *slog.Logger, dbURL, redisURL string, worke
 	p := &worker.Pool{
 		Queue:        q,
 		Store:        work,
-		Handle:       worker.Demo(simulatedWork),
+		Handle:       worker.Handlers(simulatedWork),
 		JobTimeout:   jobTimeout,
 		Logger:       logger,
 		Workers:      workers,
