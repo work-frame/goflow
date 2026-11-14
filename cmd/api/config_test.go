@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
+
+	"github.com/work-frame/goflow/internal/secrets"
 )
 
 // testTakeTimeout is how long test workers wait in Redis for a job. Every
@@ -33,12 +35,30 @@ func testConfig(addr, dbURL string) config {
 	ns := "goflow:test:" + databaseName(dbURL) + ":"
 	return config{Addr: addr, DatabaseURL: dbURL, BcryptCost: bcrypt.MinCost, RegistrationOpen: true, SimulatedWork: 10 * time.Millisecond,
 		RateLimitPrefix: "goflow:test:" + hex.EncodeToString(b) + ":rl:", TakeTimeout: testTakeTimeout,
-		RedisKeyPrefix: ns, EventsChannel: ns + "events"}
+		RedisKeyPrefix: ns, EventsChannel: ns + "events", Secrets: testKeyring}
 }
 
-// env turns a map into a getenv function.
+// testSecretsKey is a fixed 32-byte key for tests: never a real one.
+const testSecretsKey = "dGVzdCBzZWNyZXRzIGtleSwgMzIgYnl0ZXMgbG9uZyE="
+
+// testKeyring is testSecretsKey, parsed.
+var testKeyring = func() *secrets.Keyring {
+	kr, err := secrets.ParseKeys(testSecretsKey, "")
+	if err != nil {
+		panic(err)
+	}
+	return kr
+}()
+
+// env turns a map into a getenv function. GOFLOW_SECRETS_KEY defaults to
+// testSecretsKey unless the map sets it, even to "".
 func env(vars map[string]string) func(string) string {
-	return func(key string) string { return vars[key] }
+	return func(key string) string {
+		if v, ok := vars[key]; ok || key != "GOFLOW_SECRETS_KEY" {
+			return v
+		}
+		return testSecretsKey
+	}
 }
 
 const (
@@ -98,11 +118,34 @@ func TestLoadConfigReadsEverySetting(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadConfig: %v", err)
 	}
+	if cfg.Secrets == nil || cfg.Secrets.CurrentID() != testKeyring.CurrentID() {
+		t.Errorf("Secrets = %v, want the keyring of GOFLOW_SECRETS_KEY", cfg.Secrets)
+	}
+	cfg.Secrets = nil // a pointer; compared above
 	want := config{Addr: "127.0.0.1:9000", DatabaseURL: testDBURL, RedisURL: sampleRedisURL, BcryptCost: 11, RegistrationOpen: true,
 		Workers: 3, SimulatedWork: 5 * time.Second, LogIPHeaders: true, ClientIPHeader: "CF-Connecting-IP",
 		MetricsToken: "a-metrics-token-of-at-least-32-characters"}
 	if cfg != want {
 		t.Errorf("config = %+v, want %+v", cfg, want)
+	}
+}
+
+// The API doesn't start without a usable secrets key (Task 65, K2), and
+// the error names the variable, never the value.
+func TestLoadConfigRequiresTheSecretsKey(t *testing.T) {
+	parallelTest(t)
+	for value, want := range map[string]string{
+		"":                       "GOFLOW_SECRETS_KEY is required",
+		"c2hvcnQta2V5LXZhbHVl":   "GOFLOW_SECRETS_KEY must decode to exactly 32 bytes",
+		"this-is-not-base64-at!": "GOFLOW_SECRETS_KEY must be standard base64",
+	} {
+		_, err := loadConfig(env(map[string]string{"GOFLOW_DATABASE_URL": testDBURL, "GOFLOW_SECRETS_KEY": value}))
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("GOFLOW_SECRETS_KEY=%q: err %v, want %q", value, err, want)
+		}
+		if err != nil && value != "" && strings.Contains(err.Error(), value) {
+			t.Errorf("the error repeats the key: %v", err)
+		}
 	}
 }
 

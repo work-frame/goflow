@@ -816,8 +816,40 @@ Each case was reproduced on a real machine (Arch Linux, Go 1.27, PostgreSQL 17) 
       egress_test.go:98: err = <nil>, want a *BlockedError
   --- FAIL: TestDialerChecksEveryConnection (0.00s)
       egress_test.go:134: second connection: err <nil>, dialed [93.184.216.34:443 127.0.0.1:443]; want blocked with no second dial
+  --- FAIL: TestDialerRefusesAddressesAndPortsWithoutLookingUp (0.00s)
+      egress_test.go:148: 127.0.0.1:443: err <nil>, dialed [127.0.0.1:443], lookups 0; want blocked before any lookup or dial
+      egress_test.go:148: [::1]:443: err <nil>, dialed [[::1]:443], lookups 0; want blocked before any lookup or dial
+      egress_test.go:148: [::ffff:127.0.0.1]:443: err <nil>, dialed [127.0.0.1:443], lookups 0; want blocked before any lookup or dial
+      egress_test.go:148: 169.254.169.254:443: err <nil>, dialed [169.254.169.254:443], lookups 0; want blocked before any lookup or dial
+      egress_test.go:148: 10.0.0.1:443: err <nil>, dialed [10.0.0.1:443], lookups 0; want blocked before any lookup or dial
   ```
+  (The development laptop, 14 November 2026. The third test wasn't in the plan's expected output: skipping a blocked IP literal also skips the check, and the dialer connects straight to it.)
 - **Why:** skipping looks safer than it is. The fake dialer has no socket check, so the second test shows what the code above the socket does on its own: it dialed `127.0.0.1:443`, the rebinding answer. In production the socket's `Control` check would still refuse that address, but a safeguard that only works because another one catches its mistakes is one safeguard, not two. And a name that answers with a public and a private address is either broken or an attack: connecting to the public one hides it.
+
+## 59. The worker containers lose the secrets key
+
+- **Safeguard:** `compose.yaml` gives the worker containers the API's `GOFLOW_SECRETS_KEY` (the YAML anchor `*secrets-key`), and `render.yaml` lets Render generate it (Task 65a).
+- **Removed:** the break-it deletes the workers' line.
+- **Caught by:** `TestSecretsKeyIsGeneratedOnRenderAndSharedInCompose`.
+- **Observed:**
+  ```text
+  --- FAIL: TestSecretsKeyIsGeneratedOnRenderAndSharedInCompose (0.00s)
+      secretskey_test.go:31: compose.yaml's workers don't use the API's GOFLOW_SECRETS_KEY (*secrets-key)
+  ```
+- **Why:** the API encrypts signing secrets and the workers decrypt them to sign. Since Task 65b a worker without the key refuses to start; with a different key it would start and fail every webhook with an unreadable secret. A file nobody runs in CI is still configuration that must agree with itself.
+
+## 60. A signing secret that isn't bound to its owner
+
+- **Safeguard:** `SecretStore` encrypts each signing secret with the owner's user ID as AES-GCM's additional authenticated data (`secretContext`).
+- **Removed:** the break-it drops the user ID from the context; the secret is still encrypted with the same key.
+- **Caught by:** `TestACopiedSecretDoesNotDecryptForAnotherUser`, which copies alice's encrypted row onto bob's with SQL.
+- **Observed:**
+  ```text
+  --- FAIL: TestACopiedSecretDoesNotDecryptForAnotherUser (0.22s)
+      webhooks_test.go:117: bob's Signing after the copy = [whsec_4RVXNJyy...], <nil>; want secrets.ErrTampered, not alice's secret
+  ```
+  (Sandbox run, the secret shortened here. The test's secrets are random and thrown away.)
+- **Why:** every other test still passed. Encryption alone kept the secret unreadable to anyone without the key, but someone who could write to the database (not read the key) could give bob's account alice's secret: bob's deliveries would carry alice's signature, which alice's receivers accept. The answer to the Task 65 question: encryption protects what the secret is, the bound ID protects whose it is.
 
 ## Experiment: the naive dual write loses a job
 

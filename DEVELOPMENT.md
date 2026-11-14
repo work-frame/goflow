@@ -120,6 +120,7 @@ export GOFLOW_DATABASE_URL='postgres://goflow:goflow@127.0.0.1:5432/goflow?sslmo
 export GOFLOW_TEST_DATABASE_URL='postgres://goflow:goflow@127.0.0.1:5432/goflow_test?sslmode=disable'
 export GOFLOW_REDIS_URL='redis://127.0.0.1:6379/0'
 export GOFLOW_TEST_REDIS_URL='redis://127.0.0.1:6379/1'
+export GOFLOW_SECRETS_KEY='Z29mbG93IGxvY2FsIGRldiBrZXk6IE5PVCBTRUNSRVQ='   # Compose's development key, not a secret
 ```
 
 | Variable | Used by | Default |
@@ -136,7 +137,8 @@ export GOFLOW_TEST_REDIS_URL='redis://127.0.0.1:6379/1'
 | `GOFLOW_QUICK_CHECK` | `check.sh`; `1` runs without the two test URLs and says it was a quick check | none |
 | `GOFLOW_API_URL` | CLI | `http://localhost:8080` |
 | `GOFLOW_TOKEN` | CLI; overrides the saved login from `goflow login` (scripts, CI) | none |
-| `GOFLOW_SECRETS_KEY` | API and worker, from Task 65b: base64 of exactly 32 random bytes, the master key for webhook signing secrets. Render generates it; Compose uses a fixed development key | none |
+| `GOFLOW_SECRETS_KEY` | API and worker (required): base64 of exactly 32 random bytes, the master key for webhook signing secrets. Render generates it; Compose and the export above use a fixed development key | none |
+| `GOFLOW_SECRETS_OLD_KEYS` | API and worker, during a key rotation only: the previous keys, comma-separated, so stored secrets can still be read (DEPLOYMENT.md) | none |
 
 Tests must never point at the development database.
 

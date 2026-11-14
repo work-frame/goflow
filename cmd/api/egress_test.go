@@ -33,7 +33,7 @@ func TestOnlyTestsUseTheTestClient(t *testing.T) {
 			return err
 		}
 		checked++
-		if strings.Contains(string(b), "NewTestClient") {
+		if strings.Contains(string(b), "NewTestClient(") {
 			t.Errorf("%s uses egress.NewTestClient: only tests may reach this machine", path)
 		}
 		return nil

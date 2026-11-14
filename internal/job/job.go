@@ -263,3 +263,24 @@ func newID() string {
 
 // ErrNoOwner is returned when a job is stored without an owner.
 var ErrNoOwner = errors.New("job: no owner")
+
+// Attempt is one webhook delivery attempt, as recorded and as shown to the
+// job's owner (GET /api/v1/jobs/{id}/attempts).
+type Attempt struct {
+	Attempt    int       `json:"attempt"`
+	StartedAt  time.Time `json:"started_at"`
+	DurationMS int       `json:"duration_ms"`
+	StatusCode int       `json:"status_code,omitempty"` // 0: no response
+	Outcome    string    `json:"outcome"`               // delivered, retry or permanent
+	Error      string    `json:"error,omitempty"`
+}
+
+// Attempt outcomes.
+const (
+	OutcomeDelivered = "delivered"
+	OutcomeRetry     = "retry"
+	OutcomePermanent = "permanent"
+)
+
+// MaxAttemptError matches the CHECK on webhook_attempts.error.
+const MaxAttemptError = 300

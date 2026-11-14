@@ -22,10 +22,13 @@ import (
 	"time"
 
 	"github.com/work-frame/goflow/internal/database"
+	"github.com/work-frame/goflow/internal/egress"
 	"github.com/work-frame/goflow/internal/events"
 	"github.com/work-frame/goflow/internal/queue"
 	"github.com/work-frame/goflow/internal/relay"
+	"github.com/work-frame/goflow/internal/secrets"
 	"github.com/work-frame/goflow/internal/urlcheck"
+	"github.com/work-frame/goflow/internal/webhook"
 	"github.com/work-frame/goflow/internal/worker"
 )
 
@@ -46,7 +49,8 @@ func main() {
 
 	dbURL, redisURL := os.Getenv("GOFLOW_DATABASE_URL"), os.Getenv("GOFLOW_REDIS_URL")
 	workers, err := workerCount(os.Getenv("GOFLOW_WORKERS"))
-	if err = errors.Join(err, checkSettings(dbURL, redisURL)); err != nil {
+	keys, keyErr := secrets.ParseKeys(os.Getenv("GOFLOW_SECRETS_KEY"), os.Getenv("GOFLOW_SECRETS_OLD_KEYS"))
+	if err = errors.Join(err, keyErr, checkSettings(dbURL, redisURL)); err != nil {
 		logger.Error("invalid configuration", "err", err)
 		os.Exit(1)
 	}
@@ -54,7 +58,7 @@ func main() {
 	// ctx is cancelled on Ctrl+C or SIGTERM. For the pool that means "take no
 	// new jobs"; running jobs keep their own context (see worker.Pool.Run).
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	err = run(ctx, logger, dbURL, redisURL, workers)
+	err = run(ctx, logger, dbURL, redisURL, workers, keys)
 	stop()
 	if err != nil {
 		logger.Error("worker stopped with error", "err", err)
@@ -91,7 +95,7 @@ func workerCount(raw string) (int, error) {
 	return n, nil
 }
 
-func run(ctx context.Context, logger *slog.Logger, dbURL, redisURL string, workers int) error {
+func run(ctx context.Context, logger *slog.Logger, dbURL, redisURL string, workers int, keys *secrets.Keyring) error {
 	db, err := database.Open(ctx, dbURL)
 	if err != nil {
 		return err
@@ -121,11 +125,17 @@ func run(ctx context.Context, logger *slog.Logger, dbURL, redisURL string, worke
 	stopReaper := relay.NewLeaseReaper(work, q, logger, 5*time.Second, time.Hour).Start(ctx)
 	defer stopReaper()
 
-	logger.Info("worker starting", "workers", workers, "simulated_work", simulatedWork, "drain_timeout", drainTimeout)
+	// The worker only reads secrets to sign; re-encryption after a key
+	// rotation is the API's job at its startup.
+	deliverer := &webhook.Deliverer{Client: egress.NewClient(), Secrets: database.NewSecretStore(db, keys),
+		Attempts: database.NewAttemptStore(db), Logger: logger}
+
+	logger.Info("worker starting", "workers", workers, "simulated_work", simulatedWork, "drain_timeout", drainTimeout,
+		"secrets_key_id", keys.CurrentID())
 	p := &worker.Pool{
 		Queue:        q,
 		Store:        work,
-		Handle:       worker.Handlers(simulatedWork),
+		Handle:       worker.Handlers(simulatedWork, deliverer.Handle),
 		JobTimeout:   jobTimeout,
 		Logger:       logger,
 		Workers:      workers,

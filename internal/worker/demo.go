@@ -12,11 +12,12 @@ import (
 )
 
 // Handlers returns the Handler both programs run: each job type with its
-// own handler. Only demo jobs have one so far; a webhook job is refused by
-// Route until Task 65 adds delivery.
-func Handlers(demoWork time.Duration) Handler {
+// own handler. webhook is webhook.Deliverer's Handle; it lives in another
+// package, which imports this one.
+func Handlers(demoWork time.Duration, webhook Handler) Handler {
 	return Route(map[job.Type]Handler{
-		job.TypeDemo: Demo(demoWork),
+		job.TypeDemo:    Demo(demoWork),
+		job.TypeWebhook: webhook,
 	})
 }
 
