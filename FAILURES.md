@@ -957,6 +957,21 @@ Each case was reproduced on a real machine (Arch Linux, Go 1.27, PostgreSQL 17) 
   ```
   (Two more failed only because `job_outbox.claimed_until` didn't exist yet.) The claim test mattered most: the old reconciler locked `jobs` rows, the ones workers claim all day, not only outbox rows. Turning on `ContextTimeoutEnabled` fixed the deadline but not the cancel test: go-redis honours a deadline, not a plain cancellation, so `Enqueue` now returns on cancellation itself.
 
+## 67. The restore drill writes the age private key to disk
+
+- **Safeguard:** `restore-drill.sh` reads an age private key at a hidden prompt and hands it to `age` through a pipe (`--identity <(printf ...)`). The key exists only in the script's memory, and is cleared once the dump is decrypted (Phase 18).
+- **Removed:** the break-it saves the key to `~/.goflow-age-key` and points age at that file.
+- **Caught by:** `TestRestoreDrillScriptRules`.
+- **Observed:**
+  ```text
+  --- FAIL: TestRestoreDrillScriptRules (0.00s)
+      restore_test.go:322: restore-drill.sh contains "> \"$" (writes the dump to disk, or ignores errors)
+      restore_test.go:335: restore-drill.sh lacks "decrypt_() { age --decrypt --identity <(printf '%s\\n' \"$identity\") \"$file\"; }"
+      restore_test.go:350: restore-drill.sh uses the age key in other ways than checking it and piping it to age (2 lines): [[ "$identity" =~ ^AGE-SECRET-KEY-1[0-9A-Z]{58}$ ]] || { unset identity; echo "stop: that isn't an age private key (one line, AGE-SECRET-KEY-1...)" >&2; exit 1; } | printf '%s\n' "$identity" > "$HOME/.goflow-age-key" # break-it: the key on disk
+  ```
+  (Sandbox run.)
+- **Why:** the drill still works with the key in a file, so no run would ever notice. But that file is the one thing that opens every backup, sitting unencrypted in a home folder that gets synced, backed up and copied to new laptops, long after the drill is over. The whole point of public-key backups is that only the password manager holds it.
+
 ## Experiment: the naive dual write loses a job
 
 Not a removed safeguard but the design of Task 22, run live on 2 November 2026 to see the failure Task 23 fixes. `POST /api/v1/jobs` saved the job in PostgreSQL, then pushed its ID to Redis, with nothing tying the two together.

@@ -37,17 +37,19 @@ func TestBackupIsEncryptedBeforeItTouchesTheDisk(t *testing.T) {
 	for _, want := range []string{
 		"set -euo pipefail", "umask 077", `read -rsp "Neon database URL (not shown): " url`,
 		"gpg_args=(--symmetric --cipher-algo AES256 --output \"$tmp\")",
-		"</dev/null |\n    gpg \"${gpg_args[@]}\"",
-		"</dev/null | gpg \"${gpg_args[@]}\"",
+		"encrypt_() { age --encrypt --recipient \"$recipient\" --output \"$tmp\"; }",
+		"encrypt_() { gpg \"${gpg_args[@]}\"; }",
+		"</dev/null |\n    encrypt_",
+		"</dev/null | encrypt_",
 		"backups never go there",
 	} {
 		if !strings.Contains(b, want) {
 			t.Errorf("backup.sh lacks %q", want)
 		}
 	}
-	// Every pg_dump's output goes into gpg, never into a file.
-	if n, m := strings.Count(b, "exec pg_dump")+strings.Count(b, "\n  pg_dump "), strings.Count(b, "gpg \"${gpg_args[@]}\""); n != 2 || m != 2 {
-		t.Errorf("backup.sh has %d pg_dump calls and %d into gpg; want each dump piped into gpg", n, m)
+	// Every pg_dump's output goes into encrypt_ (gpg or age), never into a file.
+	if n, m := strings.Count(b, "exec pg_dump")+strings.Count(b, "\n  pg_dump "), strings.Count(b, "| encrypt_")+strings.Count(b, "|\n    encrypt_"); n != 2 || m != 2 {
+		t.Errorf("backup.sh has %d pg_dump calls and %d into encrypt_; want each dump piped into encrypt_", n, m)
 	}
 	if regexp.MustCompile(`pg_dump[^|\n]*>`).MatchString(b) {
 		t.Error("backup.sh redirects pg_dump into a file")
@@ -57,7 +59,7 @@ func TestBackupIsEncryptedBeforeItTouchesTheDisk(t *testing.T) {
 	}
 
 	d := readRepoFile(t, "scripts/restore-drill.sh")
-	for _, want := range []string{"set -euo pipefail", `gpg "${gpg_args[@]}" "$file" | to_sql_ | awk`, "already exists", "db=goflow_restore_drill"} {
+	for _, want := range []string{"set -euo pipefail", `decrypt_ | to_sql_ | awk`, "already exists", "db=goflow_restore_drill"} {
 		if !strings.Contains(d, want) {
 			t.Errorf("restore-drill.sh lacks %q", want)
 		}

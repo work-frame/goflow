@@ -298,7 +298,7 @@ func TestRestoreDrillScriptRules(t *testing.T) {
 	d := readRepoFile(t, "scripts/restore-drill.sh")
 	for _, want := range []string{
 		"set -euo pipefail",
-		`if ! sql="$(gpg "${gpg_args[@]}" "$file" | to_sql_ | awk -f "$here/restore-filter.awk")"; then`,
+		`if ! sql="$(decrypt_ | to_sql_ | awk -f "$here/restore-filter.awk")"; then`,
 		"-v ON_ERROR_STOP=1 --single-transaction",
 		"db=goflow_restore_drill",
 		"must be a local server",
@@ -321,6 +321,33 @@ func TestRestoreDrillScriptRules(t *testing.T) {
 		if strings.Contains(d, banned) {
 			t.Errorf("restore-drill.sh contains %q (writes the dump to disk, or ignores errors)", banned)
 		}
+	}
+
+	// An age private key reaches age through a pipe, never a file, and is
+	// dropped as soon as the dump is decrypted (Phase 18; FAILURES.md,
+	// case 67).
+	for _, want := range []string{
+		`read -rsp "age private key, AGE-SECRET-KEY-1... (not shown): " identity`,
+		`decrypt_() { age --decrypt --identity <(printf '%s\n' "$identity") "$file"; }`,
+		"is neither .gpg nor .age",
+	} {
+		if !strings.Contains(d, want) {
+			t.Errorf("restore-drill.sh lacks %q", want)
+		}
+	}
+	if n := strings.Count(d, "unset identity"); n != 3 {
+		t.Errorf("restore-drill.sh unsets the age key %d times; want 3 (bad key, failed check, after decrypting)", n)
+	}
+	// The key is used in exactly two places: checked, then piped to age.
+	// Anything else (a file, an echo, an export) is a new way for it to leak.
+	var uses []string
+	for _, line := range strings.Split(d, "\n") {
+		if strings.Contains(line, "$identity") || strings.Contains(line, "${identity") || strings.Contains(line, "export identity") {
+			uses = append(uses, strings.TrimSpace(line))
+		}
+	}
+	if len(uses) != 2 || !strings.HasPrefix(uses[0], `[[ "$identity" =~ ^AGE-SECRET-KEY-1`) || !strings.HasPrefix(uses[1], "decrypt_() { age --decrypt --identity <(") {
+		t.Errorf("restore-drill.sh uses the age key in other ways than checking it and piping it to age (%d lines): %s", len(uses), strings.Join(uses, " | "))
 	}
 
 	for _, f := range []string{"scripts/backup.sh", "scripts/count-rows.sh"} {
