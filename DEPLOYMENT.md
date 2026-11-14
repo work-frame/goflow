@@ -488,11 +488,12 @@ The passphrase for backups lives in your **password manager**, nowhere else: not
    ./scripts/backup.sh
    ```
    It writes `~/goflow-backups/goflow-<time>.dump.gpg` (folder 700, file 600), outside the repository, and prints the size, SHA-256 and seconds taken.
-3. Restore it into a new local database, `goflow_restore_drill`, decrypted straight into `pg_restore`:
+3. Restore it into a new local database, `goflow_restore_drill`; gpg asks for the passphrase once:
    ```bash
    ./scripts/restore-drill.sh ~/goflow-backups/goflow-<time>.dump.gpg
    ```
-   Compare its counts with production's from Drill 1.
+   It turns the dump into SQL in memory and checks all of it before PostgreSQL sees any: the dump must end with pg_dump's closing line, and the only lines removed are Neon's `ALTER COLUMN ... SET (pg_attver=N);`, each printed as `removed: ...`. Anything else unexpected stops it with nothing restored. It then loads the SQL in one transaction, checks that the foreign keys, indexes and CHECK constraints in the dump all exist in the database, and prints the row counts. Compare them with production's from Drill 1.
+   To prove the passphrase comes from your password manager and not gpg's memory, run `gpgconf --reload gpg-agent` first.
 4. Drop the drill database: `docker compose exec -T postgres dropdb -U goflow goflow_restore_drill`. Keep the backup file.
 
 Run `backup.sh` regularly (weekly, and before any risky migration): what a backup can recover is only as recent as the last one.
@@ -503,11 +504,41 @@ Run `backup.sh` regularly (weekly, and before any risky migration): what a backu
 
 ### Results
 
-| Drill | Date | Steps timed | Result |
+| Drill | Date | Time taken | Result |
 |---|---|---|---|
-| 1: Neon branch from the past | | | |
-| 2: backup | | | |
-| 2: restore | | | |
+| 1: Neon branch from the past | 14 Nov 2026 | not recorded | Branch from 20:15 UTC: users 1, sessions 1, jobs 16 (10 completed), secrets 1, attempts 0, migrations 12. Production: sessions 3, jobs 17 (11 completed), attempts 2. The difference is exactly what was created after 20:15: the first live webhook job, its 2 attempts and 2 logins |
+| 2: backup | 14 Nov 2026, 20:58 UTC | 109 s, including typing the URL and the passphrase twice | 6,326 bytes encrypted (21,835 as SQL), file mode 600 |
+| 2: restore, first try | 14 Nov 2026 | stopped at once | Failed: stock PostgreSQL rejected Neon's `pg_attver` column options, and `--exit-on-error` stopped the restore ([FAILURES.md](FAILURES.md#what-tests-did-not-catch)) |
+| 2: restore, by hand, `pg_attver` lines removed | 14 Nov 2026 | 0.22 s | Every count equal to production: users 1, sessions 3, jobs 17 (11 completed), secrets 1, attempts 2, migrations 12, newest job 20:23:48 UTC |
+| 2: passphrase recalled | 14 Nov 2026 | | gpg's cache cleared (`gpgconf --reload gpg-agent`), passphrase pasted from 1Password, backup decrypted |
+
+**First numbers.** RPO: up to 6 hours from Neon's history; past that, everything since the last `backup.sh` run. RTO: not measured. The restore itself takes under a second at this size; the time goes to the manual steps of the [disaster recovery runbook](#disaster-recovery-restoring-production-from-a-backup), estimated at 15 to 30 minutes until someone times it.
+
+### Disaster recovery: restoring production from a backup
+
+For when Neon's 6 hours of history can't help: the project is gone, or the damage is older than 6 hours. Nothing here is scripted on purpose: `restore-drill.sh` only ever writes to the local Compose database, and every step that touches a real database is typed by a person who has read it first. Do it in a `bash` shell, from the repository.
+
+1. **Stop the writes.** In Render: `goflow-api` → **Settings** → **Suspend Service**. The API runs the workers, so this stops both. Note the time. (Not yet tried on the free plan; if the button isn't there, anything written from now on goes to the old database and is lost when you switch.)
+2. **Prove the newest backup** with the drill above (step 3), on this laptop. Note its counts. If it fails, stop here: fix the drill, don't improvise on production.
+3. **Make an empty database.** In the Neon console, create a new project in the same region (AWS Frankfurt). Copy its connection string; never use one that already holds data.
+4. **Load the backup into it.** Read the new URL without echo, build the verified URL, and check the whole dump in memory before anything is sent:
+   ```bash
+   set -o pipefail
+   . scripts/pgurl.sh
+   read -rsp "NEW database URL (not shown): " url; echo
+   export PGURL="$(verified_url "$url" /etc/goflow-ca.crt)"; unset url
+   sql="$(gpg --decrypt --quiet ~/goflow-backups/goflow-<time>.dump.gpg | docker compose exec -T postgres pg_restore --no-owner --no-privileges -f - | awk -f scripts/restore-filter.awk)" && echo "checked" || echo "STOP: the dump failed its checks"
+   ```
+   Only after `checked`:
+   ```bash
+   printf '%s\n' "$sql" | docker run --rm -i -e PGURL -v /etc/ssl/certs/ca-certificates.crt:/etc/goflow-ca.crt:ro postgres:17 sh -c 'exec psql --dbname="$PGURL" -X -q -v ON_ERROR_STOP=1 --single-transaction' >/dev/null && echo "restored"
+   unset sql PGURL
+   ```
+5. **Compare** `./scripts/count-rows.sh` on the new URL with step 2's counts.
+6. **Point the API at it.** In Render, `goflow-api` → **Environment** → `GOFLOW_DATABASE_URL` = the new URL (built as in [The database URL](#the-database-url)); save, then **Resume Service**. On start the API finds 12 migrations already applied, and the reconciler re-queues every `pending`, `queued` and `retrying` job from PostgreSQL, so the empty Valkey doesn't lose them.
+7. **Check** `/readyz`, log in, list jobs. Note the time: step 1 to here is the real RTO. Record it in the table above.
+
+What comes back is the database as it was at the backup: anything later is lost, and users who logged in after it log in again. Webhook signing secrets come back only if `GOFLOW_SECRETS_KEY` on Render is the same key that encrypted them; with a different key the API refuses to start (`MissingKeysError`), and recovering from that isn't written down yet.
 
 ## Rolling back
 

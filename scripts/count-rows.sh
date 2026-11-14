@@ -7,11 +7,14 @@
 #
 # It runs psql from the postgres:17 image (GOFLOW_PG_TOOLS=local: this
 # machine's psql) inside a read-only transaction, checks the server's
-# certificate against this machine's CA bundle, and never prints the URL.
+# certificate and name against this machine's CA bundle (sslmode=verify-full,
+# scripts/pgurl.sh), and never prints the URL.
 set -euo pipefail
 
 tools="${GOFLOW_PG_TOOLS:-docker}"
 ca=/etc/ssl/certs/ca-certificates.crt
+# shellcheck source=scripts/pgurl.sh
+. "$(dirname "$0")/pgurl.sh"
 url="${GOFLOW_COUNT_DATABASE_URL:-}"
 if [ -z "$url" ]; then
   read -rsp "Database URL (not shown): " url
@@ -34,10 +37,9 @@ SELECT 'newest job created', coalesce(to_char(max(created_at) AT TIME ZONE 'UTC'
 COMMIT;"
 
 if [ "$tools" = docker ]; then
-  sep='?'; case "$url" in *\?*) sep='&' ;; esac
-  PGURL="${url}${sep}sslrootcert=/etc/goflow-ca.crt" PGSQL="$sql" \
+  PGURL="$(verified_url "$url" /etc/goflow-ca.crt)" PGSQL="$sql" \
     docker run --rm -i -e PGURL -e PGSQL -v "$ca:/etc/goflow-ca.crt:ro" postgres:17 \
       sh -c 'exec psql --dbname="$PGURL" -X -q -tA -F " | " -v ON_ERROR_STOP=1 -c "$PGSQL"' </dev/null
 else
-  psql --dbname="$url" -X -q -tA -F " | " -v ON_ERROR_STOP=1 -c "$sql" </dev/null
+  psql --dbname="$(verified_url "$url" "$ca")" -X -q -tA -F " | " -v ON_ERROR_STOP=1 -c "$sql" </dev/null
 fi

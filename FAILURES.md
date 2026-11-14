@@ -907,6 +907,23 @@ Each case was reproduced on a real machine (Arch Linux, Go 1.27, PostgreSQL 17) 
   (Sandbox run.)
 - **Why:** a script run by hand once a week isn't exercised by CI, and the broken path still "works": it writes a file, prints a size and a SHA-256, and restores fine. That file would hold every user's email, password hash and webhook URL in plain form, in a folder that gets copied to other disks. Reading the script in a test is weaker than running it, but running it needs Neon and Docker; this catches the change that matters.
 
+## 65. A cut-off dump is restored and committed
+
+- **Safeguard:** `scripts/restore-filter.awk` reads the whole SQL dump before `restore-drill.sh` sends any of it to PostgreSQL, and refuses a dump without pg_dump's closing line, `-- PostgreSQL database dump complete`. It prints nothing for a refused dump, so `psql` is never started.
+- **Removed:** the break-it deletes the closing-line check; the other checks stay.
+- **Caught by:** `TestRestoreFilterRefusesACutOffDump` (awk only, runs everywhere) and `TestACutOffDumpRestoresNothing` (needs `psql`; skipped without it). The second loads into a database the test creates for itself, `goflow_restore_drill_test_<random>`, and drops at the end, never `goflow`, `goflow_test` or `goflow_restore_drill`.
+- **Observed:**
+  ```text
+  --- FAIL: TestRestoreFilterRefusesACutOffDump (0.00s)
+      restore_test.go:128: the filter passed a dump with no "dump complete" trailer
+      restore_test.go:131: the filter printed 649 bytes of SQL for a refused dump; it must print none
+  --- FAIL: TestACutOffDumpRestoresNothing (0.13s)
+      restore_test.go:261: the filter passed a cut-off dump; loading it as restore-drill.sh would
+      restore_test.go:265: a cut-off dump was committed: 3 tables restored
+  ```
+  (Sandbox run, PostgreSQL 16, mawk and gawk.)
+- **Why:** `psql --single-transaction` wraps its input in `BEGIN` and `COMMIT`, and the `COMMIT` comes when the input ends, however it ends. A stream cut short (gpg or `pg_restore` dying, a pipe broken) still ends, so psql commits the tables and rows that arrived. `TestPsqlCommitsACutOffDump` shows it: three tables, data, and none of the primary key, index or foreign key. `pipefail` in the script also stops the drill when a stage exits with an error, but only where the error reaches the script: the restore typed by hand on 14 November ran in zsh without `pipefail`, so a gpg failure halfway through would have been committed. The closing line is the one thing a complete dump always has and a cut-off one never does.
+
 ## Experiment: the naive dual write loses a job
 
 Not a removed safeguard but the design of Task 22, run live on 2 November 2026 to see the failure Task 23 fixes. `POST /api/v1/jobs` saved the job in PostgreSQL, then pushed its ID to Redis, with nothing tying the two together.
@@ -1002,6 +1019,7 @@ Task 49, run live on 9 November 2026 with the Compose stack: the API with two wo
 
 ## What tests did not catch
 
+- **The backup didn't restore outside Neon (found by the first restore drill, 14 November 2026).** `backup.sh` ran, the file decrypted, and every test passed. `restore-drill.sh` then stopped at once: `pg_restore: error: could not execute query: ERROR:  unrecognized parameter "pg_attver"`, on `ALTER TABLE ONLY public.jobs ALTER COLUMN type SET (pg_attver=34043088);` and the same for `payload`, the two columns migration 0011 added. Neon's PostgreSQL stores a column option stock PostgreSQL doesn't know, and `pg_dump` writes it out. `pg_restore` treats those lines and `CREATE TABLE jobs` as one entry, so `jobs` and everything after it failed; `--exit-on-error` stopped there instead of leaving a half-restored database that looked fine. No documentation of `pg_attver` was found. The sandbox tests used stock PostgreSQL on both sides, so they couldn't see it. Fixed in Task 69b: the drill removes exactly those lines, prints them, and refuses any other column option. Lesson: a backup is a guess until it has been restored somewhere other than where it came from.
 - **The relay holds outbox row locks while it waits for Redis (seen in Task 55, recorded in Task 56).** `OutboxStore.Relay` locks the outbox rows it picked (`FOR UPDATE SKIP LOCKED`) and keeps them locked while it sends their IDs to Redis, so two API instances never send the same IDs at once (Task 23). With Redis down, that send waits out go-redis's retries, and anything that deletes those rows waits too. Observed on the development laptop in `TestAPIStartsWhenRedisIsDown` with Redis refusing connections: the test's cleanup, `DELETE FROM users` (which cascades to the user's jobs and their outbox rows), waited about 1.7 s on `SELECT id, job_id FROM job_outbox ORDER BY id LIMIT $1 FOR UPDATE SKIP LOCKED`, three times in a row in `pg_stat_activity`. **Risk, not observed:** if Redis stopped answering instead of refusing, each connection attempt could take up to its 2-second limit and the relay's pass up to its 10-second limit, longer than the 3 seconds a request gets for the database, so deleting a job not yet sent, or its account, could fail during such an outage. Not changed in Phase 13. Two possible fixes, both left for later: a short deadline on the Redis call inside the transaction, or a relay that marks rows as taken, commits, and talks to Redis with no lock held (a redesign of Task 23's delivery guarantee that needs its own tests).
 - **`Lock` instead of `RLock` in `Get`:** every test passed. The code is correct but reads queue one at a time. Correctness tests can't measure throughput. That needs a benchmark (planned for Phase 13).
 - **A cheap bcrypt cost:** setting `DefaultCost` to 4 passes every test, because tests use cost 4 on purpose. Production hashes would be about 240 times cheaper to crack. Fixed in Task 17: the cost comes from `GOFLOW_BCRYPT_COST`, the server refuses anything below 10, and `TestLoadConfigDefaults` expects a literal 12 (case 19).
