@@ -1,6 +1,6 @@
 # Architecture
 
-This describes GoFlow at the end of Phase 16. It changes as each phase lands.
+This describes GoFlow at the end of Phase 16, with Phase 17 in progress. It changes as each phase lands.
 
 ## Overview
 
@@ -117,6 +117,8 @@ job_outbox (
   id         BIGINT      GENERATED ALWAYS AS IDENTITY PRIMARY KEY  -- delivery order
   job_id     TEXT        NOT NULL UNIQUE REFERENCES jobs ON DELETE CASCADE
   created_at TIMESTAMPTZ NOT NULL
+  claim_token   TEXT         -- the relay pass that took the row (migration 13)
+  claimed_until TIMESTAMPTZ  -- when that claim runs out; both or neither (CHECK)
 )
 ```
 
@@ -245,19 +247,22 @@ Creating a job writes two things to two systems: the job (PostgreSQL) and its ID
 ```text
 POST /api/v1/jobs ─► BEGIN; INSERT jobs; INSERT job_outbox; COMMIT ─► 201 ─► relay.Wake()
 relay (at start, when woken, and on a retry timer after a failure):
-  BEGIN
-  SELECT ... FROM job_outbox ORDER BY id LIMIT 100 FOR UPDATE SKIP LOCKED
-  LPUSH goflow:jobs:pending <ids>            ── fails? ROLLBACK; rows wait for the next try
-  DELETE FROM job_outbox ...; UPDATE jobs SET status = 'queued' ...
-  COMMIT
+  claim:  UPDATE job_outbox SET claim_token = <new>, claimed_until = now() + 30 s
+          WHERE <unclaimed or claim ran out> ORDER BY id LIMIT 100      (commits at once)
+  send:   LPUSH goflow:jobs:pending <ids>, 2 s, no lock held ── fails? release the claim; rows wait
+  finish: BEGIN; DELETE FROM job_outbox WHERE claim_token = <mine>;
+          UPDATE jobs SET status = 'queued' WHERE <those jobs> AND status = 'pending'; COMMIT
 ```
 
 - **Nothing is lost.** A job exists only together with its outbox row. If Redis is down, the rows wait; the request still succeeds.
-- **Delivered at least once, not exactly once.** If `LPUSH` succeeds and the `COMMIT` then fails, the rows remain and the same IDs are pushed again. Workers (Phase 6) must handle seeing a job twice.
-- **Several instances are safe.** `FOR UPDATE SKIP LOCKED` gives each relay different rows.
+- **No lock while Redis answers (Phase 17).** Until Task 72 the relay locked its rows (`FOR UPDATE`) for the whole pass, so deleting a job or an account waited as long as Redis did (FAILURES.md, case 66). Now a claim is a committed token and a deadline on PostgreSQL's clock, and the send happens with nothing locked.
+- **Delivered at least once, not exactly once.** If `LPUSH` succeeds and the pass then stops before it finishes, the rows keep their claim until it runs out (30 s), and another pass pushes the same IDs again. Workers (Phase 6) must handle seeing a job twice: `Claim` lets one win.
+- **A claim that ran out finishes nothing.** The last step deletes only rows that still carry the pass's own token. A pass that hung past its 30 s finds the rows taken over by another pass, or deleted with their job, and leaves them alone.
+- **Several instances are safe.** The claim statement uses `FOR UPDATE SKIP LOCKED` for its own instant, so two passes never take the same row. A pass that finds every waiting row claimed by another returns `ErrOutboxBusy`, and the relay tries again on its retry timer: that is how rows left by a pass that died get sent once the claim runs out.
 - **`Wake` never blocks.** It's a send on a channel with room for one signal; extra wake-ups are dropped because the next pass sends everything anyway.
 - **No polling while healthy.** After a failed pass the relay retries after 1 s, doubling up to 5 minutes; while all is well it doesn't query the database between wake-ups. Neon's free compute sleeps after 5 idle minutes and has 100 compute-hours a month; a query every 30 s would keep it awake around the clock (about 180 hours at the smallest size). `TestRelayDoesNotPollWhileHealthy` guards this.
-- **The reconciler re-sends lost IDs.** The outbox gets an ID to Redis once; it can't see Redis lose it later (a free Key Value restart empties the lists). At start and then hourly, the API re-sends jobs `queued` for more than 10 minutes and moves their `updated_at` forward. A duplicate is harmless: `Claim` lets one worker win. One query an hour keeps Neon's cost small.
+- **The reconciler re-sends lost IDs.** The outbox gets an ID to Redis once; it can't see Redis lose it later (a free Key Value restart empties the lists). At start and then hourly, the API re-sends jobs `queued` for more than 10 minutes and moves their `updated_at` forward. A duplicate is harmless: `Claim` lets one worker win. One query an hour keeps Neon's cost small. Since Task 72 it reads the jobs without locking them and sends with nothing locked, so a worker can claim one meanwhile; afterwards it moves only jobs whose `version` is still the one it read. Every write to a job raises its version, so a job claimed, finished or re-sent in between keeps its newer state.
+- **Every send to Redis gets 2 s of its own,** whatever is left of the 10 s pass, and `queue.New` turns on go-redis's `ContextTimeoutEnabled`, without which a context's deadline doesn't reach reads and writes at all (measured: a 500 ms deadline took 2 s, stopped only by `ReadTimeout`). go-redis still ignores a plain cancellation mid-read, so `Enqueue` returns at once on cancellation and leaves the abandoned call to end within `ReadTimeout`.
 
 ### The worker pool
 
@@ -486,6 +491,7 @@ golang:1.27-trixie                         gcr.io/distroless/static-debian13:non
 | `internal/web` | Static checks on `app.js`: no way for server text to become HTML, every event type handled, and a webhook's URL read only by `hostOf`, with no body, path, query or signing secret anywhere (case 61) |
 | `cmd/receiver` | Each check in order: a wrong secret `401`, a timestamp 6 minutes off either way `400`, a repeat `200` and processed once, a changed body `401`, `?fail=N` per webhook-id; the body never logged; the secret never repeated in an error (case 63) |
 | `scripts/backup.sh`, `scripts/restore-drill.sh`, `.github/workflows/uptime.yml` | Read, not run (they need Neon, Docker or a schedule): every dump is piped into `gpg`, never redirected to a file; the drill checks the SQL before loading it, loads it only from memory, in one transaction, and refuses an existing database; the uptime workflow has no permissions, no secrets, no actions, and runs every 6 hours (case 64). Run once by hand in the sandbox: a dump that contains no readable email, restored with every count equal |
+| Relay and reconciler locks (Tasks 71–72) | Written first and run red against the old code (case 66). A send held open by the test stands in for a Redis that never answers: deleting the job and claiming it must each finish in under 1 s meanwhile; a claim that ran out is sent again and the stale pass finishes nothing; an ID sent twice is claimed once; a failed send releases its claim; the reconciler leaves a job claimed meanwhile untouched. In `internal/queue`, a fake Redis that accepts and never answers: a 500 ms deadline and a 200 ms cancel both return in under 1 s. In `internal/relay`, each send is given 2 s |
 | `scripts/restore-filter.awk`, `scripts/pgurl.sh` (Task 69b) | Run: the filter on a dump shaped like Neon's (one `pg_attver` line removed and printed, a COPY row that looks like one kept, six kinds of bad input refused with no SQL printed); then, with `psql` installed, each loaded into a database the test creates and drops: a cut-off dump restores nothing, a complete one restores every foreign key, index and CHECK. `verified_url` on eight URLs: `verify-full` always, except localhost (case 65) |
 | `.github/workflows/ci.yml` | `cmd/api/ci_test.go` reads the workflow: actions pinned to commit SHAs, a read-only token, no secrets, the same database images as `compose.yaml` and the same Go minor version as the Dockerfile (case 55). The workflow itself is tested by running: its first green run is on its own pull request |
 | `internal/loadgen`, `cmd/loadgen` | Only addresses on this machine are accepted, and a remote API is refused before anything is sent. Jobs finish through polling alone, with no events at all. Against a real test server, a job that never finishes is listed by ID and the run counts as failed (case 53). The load itself is measured by hand, never in `check.sh` (DEVELOPMENT.md, Load testing and Benchmarks) |
