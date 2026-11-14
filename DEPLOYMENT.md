@@ -385,6 +385,18 @@ Result on 14 November 2026 (merge `b27c2af`, PR #73):
 - At 08:53 Settings → Deploy still showed **On Commit**. That page had been open since before the sync; only its `#deploy` anchor had changed, so it was never reloaded. The Blueprint listed `goflow-api` as updated around 08:51, a **Manual sync** at 08:55 found "Resources already up to date", and the reloaded page showed **After CI Checks Pass**. The automatic sync had applied it within about two minutes of the merge. Reload a settings page before trusting it.
 - Render's Deploy Hook sits on the same page, masked. It is a secret: anyone with the URL can trigger a deploy. Keep it masked in screenshots.
 
+The first merge under the new setting (`ff17817`, PR #74, 14 November 2026), times in UTC:
+
+| Time | What |
+|---|---|
+| 09:00:17 | CI run on `main` starts (push) |
+| ~09:00 | Events: no deploy for `ff17817` |
+| 09:02:21 | CI run passes (`check` 2m1s, `govulncheck` 21s) |
+| 09:02 | Render: deploy started for `ff17817` |
+| 09:03 | Render: live |
+
+The two merges before it started deploying in the minute they were merged, while CI was still running. This one waited about 2 minutes, until the run passed. Render's Events show minutes only, so "after 09:02:21" is as close as it can be measured.
+
 ## Rolling back
 
 Render keeps previous deploys. In the dashboard: `goflow-api` → **Deploys** → pick the last good one → **Rollback**. A rollback doesn't undo migrations, so a migration must keep working with the code before it (add columns before using them, drop them a release later).

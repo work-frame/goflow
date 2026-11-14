@@ -1,6 +1,6 @@
 # Architecture
 
-This describes GoFlow at the end of Phase 13, with Phase 14 in progress. It changes as each phase lands.
+This describes GoFlow at the end of Phase 14. It changes as each phase lands.
 
 ## Overview
 
