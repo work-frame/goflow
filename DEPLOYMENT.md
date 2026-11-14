@@ -397,6 +397,13 @@ The first merge under the new setting (`ff17817`, PR #74, 14 November 2026), tim
 
 The two merges before it started deploying in the minute they were merged, while CI was still running. This one waited about 2 minutes, until the run passed. Render's Events show minutes only, so "after 09:02:21" is as close as it can be measured.
 
+## The secrets key (Task 65a)
+
+`render.yaml` adds `GOFLOW_SECRETS_KEY` with `generateValue: true`: the Blueprint sync creates it with 32 random bytes in base64, the same way it created `GOFLOW_METRICS_TOKEN` in Task 40, and later syncs keep the value. Task 65a only adds the variable; nothing reads it yet. Task 65b makes the API and the worker require it, so it must exist before that deploy.
+
+- **Check after the deploy:** `goflow-api` → **Environment** lists `GOFLOW_SECRETS_KEY`. Don't reveal it, copy it or take a screenshot of that page: there is nothing to do with the value.
+- **Never delete or regenerate it.** It encrypts every user's signing secret; without it they can't be read. Rotation keeps the old key until everything is re-encrypted (documented with Task 65b).
+
 ## Rolling back
 
 Render keeps previous deploys. In the dashboard: `goflow-api` → **Deploys** → pick the last good one → **Rollback**. A rollback doesn't undo migrations, so a migration must keep working with the code before it (add columns before using them, drop them a release later).
