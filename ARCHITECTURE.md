@@ -1,6 +1,6 @@
 # Architecture
 
-This describes GoFlow at the end of Phase 15, with Phase 16 in progress. It changes as each phase lands.
+This describes GoFlow at the end of Phase 16. It changes as each phase lands.
 
 ## Overview
 
@@ -540,8 +540,8 @@ Everything runs with the race detector (`./scripts/check.sh`). Tests that need P
 
 ## Known limitations
 
-- **Neon's Free plan keeps 6 hours of history.** A mistake noticed within 6 hours can be undone by branching from a moment before it; anything older needs one of your own encrypted backups (`scripts/backup.sh`), which are as recent as the last time you ran it. How much can be lost (RPO) and how long a restore takes (RTO) are being measured by the Phase 16 drills, not promised ([results](DEPLOYMENT.md#results)).
-- **A backup restores only after a check.** Neon's PostgreSQL writes a column option, `pg_attver`, that stock PostgreSQL rejects, so a Neon dump doesn't load anywhere else as it is (found by the first restore drill). `restore-drill.sh` turns the dump into SQL, checks all of it with `scripts/restore-filter.awk` (removing only those lines, refusing any other column option and any dump without pg_dump's closing line), and only then loads it. The whole dump is held in memory for the check: fine up to Neon Free's 1 GB. The structure check counts CHECK constraints in `pg_constraint`; PostgreSQL 18 stores `NOT NULL` there too, so moving the Compose image to 18 needs that query changed.
+- **Neon's Free plan keeps 6 hours of history.** A mistake noticed within 6 hours can be undone by branching from a moment before it; anything older needs one of your own encrypted backups (`scripts/backup.sh`), which are as recent as the last time you ran it. How much can be lost (RPO) and how long a restore takes (RTO) were first measured by the Phase 16 drills ([results](DEPLOYMENT.md#results)): RPO up to 6 hours from Neon, otherwise the age of the newest backup; the restore itself takes seconds, and the full recovery is the manual runbook, not yet timed.
+- **A backup restores only after a check.** Neon's PostgreSQL writes a column option, `pg_attver`, that stock PostgreSQL rejects, so a Neon dump doesn't load anywhere else as it is (found by the first restore drill). The first dump had 18 such lines, on every column created by migrations 0011 and 0012; older columns have none, and Neon doesn't document why. `restore-drill.sh` turns the dump into SQL, checks all of it with `scripts/restore-filter.awk` (removing only those lines, refusing any other column option and any dump without pg_dump's closing line), and only then loads it. The whole dump is held in memory for the check: fine up to Neon Free's 1 GB. The structure check counts CHECK constraints in `pg_constraint`; PostgreSQL 18 stores `NOT NULL` there too, so moving the Compose image to 18 needs that query changed.
 - **The uptime check runs every 6 hours.** A failure just after a good check can go unnoticed that long, and GitHub may start scheduled runs late.
 - Demo jobs are placeholders (`worker.Demo` picks a behaviour from the title).
 - **Webhooks retry for minutes, not days.** The existing backoff with at most 10 attempts covers about 13 minutes; real providers retry for hours. A receiver down longer than that leaves the job `dead`, and its owner re-runs it (Phase 15, decision 4a).
