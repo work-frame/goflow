@@ -200,7 +200,26 @@ Measured on the development laptop (11 November 2026; 8 threads, everything in D
 | 3 | 6 | 751, 840, 832 | 807 | 204–211 ms | 222–225 ms | 0 |
 | 6 | 12 | 496, 334, 636 | 489 | 94–190 ms | 161–283 ms | 0 |
 
-Every job completed in every run. Two workers are the limit at the first step: jobs wait for one, so the time to completion is long and the rate low. Six workers give 2.4 times the rate, with steady times. Twelve give a *lower* rate than six, and vary from run to run, although each job, once claimed, finishes sooner (lower p50). The cause hasn't been measured. Everything shares one laptop, so the twelve workers, the API, PostgreSQL and the generator compete for its 8 threads; PostgreSQL's row locks and connections are the other candidates. The generator's elapsed time also includes creating the jobs, so a slower create rate would show here as a lower rate. On this laptop, adding workers past six makes GoFlow slower.
+Every job completed in every run. Two workers are the limit at the first step: jobs wait for one, so the time to completion is long and the rate low. Six workers give 2.4 times the rate, with steady times. Twelve gave a *lower* rate than six in these runs, and varied from run to run, although each job, once claimed, finished sooner (lower p50). These runs didn't record how fast the jobs were created, and 500 jobs last well under a second, so they can't say why. The rerun below, with longer runs and the create rate, did not repeat it.
+
+Rerun on the same laptop (14 November 2026, commit `bde45f8` (merged as `5ac0740`)), 2000 jobs per run so each lasts 2 to 3 seconds, with the create rate and one CPU reading per run:
+
+```bash
+GOFLOW_LOADTEST_CONTAINERS="3 6" GOFLOW_LOADTEST_JOBS=2000 GOFLOW_LOADTEST_STATS=1 ./scripts/loadtest.sh
+```
+
+| Worker containers | Workers | Creates/s (3 runs) | Completions/s (3 runs) | Mean completions/s | Completions ÷ creates | p50 create→done | p95 create→done |
+|---|---|---|---|---|---|---|---|
+| 3 | 6 | 900, 1173, 1120 | 647, 822, 681 | 717 | 0.61–0.72 | 720–861 ms | 0.78–1.09 s |
+| 6 | 12 | 853, 942, 948 | 836, 926, 933 | 898 | 0.98 | 69–103 ms | 91–167 ms |
+
+All 12,000 jobs completed, none dead, none seen only by polling.
+
+- **Six workers are the limit at 2000 jobs.** They finish 28 to 39% slower than the API accepts jobs, so a queue builds and jobs wait: p50 is 0.7 to 0.9 s.
+- **Twelve workers keep up.** Completions follow creates within 2%, and a job waits about 70 to 100 ms. The completion rate here is the create rate, so twelve workers' own limit is above about 930 jobs per second and wasn't reached: a faster generator or a second API would be needed to find it.
+- **The 500-job result above didn't repeat.** Twelve workers were 25% faster than six here. One possible reason, not tested: 500-job runs end in under a second, where start-up and timing noise weigh more.
+- **CPU, one reading per run, as clues only:** the API used 118–137% (about 1.2 to 1.4 of the 8 threads) in all six readings, PostgreSQL 137–231%, Valkey 21–40%, each worker container 6–63%. The containers added up to roughly 3.2 to 5.3 threads, plus the generator, which runs outside Docker and wasn't measured. Creates were somewhat slower with twelve workers (mean 914 against 1064 per second); twelve workers sharing PostgreSQL and the CPU with the API is a likely reason, not a measured one.
+- **Against the benchmark:** `ClaimAndComplete` takes about 4.2 ms on this laptop, about 240 jobs per second for one worker on an idle database. Six workers would reach about 1400 if nothing else ran; they reached 717 while the API was writing new jobs to the same PostgreSQL. The difference hasn't been broken down.
 
 Two more settings: `GOFLOW_LOADTEST_CONTAINERS` picks the steps (default `1 3 6`), and `GOFLOW_LOADTEST_STATS=1` takes one `docker stats` CPU reading of every container half a second into each run. One reading is a clue, not a measurement; give the runs enough jobs to last a few seconds. The report's `creates:` line says how fast the API accepted the jobs: if that is close to the completion rate, creating is the limit, not the workers.
 
@@ -225,6 +244,20 @@ go install golang.org/x/perf/cmd/benchstat@v0.0.0-<date>-<commit>
 ```
 
 Each run's header records the commit, Go version, OS, CPU, PostgreSQL version, benchstat version and the exact command.
+
+Measured on the development laptop (14 November 2026): commit `bde45f8` (merged as `5ac0740`), go1.27.0 (X:nodwarf5), Linux 6.12.108 (Manjaro), Intel Core i5-8265U (4 cores, 8 threads), PostgreSQL 17.11 in Docker, benchstat `golang.org/x/perf v0.0.0-20261009192801-be2c69fb417e`, `./scripts/bench.sh` (10 runs each):
+
+| Benchmark | Time per operation | Memory, allocations |
+|---|---|---|
+| `ClaimAndComplete` | 4.18 ms ± 14% | 5.0 KiB, 108 |
+| `RelayPass` (100 rows) | 19.97 ms ± 7% | 113.5 KiB, 2109 |
+| `MemoryStoreGet`, 1 reader | `RLock` 224.7 ns ± 1%, `Lock` 244.8 ns ± 1%: `Lock` 9% slower (p = 0.000) | |
+| `MemoryStoreGet`, 8 readers | `RLock` 152.7 ns ± 3%, `Lock` 657.2 ns ± 46%: `Lock` 4.3 times slower (p = 0.000) | |
+
+- `ClaimAndComplete` is the pair, round trips included: about 240 jobs per second for one worker with the database otherwise idle. It doesn't say how the time splits between `Claim` and `Complete`.
+- `RelayPass` moves 100 jobs in 20 ms, about 5000 per second: far above any load test so far, so the relay isn't the limit.
+- In the development sandbox, a different machine with PostgreSQL outside Docker, `ClaimAndComplete` took about 0.9 ms. Slower commits through Docker on the laptop are a likely reason for the gap, not a measured one; the hardware differs too.
+- The Phase 2 question, answered: with one reader `RLock` saves a little; with eight, readers overlap under `RLock` and queue under `Lock`. `MemoryStore` is used by tests only, so this changes nothing in production.
 
 ### Finding slow tests
 
