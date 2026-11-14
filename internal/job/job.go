@@ -6,10 +6,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/netip"
 	"net/url"
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/work-frame/goflow/internal/egress"
 )
 
 // MaxTitleLength is the maximum number of characters allowed in a job title.
@@ -103,6 +106,9 @@ func ValidateWebhook(w Webhook) error {
 	if u.Fragment != "" || strings.Contains(w.URL, "#") {
 		return Invalidf("webhook.url must not contain a #fragment")
 	}
+	if !publicHost(u.Hostname()) {
+		return Invalidf("webhook.url points at a private, loopback or reserved address")
+	}
 	if len(w.Body) == 0 {
 		return Invalidf("webhook.body is required")
 	}
@@ -113,6 +119,18 @@ func ValidateWebhook(w Webhook) error {
 		return Invalidf("webhook.body must be JSON")
 	}
 	return nil
+}
+
+// publicHost refuses the hosts that can be refused without DNS: an IP
+// address that egress.Allowed rejects, and localhost names. A name that
+// resolves to a private address passes here and is refused when the worker
+// connects (internal/egress), the check that counts.
+func publicHost(host string) bool {
+	if ip, err := netip.ParseAddr(host); err == nil {
+		return egress.Allowed(ip)
+	}
+	h := strings.ToLower(strings.TrimSuffix(host, "."))
+	return h != "localhost" && !strings.HasSuffix(h, ".localhost")
 }
 
 // ValidateMaxAttempts accepts 1 to MaxMaxAttempts.

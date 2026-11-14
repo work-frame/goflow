@@ -328,6 +328,26 @@ A handler is the function that does a job's work (`worker.Handler`). The pool ca
 
 These are a contract, not something the pool enforces. Tests for each job type should check them: a cancelled context makes the handler return, a second run is harmless.
 
+## Outgoing requests: `internal/egress`
+
+Webhooks send requests to URLs GoFlow's users choose. Without care that is server-side request forgery (SSRF): a user points a webhook at `https://169.254.169.254/` (a cloud provider's metadata service, which hands out credentials), `localhost:5432`, or a private address only GoFlow's own network can reach, and GoFlow makes the request for them. `egress.NewClient` is the only client that may talk to such URLs.
+
+```text
+create   job.ValidateWebhook: https, port 443, no user:password, no #fragment,
+         not localhost, not a blocked IP literal              (cheap, but DNS can change later)
+connect  dialer: resolve the name ONCE
+         any address not egress.Allowed  -> refuse the whole name, connect to nothing
+         connect to the checked IPs themselves, never to the name again
+socket   net.Dialer.Control: the socket refuses a blocked address anyway (last line)
+request  no proxy (HTTPS_PROXY ignored), redirects never followed, TLS 1.2+ with
+         the system's roots, 10 s for the whole request, response headers <= 16 KiB
+```
+
+- **Allowed** means public unicast. Refused: loopback, private (10/8, 172.16/12, 192.168/16, fc00::/7), link-local (169.254/16 with the metadata address, fe80::/10), multicast, unspecified, 0/8, 100.64/10, the documentation and benchmarking ranges, 240/4, and the IPv6 forms that wrap an IPv4 address (`::ffff:a.b.c.d`, `::a.b.c.d`, NAT64, 6to4), judged as the IPv4 address inside.
+- **The check runs on every connection**, because a name's DNS answer can change between the job's creation and its delivery, or between two attempts (DNS rebinding). A name with one public and one private address is refused as a whole: misconfigured or an attack, and either way not half-trusted.
+- **Tests** reach a local HTTPS server with `egress.NewTestClient`, which takes a `testing.TB` and extra allowed ranges and a port. `TestOnlyTestsUseTheTestClient` fails if any non-test file uses it.
+- A `BlockedError` names the refused address or port, never the URL, whose path may hold a token.
+
 ## Metrics: `internal/metrics`
 
 `GET /metrics` serves Prometheus's text format: GoFlow's own metrics plus Go's (goroutines, memory, GC) and the process's (CPU, open files).
@@ -418,6 +438,7 @@ golang:1.27-trixie                         gcr.io/distroless/static-debian13:non
 | `internal/events` | The hub and the publisher with fakes for Redis: owner-only delivery, slow clients dropped, publishing that never blocks, tickets working once and stored as hashes, and delivery health with each half of the canary's path broken on its own |
 | `internal/database` | Real PostgreSQL. `TestMain` migrates one template database per run, and each test copies it. Lease races (a late `Complete` or `Renew` against `Reclaim`) run 30 rounds each. The 77 tests with their own copy run in parallel (Task 53); each copy gets 3 connections, and a test that waits for one fails unless it asked for more (`withConns`) or queues on purpose (`expectConnWaits`, the case 26 deadlock test). The four tests that need 5 to 20 connections at once stay sequential, so their pools never add up with the parallel ones (case 50). On the development laptop the package went from about 17 s to about 5.5 s. Benchmarks time one job's `Claim` and `Complete` together and one 100-row relay pass, each on its own copy, and fail if a write is refused (case 54) |
 | `cmd/api` | End to end: the real server on `127.0.0.1:0`, including jobs surviving a restart, sign-up, sessions, settings validation, `/metrics` after a job's whole life, live delivery pausing and resuming with Redis behind a TCP proxy the test can cut, three API instances with workers sharing one database and Redis, and two worker pools racing over one lease. Clients come from `testClient`, which closes its idle connections before the server stops; otherwise an unused spare connection makes `Shutdown` wait about 5 s (FAILURES.md, case 48). Test servers' workers wait 1 s per take, not the production 2 s, so stopping one doesn't wait out a 2 s take (case 49). Every test has its own copy of a migrated template database and its own Redis queue keys and events channel, shared by that test's servers only; production keeps `goflow:jobs:*` and `goflow:events` (case 51). Tests run in parallel except seven that measure time or depend on when something happens (`timingTests` in `parallel_test.go`); those run first, alone, and fail if a parallel test ran while they did (case 52) |
+| `internal/egress` | The address policy over every refused range and its IPv6 disguises; the dialer with a fake resolver: one blocked address refuses the name before any connection (case 58), the connection goes to the checked IP after one lookup, a second connection is checked again (rebinding), blocked literals and ports never reach the resolver; the socket's own check; against a local HTTPS server: redirects returned, not followed, and the 10 s limit covering a body that never ends |
 | `.github/workflows/ci.yml` | `cmd/api/ci_test.go` reads the workflow: actions pinned to commit SHAs, a read-only token, no secrets, the same database images as `compose.yaml` and the same Go minor version as the Dockerfile (case 55). The workflow itself is tested by running: its first green run is on its own pull request |
 | `internal/loadgen`, `cmd/loadgen` | Only addresses on this machine are accepted, and a remote API is refused before anything is sent. Jobs finish through polling alone, with no events at all. Against a real test server, a job that never finishes is listed by ID and the run counts as failed (case 53). The load itself is measured by hand, never in `check.sh` (DEVELOPMENT.md, Load testing and Benchmarks) |
 
@@ -465,6 +486,7 @@ Everything runs with the race detector (`./scripts/check.sh`). Tests that need P
 | Request context carried into every query | A disconnected client stops its query |
 | Tests never use the development database | Tests can't damage dev data, or depend on it |
 | `main` protected with no bypass: pull requests only, `check` and `govulncheck` required, branch up to date, 0 approvals; Render deploys after checks pass | Nothing untested reaches `main` or production, including from the administrator. Approvals would need a second person |
+| User-chosen URLs only through `internal/egress`: checked per connection on the IP actually dialed, all addresses of a name or none | A check at creation can't hold against DNS rebinding; trusting the good half of a mixed answer would let the bad half through on the next connection |
 | CI: GitHub Actions, actions pinned to commit SHAs, a read-only token and no secrets | A tag can be moved to other code by whoever owns it; a SHA can't. CI only needs to read the code and test it against throwaway services, so it gets nothing else |
 
 ## Known limitations
