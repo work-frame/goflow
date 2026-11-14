@@ -15,11 +15,13 @@ import (
 	"github.com/work-frame/goflow/internal/api"
 	"github.com/work-frame/goflow/internal/auth"
 	"github.com/work-frame/goflow/internal/database"
+	"github.com/work-frame/goflow/internal/egress"
 	"github.com/work-frame/goflow/internal/events"
 	"github.com/work-frame/goflow/internal/metrics"
 	"github.com/work-frame/goflow/internal/queue"
 	"github.com/work-frame/goflow/internal/ratelimit"
 	"github.com/work-frame/goflow/internal/relay"
+	"github.com/work-frame/goflow/internal/webhook"
 	"github.com/work-frame/goflow/internal/worker"
 )
 
@@ -96,6 +98,23 @@ func run(ctx context.Context, logger *slog.Logger, cfg config, ready func(addr s
 	} else {
 		logger.Info("database schema up to date")
 	}
+
+	// Every stored signing secret must be readable with the loaded keys, or
+	// the API doesn't start: losing them silently would break every user's
+	// webhooks (Task 65, K4). Secrets under an old key move to the current
+	// one here, which is how a key rotation completes.
+	secretStore := database.NewSecretStore(db, cfg.Secrets)
+	moved, err := secretStore.Reencrypt(ctx)
+	if err != nil {
+		return err
+	}
+	logger.Info("secrets key loaded", "key_id", cfg.Secrets.CurrentID(), "secrets_reencrypted", moved)
+	attemptStore := database.NewAttemptStore(db)
+	webhookClient := cfg.WebhookClient
+	if webhookClient == nil {
+		webhookClient = egress.NewClient()
+	}
+	deliverer := &webhook.Deliverer{Client: webhookClient, Secrets: secretStore, Attempts: attemptStore, Logger: logger}
 
 	// The queue is optional until workers exist (Phase 6). Without it, jobs
 	// and their outbox rows are saved and wait until a relay runs.
@@ -193,7 +212,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg config, ready func(addr s
 			pool := &worker.Pool{
 				Queue:        q,
 				Store:        work,
-				Handle:       worker.Handlers(cfg.SimulatedWork),
+				Handle:       worker.Handlers(cfg.SimulatedWork, deliverer.Handle),
 				JobTimeout:   jobTimeout,
 				Logger:       logger,
 				Workers:      cfg.Workers,
@@ -253,6 +272,8 @@ func run(ctx context.Context, logger *slog.Logger, cfg config, ready func(addr s
 		Metrics:            m,
 		MetricsToken:       cfg.MetricsToken,
 		ClientIPHeader:     cfg.ClientIPHeader,
+		WebhookSecrets:     secretStore,
+		WebhookAttempts:    attemptStore,
 	}
 	// Only a real relay goes into the interface. Assigning a nil *relay.Relay
 	// would make deps.Relay != nil (an interface holding a nil pointer is not

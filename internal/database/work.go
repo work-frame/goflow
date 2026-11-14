@@ -61,6 +61,10 @@ type Claimed struct {
 	MaxAttempts int
 	Title       string
 	Type        job.Type
+	// UserID owns the job: a webhook is signed with the owner's secret.
+	UserID string
+	// Webhook is a webhook job's URL and body; nil for other types.
+	Webhook *job.Webhook
 	// LeaseToken must accompany every later write for this attempt.
 	LeaseToken string
 	// LeaseExpires is when the lease runs out unless renewed, on the
@@ -92,13 +96,14 @@ var ErrLeaseLost = errors.New("lease lost: the job is not processing under this 
 func (s *WorkStore) Claim(ctx context.Context, id string, leaseFor time.Duration) (c Claimed, ok bool, err error) {
 	token := rand.Text() // 26 characters, 130 random bits
 	var expires time.Time
+	var body []byte
 	var j *job.Job
 	j, err = scanJobAnd(s.db.QueryRowContext(ctx,
 		`UPDATE jobs SET version = version + 1, status = 'processing', attempts = attempts + 1, next_attempt_at = NULL,
 		        lease_token = $2, lease_expires_at = now() + make_interval(secs => $3),
 		        updated_at = GREATEST(now(), created_at)
 		 WHERE id = $1 AND status IN ('pending', 'queued', 'retrying')
-		 RETURNING `+jobColumns+`, lease_expires_at`, id, token, leaseFor.Seconds()), &expires)
+		 RETURNING `+jobColumns+`, lease_expires_at, payload->'body'`, id, token, leaseFor.Seconds()), &expires, &body)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Claimed{}, false, nil // finished, dead, deleted or someone else's
 	}
@@ -106,8 +111,12 @@ func (s *WorkStore) Claim(ctx context.Context, id string, leaseFor time.Duration
 		return Claimed{}, false, fmt.Errorf("database: claim job %s: %w", id, err)
 	}
 	notifyChanged(ctx, s.notify, j)
-	return Claimed{Attempt: j.Attempts, MaxAttempts: j.MaxAttempts, Title: j.Title, Type: j.Type,
-		LeaseToken: token, LeaseExpires: expires.UTC()}, true, nil
+	c = Claimed{Attempt: j.Attempts, MaxAttempts: j.MaxAttempts, Title: j.Title, Type: j.Type, UserID: j.UserID,
+		LeaseToken: token, LeaseExpires: expires.UTC()}
+	if j.Webhook != nil {
+		c.Webhook = &job.Webhook{URL: j.Webhook.URL, Body: body}
+	}
+	return c, true, nil
 }
 
 // Renew extends the lease to leaseFor from now (the database's now) and

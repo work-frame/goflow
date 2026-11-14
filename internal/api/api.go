@@ -94,6 +94,12 @@ type Deps struct {
 	// connection's address and every header a proxy might put the client's
 	// address in. For finding out which one to trust (Phase 9); off normally.
 	LogIPHeaders bool
+
+	// WebhookSecrets keeps users' signing secrets. nil: webhook jobs and
+	// the secret endpoint answer 503.
+	WebhookSecrets WebhookSecrets
+	// WebhookAttempts lists delivery attempts. nil: the endpoint answers 503.
+	WebhookAttempts WebhookAttempts
 }
 
 // NewRouter returns the HTTP handler for the whole API, wrapped in middleware.
@@ -101,7 +107,8 @@ type Deps struct {
 // Request flow, outermost first:
 // withRequestID → logRequests → recordMetrics → recoverPanics → jsonMuxErrors → mux → handler
 func NewRouter(d Deps) http.Handler {
-	h := &handler{store: d.Jobs, relay: d.Relay, live: d.Live, heartbeat: d.StreamHeartbeat, users: d.Users, sessions: d.Sessions, hasher: d.Hasher, db: d.DB, logger: d.Logger, registrationClosed: d.RegistrationClosed, limiter: d.Limiter, clientIPHeader: d.ClientIPHeader, metrics: d.Metrics}
+	h := &handler{store: d.Jobs, relay: d.Relay, live: d.Live, heartbeat: d.StreamHeartbeat, users: d.Users, sessions: d.Sessions, hasher: d.Hasher, db: d.DB, logger: d.Logger, registrationClosed: d.RegistrationClosed, limiter: d.Limiter, clientIPHeader: d.ClientIPHeader, metrics: d.Metrics,
+		secrets: d.WebhookSecrets, attempts: d.WebhookAttempts}
 	h.prepareDummyHash()
 
 	mux := http.NewServeMux()
@@ -121,6 +128,8 @@ func NewRouter(d Deps) http.Handler {
 	mux.HandleFunc("GET /api/v1/jobs/{id}", h.requireSession(h.getJob))
 	mux.HandleFunc("DELETE /api/v1/jobs/{id}", h.requireSession(h.deleteJob))
 	mux.HandleFunc("POST /api/v1/jobs/{id}/retry", h.requireSession(h.retryJob))
+	mux.HandleFunc("GET /api/v1/jobs/{id}/attempts", h.requireSession(h.listAttempts))
+	mux.HandleFunc("POST /api/v1/webhook-secret", h.requireSession(h.rotateSecret))
 	mux.HandleFunc("POST /api/v1/events/ticket", h.requireSession(h.createTicket))
 	// No requireSession: a browser's EventSource can't send the
 	// Authorization header, so the stream authenticates with a ticket.
@@ -161,6 +170,9 @@ type handler struct {
 	limiter            RateLimiter // nil: no limits
 	metrics            *metrics.Metrics
 	clientIPHeader     string
+
+	secrets  WebhookSecrets  // nil: webhooks unavailable
+	attempts WebhookAttempts // nil: attempts unavailable
 }
 
 // dbContext derives a storage context from the request: it ends when the client
@@ -319,6 +331,12 @@ func (h *handler) createJob(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := dbContext(r)
 	defer cancel()
+
+	// A webhook is always signed, so its owner needs a secret first
+	// (Task 65, decision K6).
+	if j.Type == job.TypeWebhook && !h.requireSecret(ctx, w, r) {
+		return
+	}
 
 	// The owner always comes from the session, never from the request body.
 	j.UserID = callerID(r)

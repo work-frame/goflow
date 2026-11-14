@@ -86,6 +86,10 @@ type Run struct {
 	Title   string
 	Type    job.Type
 	Attempt int // 1 for the first run
+	// UserID owns the job.
+	UserID string
+	// Webhook is a webhook job's URL and body; nil for other types.
+	Webhook *job.Webhook
 }
 
 // Handler does the work for one attempt. ctx carries the job's deadline
@@ -354,7 +358,7 @@ func (p *Pool) process(ctx context.Context, log *slog.Logger, id string) {
 	}()
 
 	start := time.Now()
-	err = p.runHandler(runCtx, Run{JobID: id, Title: claimed.Title, Type: claimed.Type, Attempt: claimed.Attempt}, log)
+	err = p.runHandler(runCtx, Run{JobID: id, Title: claimed.Title, Type: claimed.Type, Attempt: claimed.Attempt, UserID: claimed.UserID, Webhook: claimed.Webhook}, log)
 	took := time.Since(start)
 	close(stopBeat)
 	<-beatDone

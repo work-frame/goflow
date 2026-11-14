@@ -1,10 +1,12 @@
 package api
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/work-frame/goflow/internal/job"
 )
@@ -124,5 +126,76 @@ func TestSameJSONComparesNumbersExactly(t *testing.T) {
 		if got := sameJSON([]byte(c.a), []byte(c.b)); got != c.want {
 			t.Errorf("sameJSON(%s, %s) = %v, want %v", c.a, c.b, got, c.want)
 		}
+	}
+}
+
+// fakeSecrets stands in for database.SecretStore.
+type fakeSecrets struct {
+	has     bool
+	rotated int
+}
+
+func (f *fakeSecrets) Has(context.Context, string) (bool, error) { return f.has, nil }
+func (f *fakeSecrets) Rotate(context.Context, string) (string, time.Time, error) {
+	f.rotated++
+	f.has = true
+	if f.rotated == 1 {
+		return "whsec_first", time.Time{}, nil
+	}
+	return "whsec_second", time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC), nil
+}
+
+// fakeAttempts stands in for database.AttemptStore.
+type fakeAttempts struct{ list []job.Attempt }
+
+func (f *fakeAttempts) List(_ context.Context, _, jobID string) ([]job.Attempt, error) {
+	if jobID != "known" {
+		return nil, job.ErrNotFound
+	}
+	return f.list, nil
+}
+
+// Decision K6: no signing secret, no webhook job; demo jobs don't care.
+func TestWebhookJobNeedsASigningSecret(t *testing.T) {
+	h := signedIn(Deps{Jobs: newTestStore(), DB: okPinger, Logger: discardLogger(), WebhookSecrets: &fakeSecrets{}})
+	rec := do(t, h, http.MethodPost, "/api/v1/jobs", webhookCreate)
+	if msg := decode[map[string]string](t, rec)["error"]; rec.Code != http.StatusBadRequest || !strings.Contains(msg, "POST /api/v1/webhook-secret") {
+		t.Errorf("without a secret: %d %q, want 400 pointing at POST /api/v1/webhook-secret", rec.Code, msg)
+	}
+	mustCreate(t, h, "sleep:1s")
+
+	none := signedIn(Deps{Jobs: newTestStore(), DB: okPinger, Logger: discardLogger()})
+	if rec := do(t, none, http.MethodPost, "/api/v1/jobs", webhookCreate); rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("server without webhooks: %d, want 503", rec.Code)
+	}
+}
+
+func TestRotateSecretShowsItOnce(t *testing.T) {
+	f := &fakeSecrets{}
+	h := signedIn(Deps{Jobs: newTestStore(), DB: okPinger, Logger: discardLogger(), WebhookSecrets: f})
+
+	rec := do(t, h, http.MethodPost, "/api/v1/webhook-secret", "")
+	if rec.Code != http.StatusCreated || rec.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("first: %d, Cache-Control %q; want 201 and no-store", rec.Code, rec.Header().Get("Cache-Control"))
+	}
+	if body := rec.Body.String(); !strings.Contains(body, `"secret":"whsec_first"`) || strings.Contains(body, "previous_valid_until") {
+		t.Errorf("first: %s, want the secret and no previous", body)
+	}
+
+	rec = do(t, h, http.MethodPost, "/api/v1/webhook-secret", "")
+	if !strings.Contains(rec.Body.String(), `"previous_valid_until":"2026-11-15T12:00:00Z"`) {
+		t.Errorf("rotation: %s, want when the previous secret stops signing", rec.Body)
+	}
+}
+
+func TestListAttempts(t *testing.T) {
+	a := &fakeAttempts{list: []job.Attempt{{Attempt: 1, Outcome: job.OutcomeRetry, StatusCode: 503, Error: "webhook: receiver answered 503"}}}
+	h := signedIn(Deps{Jobs: newTestStore(), DB: okPinger, Logger: discardLogger(), WebhookAttempts: a})
+	rec := do(t, h, http.MethodGet, "/api/v1/jobs/known/attempts", "")
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"status_code":503`) {
+		t.Errorf("known job: %d %s", rec.Code, rec.Body)
+	}
+	if rec := do(t, h, http.MethodGet, "/api/v1/jobs/other/attempts", ""); rec.Code != http.StatusNotFound {
+		t.Errorf("someone else's job: %d, want 404", rec.Code)
 	}
 }

@@ -20,7 +20,7 @@ I'm building it to learn production Go: the standard library first, then HTTP, P
 - **Phase 12 (done):** distributed workers. A claimed job is held under a lease (a token valid for 30 s on PostgreSQL's clock, renewed every 10 s while the job runs), and only the current token can record a result. A reaper takes back jobs whose lease ran out. Any number of worker processes can share one database and one Redis; the Compose stack runs three worker containers from the API's image, and a SIGKILL test shows a killed worker's jobs coming back on another worker only after their leases run out ([DEVELOPMENT.md](DEVELOPMENT.md#crash-test-kill-a-worker-mid-job)). `./scripts/check.sh` refuses to run unless the PostgreSQL and Redis tests can run too, because a skipped test prints `ok`.
 - **Phase 13 (done):** integration and load testing. Found first: the end-to-end tests that sometimes took 5.4 s were waiting for an HTTP connection the client never used ([FAILURES.md](FAILURES.md), case 48). Then: test servers' workers wait 1 s in Redis instead of the production 2 s, so stopping each one no longer waits out a 2 s take (case 49; `cmd/api` about 40 s → 32 s). The database tests now run in parallel, each on its own copy with 3 connections (case 50). Each end-to-end test now has its own database, Redis queue keys and events channel (case 51), and they run in parallel, except seven that measure time (case 52). `cmd/loadgen` and `scripts/loadtest.sh` measure jobs per second on the local stack with 1, 3 and 6 worker containers (DEVELOPMENT.md, Load testing). On the development laptop, with 2000-job runs, six workers finished about 720 jobs per second and fell behind the API; twelve kept up with it at about 900, so their own limit wasn't reached (DEVELOPMENT.md, Load testing). An earlier 500-job run had twelve slower than six; the longer runs didn't repeat that. `scripts/bench.sh` benchmarks one job's database writes (about 4.2 ms for a claim and completion on the laptop), one relay pass (20 ms for 100 rows), and the old Lock-versus-RLock question: with eight readers `Lock` is 4.3 times slower (DEVELOPMENT.md, Benchmarks).
 - **Phase 14 (done):** CI/CD. GitHub Actions runs `./scripts/check.sh` with PostgreSQL and Valkey, and `govulncheck`, on every pull request and every push to `main` (DEVELOPMENT.md, CI). `main` accepts only pull requests that passed both, with no bypass, and Render deploys a commit only after CI passed on it (DEPLOYMENT.md, Deploys wait for CI).
-- **Phase 15 (in progress):** webhook delivery. A job can now be a `webhook` job: an HTTPS URL on port 443 and a JSON body of up to 64 KiB, stored with the job (see Job types below). Nothing is sent yet: until delivery is built, a webhook job ends `dead` with `no handler for job type "webhook"`. `internal/egress` is the HTTP client that will send them: it connects only to public addresses on port 443, checked on the exact IP it connects to, with no proxy, no redirects and 10 seconds for the whole request. Next: signed delivery with retries.
+- **Phase 15 (in progress):** webhook delivery. A `webhook` job POSTs a JSON body to an HTTPS URL, signed the [Standard Webhooks](https://www.standardwebhooks.com) way with the owner's signing secret, retried on timeouts, `408`, `429` and `5xx`, and buried on other answers. Every attempt is recorded. Requests only reach public addresses on port 443 (`internal/egress`). Signing secrets are stored encrypted with a master key Render generates. Next: the CLI and dashboard, then a live delivery to a receiver you run.
 
 ## Requirements
 
@@ -83,6 +83,8 @@ The server stops on `Ctrl+C` or `SIGTERM`, finishing in-flight requests first (u
 | `GET` | `/api/v1/jobs` | `200 {"jobs":[...]}`, your jobs only (needs token) | `400` invalid `status` filter, `401` |
 | `GET` | `/api/v1/jobs/{id}` | `200` + job (needs token) | `401`, `404` |
 | `DELETE` | `/api/v1/jobs/{id}` | `204`, no body (needs token) | `401`, `404` |
+| `GET` | `/api/v1/jobs/{id}/attempts` | `200 {"attempts":[...]}`: a webhook job's delivery attempts, oldest first (needs token) | `401`, `404` |
+| `POST` | `/api/v1/webhook-secret` | `201 {"secret":"whsec_..."}`, shown once; after a rotation also `previous_valid_until` (needs token) | `401` |
 | `POST` | `/api/v1/jobs/{id}/retry` | `200` + job, back to `pending` with 0 attempts (needs token) | `401`, `404`, `409` job isn't `dead` or `failed` |
 | `POST` | `/api/v1/events/ticket` | `201 {"ticket","expires_in":30}`: opens one event stream, once, within 30 s (needs token) | `401`, `429`, `503` no Redis |
 | `GET` | `/api/v1/events?ticket=…` | `200`, a Server-Sent Events stream of your jobs' changes (see below) | `401` missing, unknown, expired or used ticket, `503` no Redis |
@@ -104,7 +106,7 @@ Every job belongs to the user who created it. Users only ever see their own jobs
 | `type` | What it does | Extra fields |
 |---|---|---|
 | `demo` (default) | Test behaviour picked by the title: `sleep:3s`, `fail`, `fail:permanent`, `flaky:2`, `hang` | none |
-| `webhook` | POSTs `body` to `url` (Phase 15; not sent yet) | `webhook.url`: `https://` on port 443, no username or password, no `#fragment`, at most 2,048 bytes, not `localhost` or a private, loopback or reserved IP address. `webhook.body`: any JSON value, at most 64 KiB |
+| `webhook` | POSTs `body` to `url`, signed (see Receiving webhooks); needs a signing secret first | `webhook.url`: `https://` on port 443, no username or password, no `#fragment`, at most 2,048 bytes, not `localhost` or a private, loopback or reserved IP address. `webhook.body`: any JSON value, at most 64 KiB |
 
 Any job may set `max_attempts`, 1 to 10 (default 3).
 
@@ -113,6 +115,28 @@ Any job may set `max_attempts`, 1 to 10 (default 3).
 ```
 
 `GET /api/v1/jobs/{id}` returns the webhook with its body. Lists and live events show the type and URL but leave the body out. With an `Idempotency-Key`, a second create must ask for the same work (title, type, URL, body and `max_attempts`) or it answers `422`; the body is compared as JSON, so spacing, key order and `1e2` versus `100` don't count as differences.
+
+### Receiving webhooks
+
+Create a signing secret once (`POST /api/v1/webhook-secret`, shown only in that response), give it to your receiver, then create webhook jobs. Each attempt is one `POST` with:
+
+| Header | Value |
+|---|---|
+| `webhook-id` | the job's ID: the same on every attempt and re-run of that job |
+| `webhook-timestamp` | when the attempt was signed, in Unix seconds |
+| `webhook-signature` | `v1,<base64 HMAC-SHA256>` over `<webhook-id>.<webhook-timestamp>.<body>`, keyed with the secret's bytes; during a rotation, two of them separated by a space |
+
+This is the [Standard Webhooks](https://www.standardwebhooks.com) format, so its libraries can verify it. A receiver should reject a stale timestamp and **remember the `webhook-id`s it has processed**, in the same transaction as the work: delivery is at least once, and an attempt whose `2xx` GoFlow never recorded (a crash, a timeout) is sent again.
+
+| Receiver's answer | What GoFlow does |
+|---|---|
+| `2xx` | done: `completed` |
+| `408`, `429`, `5xx`, a timeout (10 s for the whole request), a refused or reset connection | retries with backoff, up to `max_attempts` |
+| `3xx` (never followed), other `4xx`, a private or reserved address, a bad certificate, no signing secret | `dead` at once |
+
+`GET /api/v1/jobs/{id}/attempts` lists each attempt: when it started, how long it took, the status code, the outcome and a short error. Bodies of answers are read up to 64 KiB and never stored.
+
+**Rotating your signing secret:** `POST /api/v1/webhook-secret` again. The previous secret keeps signing, next to the new one, for 24 hours (`previous_valid_until`), so your receiver can switch without missing a delivery. Which secrets sign is decided when each attempt is sent: a retry after those 24 hours carries only the new signature. Rotating twice within 24 hours drops the oldest at once.
 
 ### Examples
 
@@ -298,6 +322,8 @@ internal/worker/       pool of goroutines that take job IDs off the queue and ru
 internal/loadgen/      creates jobs, follows them to completion, and reports rate and percentiles
 internal/urlcheck/     TLS rules for database and Redis URLs, shared by the API and the worker
 internal/egress/       the HTTP client for user-chosen URLs: public addresses on port 443 only (SSRF protection)
+internal/secrets/      AES-256-GCM encryption of stored secrets under GOFLOW_SECRETS_KEY, with key rotation
+internal/webhook/      webhook delivery: signing, one POST per attempt, outcomes, attempt records
 cmd/worker/            worker entry point
 cmd/loadgen/           load generator for the local stack (refuses any other API)
 scripts/               development scripts, and the SQL compose's PostgreSQL runs once

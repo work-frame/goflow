@@ -3,11 +3,13 @@ package main
 import (
 	"errors"
 	"fmt"
+	"net/http"
 	"strconv"
 	"time"
 
 	"github.com/work-frame/goflow/internal/auth"
 	"github.com/work-frame/goflow/internal/metrics"
+	"github.com/work-frame/goflow/internal/secrets"
 	"github.com/work-frame/goflow/internal/urlcheck"
 )
 
@@ -71,6 +73,13 @@ type config struct {
 	// (goflow:events). Set separately from RedisKeyPrefix: Pub/Sub channels
 	// aren't keys, so moving the keys doesn't move the channel (Task 54).
 	EventsChannel string
+	// Secrets encrypts webhook signing secrets: GOFLOW_SECRETS_KEY, and
+	// GOFLOW_SECRETS_OLD_KEYS during a rotation. Required (Task 65, K2).
+	Secrets *secrets.Keyring
+	// WebhookClient sends webhooks. Not read from the environment: nil
+	// means egress.NewClient(). Tests set egress.NewTestClient, which can
+	// reach their local receiver.
+	WebhookClient *http.Client
 }
 
 // loadConfig reads the API settings through getenv (os.Getenv in production,
@@ -168,6 +177,12 @@ func loadConfig(getenv func(string) string) (config, error) {
 		} else {
 			cfg.MetricsToken = t
 		}
+	}
+
+	if kr, err := secrets.ParseKeys(getenv("GOFLOW_SECRETS_KEY"), getenv("GOFLOW_SECRETS_OLD_KEYS")); err != nil {
+		errs = append(errs, err)
+	} else {
+		cfg.Secrets = kr
 	}
 
 	switch v := getenv("GOFLOW_LOG_IP_HEADERS"); v {

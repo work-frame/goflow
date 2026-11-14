@@ -404,6 +404,32 @@ The two merges before it started deploying in the minute they were merged, while
 - **Check after the deploy:** `goflow-api` → **Environment** lists `GOFLOW_SECRETS_KEY`. Don't reveal it, copy it or take a screenshot of that page: there is nothing to do with the value.
 - **Never delete or regenerate it.** It encrypts every user's signing secret; without it they can't be read. Rotation keeps the old key until everything is re-encrypted (documented with Task 65b).
 
+## Webhook delivery (Task 65b)
+
+From this deploy the API refuses to start without `GOFLOW_SECRETS_KEY` (Task 65a created it). Migration 0012 adds `webhook_secrets` and `webhook_attempts`.
+
+- **Check after the deploy:** the runtime log shows `secrets key loaded key_id=<8 hex characters> secrets_reencrypted=0`. The key ID is a hash prefix, safe to log; the key itself never appears.
+- A first webhook needs a receiver you control: Task 67.
+
+### Rotating the secrets key
+
+Only if it may have leaked. Never delete `GOFLOW_SECRETS_KEY` or press "Generate" on it: every signing secret would become unreadable, and the API would refuse to start (which is how you'd find out).
+
+1. Generate a new key on your machine: `head -c 32 /dev/urandom | base64`. It prints once; don't paste it anywhere but the next step.
+2. In Render, `goflow-api` → **Environment**: copy the current `GOFLOW_SECRETS_KEY` value into a new variable `GOFLOW_SECRETS_OLD_KEYS` (several old keys: comma-separated), then replace `GOFLOW_SECRETS_KEY` with the new one. Save; Render redeploys.
+3. The log shows `secrets key loaded key_id=<new ID> secrets_reencrypted=<number of users with a secret>`: everything is now under the new key.
+4. Then delete `GOFLOW_SECRETS_OLD_KEYS` and let it redeploy. The log shows `secrets_reencrypted=0`.
+
+If step 2 is skipped or the old key is wrong, the deploy fails with `webhook secrets are encrypted with keys that aren't loaded (key ID: secrets): map[<old ID>:<count>]`, and the previous deploy keeps serving. Put the old key back in `GOFLOW_SECRETS_OLD_KEYS` and deploy again. Users' signing secrets don't change in a key rotation; only their encryption does.
+
+### Users rotating their signing secret
+
+`POST /api/v1/webhook-secret` again. The previous secret signs next to the new one for 24 hours, by PostgreSQL's clock, and the response says until when (`previous_valid_until`).
+
+- **Jobs already queued** are signed when each attempt is sent, not when the job was created: within the 24 hours with both secrets, after them with the new one only. A receiver that hasn't switched within 24 hours rejects those attempts; GoFlow retries them like any other failure, and they end `dead` when the attempts run out.
+- **The previous secret retires** at `rotated_at` + 24 hours. Nothing deletes it; deliveries simply stop using it, and the next rotation overwrites it.
+- **Two rotations within 24 hours:** the second one's "previous" is the first one's new secret; the oldest stops signing at once.
+
 ## Rolling back
 
 Render keeps previous deploys. In the dashboard: `goflow-api` → **Deploys** → pick the last good one → **Rollback**. A rollback doesn't undo migrations, so a migration must keep working with the code before it (add columns before using them, drop them a release later).

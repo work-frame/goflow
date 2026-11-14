@@ -16,7 +16,7 @@ func newTestStore() JobStore { return memStore{m: job.NewMemoryStore()} }
 func discardLogger() *slog.Logger { return slog.New(slog.DiscardHandler) }
 
 func newRouter() http.Handler {
-	return signedIn(Deps{Jobs: newTestStore(), DB: okPinger, Logger: discardLogger()})
+	return signedIn(Deps{Jobs: newTestStore(), DB: okPinger, Logger: discardLogger(), WebhookSecrets: &fakeSecrets{has: true}})
 }
 
 // do sends a request to h and returns the recorded response.
