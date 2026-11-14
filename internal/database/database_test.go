@@ -8,7 +8,7 @@ import (
 )
 
 // testDatabaseURL returns the test database URL, or skips the test if it isn't set.
-func testDatabaseURL(t *testing.T) string {
+func testDatabaseURL(t testing.TB) string {
 	t.Helper()
 	url := os.Getenv("GOFLOW_TEST_DATABASE_URL")
 	if url == "" {

@@ -15,11 +15,18 @@
 #
 #   ./scripts/loadtest.sh                 # 500 jobs, 3 runs per step
 #   GOFLOW_LOADTEST_JOBS=100 GOFLOW_LOADTEST_RUNS=1 ./scripts/loadtest.sh
+#   GOFLOW_LOADTEST_CONTAINERS="3 6" GOFLOW_LOADTEST_JOBS=2000 GOFLOW_LOADTEST_STATS=1 ./scripts/loadtest.sh
+#
+# GOFLOW_LOADTEST_STATS=1 takes one `docker stats` reading of every
+# container's CPU half a second into each run: one sample, a clue, not a
+# measurement. Use enough jobs that a run lasts a few seconds.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 jobs=${GOFLOW_LOADTEST_JOBS:-500}
 runs=${GOFLOW_LOADTEST_RUNS:-3}
+steps=${GOFLOW_LOADTEST_CONTAINERS:-1 3 6}
+stats=${GOFLOW_LOADTEST_STATS:-0}
 
 go build -o bin/loadgen ./cmd/loadgen
 
@@ -45,7 +52,7 @@ started_pools() {
 	docker compose logs --no-log-prefix api worker 2>/dev/null | grep -c 'msg="worker pool started"' || true
 }
 
-for containers in 1 3 6; do
+for containers in $steps; do
 	echo "==> $containers worker container(s), API workers off"
 	GOFLOW_API_WORKERS=0 docker compose up -d --wait --force-recreate --scale worker="$containers" api worker
 
@@ -66,7 +73,17 @@ for containers in 1 3 6; do
 	for run in $(seq "$runs"); do
 		echo "--- run $run of $runs"
 		status=0
-		./bin/loadgen -jobs "$jobs" -workers "$workers" -label "$containers containers, run $run" || status=$?
+		if [ "$stats" = "1" ]; then
+			./bin/loadgen -jobs "$jobs" -workers "$workers" -label "$containers containers, run $run" >/tmp/goflow-loadgen.out &
+			pid=$!
+			sleep 0.5
+			echo "    cpu, one reading 0.5 s in:"
+			docker stats --no-stream --format '      {{.Name}} {{.CPUPerc}}' $(docker compose ps -q) </dev/null || true
+			wait "$pid" || status=$?
+			cat /tmp/goflow-loadgen.out
+		else
+			./bin/loadgen -jobs "$jobs" -workers "$workers" -label "$containers containers, run $run" || status=$?
+		fi
 		case $status in
 		0) ;;
 		1) echo "    (this run had jobs that failed or didn't finish: see above)" ;;

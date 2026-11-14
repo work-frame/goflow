@@ -202,6 +202,30 @@ Measured on the development laptop (11 November 2026; 8 threads, everything in D
 
 Every job completed in every run. Two workers are the limit at the first step: jobs wait for one, so the time to completion is long and the rate low. Six workers give 2.4 times the rate, with steady times. Twelve give a *lower* rate than six, and vary from run to run, although each job, once claimed, finishes sooner (lower p50). The cause hasn't been measured. Everything shares one laptop, so the twelve workers, the API, PostgreSQL and the generator compete for its 8 threads; PostgreSQL's row locks and connections are the other candidates. The generator's elapsed time also includes creating the jobs, so a slower create rate would show here as a lower rate. On this laptop, adding workers past six makes GoFlow slower.
 
+Two more settings: `GOFLOW_LOADTEST_CONTAINERS` picks the steps (default `1 3 6`), and `GOFLOW_LOADTEST_STATS=1` takes one `docker stats` CPU reading of every container half a second into each run. One reading is a clue, not a measurement; give the runs enough jobs to last a few seconds. The report's `creates:` line says how fast the API accepted the jobs: if that is close to the completion rate, creating is the limit, not the workers.
+
+### Benchmarks
+
+`scripts/bench.sh` runs the benchmarks 10 times each and summarises them with [benchstat](https://pkg.go.dev/golang.org/x/perf/cmd/benchstat), which reports each mean with its spread and only calls a difference real when it's bigger than the noise. They're not in `check.sh` (minutes, and machine-dependent), but `check.sh` compiles them.
+
+| Benchmark | Measures | Needs |
+|---|---|---|
+| `BenchmarkClaimAndComplete` | one job's `Claim` and `Complete` together, on a copy of the database: the pair, round trips included, not either one alone | PostgreSQL |
+| `BenchmarkRelayPass` | one relay pass over exactly 100 outbox rows, with a Redis that accepts at once: the database's side of delivery | PostgreSQL |
+| `BenchmarkMemoryStoreGet` | `Lock` against `RLock` with 1 and 8 parallel readers: the Phase 2 question. `MemoryStore` is test-only now, so this says nothing about production speed | nothing |
+
+Every database benchmark gets a fresh copy of the template per run, and fails if an operation is refused: a benchmark never reports a speed for writes that didn't happen (FAILURES.md, case 54).
+
+benchstat installs as a Go tool in `~/go/bin`, outside GoFlow's `go.mod`, at a pinned version. golang.org/x/perf has no release tags, so the version is a Go pseudo-version: look up the current one, install exactly that, and record it here.
+
+```bash
+go list -m golang.org/x/perf@latest                        # prints golang.org/x/perf v0.0.0-<date>-<commit>
+go install golang.org/x/perf/cmd/benchstat@v0.0.0-<date>-<commit>
+./scripts/bench.sh
+```
+
+Each run's header records the commit, Go version, OS, CPU, PostgreSQL version, benchstat version and the exact command.
+
 ### Finding slow tests
 
 `go test -json` reports every test's time. The slowest ten in a package, top-level tests only:

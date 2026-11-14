@@ -20,7 +20,7 @@ func newTestUserStore(t *testing.T) *UserStore {
 	return NewUserStore(newMigratedTestDB(t))
 }
 
-func mustNewUser(t *testing.T, email string) *auth.User {
+func mustNewUser(t testing.TB, email string) *auth.User {
 	t.Helper()
 	u, err := auth.NewUser(email, "correct horse battery", testHasher)
 	if err != nil {
