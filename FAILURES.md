@@ -805,6 +805,20 @@ Each case was reproduced on a real machine (Arch Linux, Go 1.27, PostgreSQL 17) 
   ```
 - **Why:** found while writing Task 63, not planted. Without a `url` key, `jsonb_typeof` returns NULL, `NULL = 'string'` is NULL, and PostgreSQL only rejects a row when a CHECK is false: NULL passes. A webhook with a numeric URL was refused, so the constraint looked right; only the missing key slipped through. In SQL, a comparison that can meet NULL needs `IS [NOT] DISTINCT FROM` or `coalesce`, and a constraint needs a test with the column missing, not just wrong.
 
+## 58. The dialer trusts the good half of a DNS answer
+
+- **Safeguard:** `egress`'s dialer resolves a name once and refuses it if any of its addresses isn't `Allowed`, before connecting to anything (Daniel's condition for Task 64).
+- **Removed:** the break-it skips a blocked address instead of refusing the name, so the dialer connects to whatever is left.
+- **Caught by:** `TestDialerRefusesANameIfAnyAddressIsBlocked`, `TestDialerChecksEveryConnection`, `TestDialerRefusesAddressesAndPortsWithoutLookingUp`.
+- **Observed:**
+  ```text
+  --- FAIL: TestDialerRefusesANameIfAnyAddressIsBlocked (0.00s)
+      egress_test.go:98: err = <nil>, want a *BlockedError
+  --- FAIL: TestDialerChecksEveryConnection (0.00s)
+      egress_test.go:134: second connection: err <nil>, dialed [93.184.216.34:443 127.0.0.1:443]; want blocked with no second dial
+  ```
+- **Why:** skipping looks safer than it is. The fake dialer has no socket check, so the second test shows what the code above the socket does on its own: it dialed `127.0.0.1:443`, the rebinding answer. In production the socket's `Control` check would still refuse that address, but a safeguard that only works because another one catches its mistakes is one safeguard, not two. And a name that answers with a public and a private address is either broken or an attack: connecting to the public one hides it.
+
 ## Experiment: the naive dual write loses a job
 
 Not a removed safeguard but the design of Task 22, run live on 2 November 2026 to see the failure Task 23 fixes. `POST /api/v1/jobs` saved the job in PostgreSQL, then pushed its ID to Redis, with nothing tying the two together.

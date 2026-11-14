@@ -20,7 +20,7 @@ I'm building it to learn production Go: the standard library first, then HTTP, P
 - **Phase 12 (done):** distributed workers. A claimed job is held under a lease (a token valid for 30 s on PostgreSQL's clock, renewed every 10 s while the job runs), and only the current token can record a result. A reaper takes back jobs whose lease ran out. Any number of worker processes can share one database and one Redis; the Compose stack runs three worker containers from the API's image, and a SIGKILL test shows a killed worker's jobs coming back on another worker only after their leases run out ([DEVELOPMENT.md](DEVELOPMENT.md#crash-test-kill-a-worker-mid-job)). `./scripts/check.sh` refuses to run unless the PostgreSQL and Redis tests can run too, because a skipped test prints `ok`.
 - **Phase 13 (done):** integration and load testing. Found first: the end-to-end tests that sometimes took 5.4 s were waiting for an HTTP connection the client never used ([FAILURES.md](FAILURES.md), case 48). Then: test servers' workers wait 1 s in Redis instead of the production 2 s, so stopping each one no longer waits out a 2 s take (case 49; `cmd/api` about 40 s → 32 s). The database tests now run in parallel, each on its own copy with 3 connections (case 50). Each end-to-end test now has its own database, Redis queue keys and events channel (case 51), and they run in parallel, except seven that measure time (case 52). `cmd/loadgen` and `scripts/loadtest.sh` measure jobs per second on the local stack with 1, 3 and 6 worker containers (DEVELOPMENT.md, Load testing). On the development laptop, with 2000-job runs, six workers finished about 720 jobs per second and fell behind the API; twelve kept up with it at about 900, so their own limit wasn't reached (DEVELOPMENT.md, Load testing). An earlier 500-job run had twelve slower than six; the longer runs didn't repeat that. `scripts/bench.sh` benchmarks one job's database writes (about 4.2 ms for a claim and completion on the laptop), one relay pass (20 ms for 100 rows), and the old Lock-versus-RLock question: with eight readers `Lock` is 4.3 times slower (DEVELOPMENT.md, Benchmarks).
 - **Phase 14 (done):** CI/CD. GitHub Actions runs `./scripts/check.sh` with PostgreSQL and Valkey, and `govulncheck`, on every pull request and every push to `main` (DEVELOPMENT.md, CI). `main` accepts only pull requests that passed both, with no bypass, and Render deploys a commit only after CI passed on it (DEPLOYMENT.md, Deploys wait for CI).
-- **Phase 15 (in progress):** webhook delivery. A job can now be a `webhook` job: an HTTPS URL on port 443 and a JSON body of up to 64 KiB, stored with the job (see Job types below). Nothing is sent yet: until delivery is built, a webhook job ends `dead` with `no handler for job type "webhook"`. Next: an HTTP client that refuses private and internal addresses, then signed delivery with retries.
+- **Phase 15 (in progress):** webhook delivery. A job can now be a `webhook` job: an HTTPS URL on port 443 and a JSON body of up to 64 KiB, stored with the job (see Job types below). Nothing is sent yet: until delivery is built, a webhook job ends `dead` with `no handler for job type "webhook"`. `internal/egress` is the HTTP client that will send them: it connects only to public addresses on port 443, checked on the exact IP it connects to, with no proxy, no redirects and 10 seconds for the whole request. Next: signed delivery with retries.
 
 ## Requirements
 
@@ -104,7 +104,7 @@ Every job belongs to the user who created it. Users only ever see their own jobs
 | `type` | What it does | Extra fields |
 |---|---|---|
 | `demo` (default) | Test behaviour picked by the title: `sleep:3s`, `fail`, `fail:permanent`, `flaky:2`, `hang` | none |
-| `webhook` | POSTs `body` to `url` (Phase 15; not sent yet) | `webhook.url`: `https://` on port 443, no username or password, no `#fragment`, at most 2,048 bytes. `webhook.body`: any JSON value, at most 64 KiB |
+| `webhook` | POSTs `body` to `url` (Phase 15; not sent yet) | `webhook.url`: `https://` on port 443, no username or password, no `#fragment`, at most 2,048 bytes, not `localhost` or a private, loopback or reserved IP address. `webhook.body`: any JSON value, at most 64 KiB |
 
 Any job may set `max_attempts`, 1 to 10 (default 3).
 
@@ -297,6 +297,7 @@ internal/relay/        background loop: outbox (PostgreSQL) to queue (Redis)
 internal/worker/       pool of goroutines that take job IDs off the queue and run the jobs
 internal/loadgen/      creates jobs, follows them to completion, and reports rate and percentiles
 internal/urlcheck/     TLS rules for database and Redis URLs, shared by the API and the worker
+internal/egress/       the HTTP client for user-chosen URLs: public addresses on port 443 only (SSRF protection)
 cmd/worker/            worker entry point
 cmd/loadgen/           load generator for the local stack (refuses any other API)
 scripts/               development scripts, and the SQL compose's PostgreSQL runs once
