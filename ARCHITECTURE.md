@@ -461,6 +461,7 @@ Everything runs with the race detector (`./scripts/check.sh`). Tests that need P
 | Liveness never checks dependencies | A database outage shouldn't restart every API instance |
 | Request context carried into every query | A disconnected client stops its query |
 | Tests never use the development database | Tests can't damage dev data, or depend on it |
+| `main` protected with no bypass: pull requests only, `check` and `govulncheck` required, branch up to date, 0 approvals; Render deploys after checks pass | Nothing untested reaches `main` or production, including from the administrator. Approvals would need a second person |
 | CI: GitHub Actions, actions pinned to commit SHAs, a read-only token and no secrets | A tag can be moved to other code by whoever owns it; a SHA can't. CI only needs to read the code and test it against throwaway services, so it gets nothing else |
 
 ## Known limitations

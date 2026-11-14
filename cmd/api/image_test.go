@@ -117,6 +117,11 @@ func TestRenderRunsTheImage(t *testing.T) {
 			t.Errorf("render.yaml's goflow-api still has %q: the Dockerfile builds and starts it", gone)
 		}
 	}
+	// Render deploys a commit only after its CI checks pass (Task 60;
+	// FAILURES.md, case 56).
+	if !strings.Contains(api, "autoDeployTrigger: checksPass\n") {
+		t.Error("render.yaml's goflow-api doesn't wait for CI: want autoDeployTrigger: checksPass, or a commit that fails CI still reaches production")
+	}
 }
 
 // The build folder is an allowlist: everything out, then only these back in.
