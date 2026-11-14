@@ -42,6 +42,9 @@ type Deliverer struct {
 	Logger   *slog.Logger
 	// Now is the clock for webhook-timestamp; nil means time.Now.
 	Now func() time.Time
+	// Observe, when set, is told each attempt's outcome and duration
+	// (metrics.Metrics.ObserveWebhook). Never the host.
+	Observe func(outcome string, took time.Duration)
 }
 
 // Handle delivers one attempt. It returns nil on a 2xx answer, a
@@ -123,8 +126,12 @@ func (d *Deliverer) Handle(ctx context.Context, run worker.Run) error {
 // finish records the attempt, logs it by host only, and returns what the
 // worker pool should do with the job.
 func (d *Deliverer) finish(ctx context.Context, run worker.Run, host string, start time.Time, code int, outcome string, cause error) error {
-	a := job.Attempt{Attempt: run.Attempt, StartedAt: start.UTC(), DurationMS: int(time.Since(start).Milliseconds()),
+	took := time.Since(start)
+	a := job.Attempt{Attempt: run.Attempt, StartedAt: start.UTC(), DurationMS: int(took.Milliseconds()),
 		StatusCode: code, Outcome: outcome}
+	if d.Observe != nil {
+		d.Observe(outcome, took)
+	}
 	if cause != nil {
 		a.Error = cause.Error()
 	}

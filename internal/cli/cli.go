@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -30,11 +31,18 @@ const commandTimeout = 90 * time.Second
 const usage = `Usage:
   goflow login
   goflow logout
-  goflow job create <title>
+  goflow job create [--max-attempts N] <title>
+  goflow job create --webhook <https URL> --body @<file.json> [--max-attempts N] <title>
+  goflow job create --webhook <https URL> --body '<JSON>' [--max-attempts N] <title>
   goflow job list [--status <status>]
   goflow job get <id>
+  goflow job attempts <id>   a webhook job's delivery attempts
   goflow job delete <id>
   goflow job retry <id>      re-run a dead job with fresh attempts
+  goflow webhook-secret      create your webhook signing secret, or replace it
+
+Options go before the title. --body @file reads the body from a file: use it
+for anything sensitive, since text typed after --body stays in your shell history.
 
 The CLI talks to a running GoFlow API. Set GOFLOW_API_URL (default http://localhost:8080).
 Log in once with "goflow login"; the session is saved in ~/.config/goflow/credentials.
@@ -43,7 +51,9 @@ GOFLOW_TOKEN, if set, is used instead (for scripts).
 
 // Jobs is what the CLI needs from GoFlow. client.Client satisfies it. Tests use a fake.
 type Jobs interface {
-	Create(ctx context.Context, title string) (*job.Job, error)
+	CreateJob(ctx context.Context, n client.NewJob) (*job.Job, error)
+	Attempts(ctx context.Context, id string) ([]job.Attempt, error)
+	RotateWebhookSecret(ctx context.Context) (secret string, previousUntil *time.Time, err error)
 	Get(ctx context.Context, id string) (*job.Job, error)
 	List(ctx context.Context, status job.Status, cursor string) ([]*job.Job, string, error)
 	Delete(ctx context.Context, id string) error
@@ -59,29 +69,18 @@ func (e usageError) Error() string { return e.msg }
 // Run executes one CLI command and returns the process exit code.
 // It never calls os.Exit, so tests can call it directly.
 func Run(ctx context.Context, args []string, jobs Jobs, stdout, stderr io.Writer) int {
-	if len(args) < 2 || args[0] != "job" {
-		fmt.Fprint(stderr, usage)
-		return exitUsage
-	}
-
 	ctx, cancel := context.WithTimeout(ctx, commandTimeout)
 	defer cancel()
 
-	cmd, rest := args[1], args[2:]
 	var err error
-	switch cmd {
-	case "create":
-		err = runCreate(ctx, jobs, rest, stdout)
-	case "list":
-		err = runList(ctx, jobs, rest, stdout)
-	case "get":
-		err = runGet(ctx, jobs, rest, stdout)
-	case "delete":
-		err = runDelete(ctx, jobs, rest, stdout)
-	case "retry":
-		err = runRetry(ctx, jobs, rest, stdout)
+	switch {
+	case len(args) >= 1 && args[0] == "webhook-secret":
+		err = runWebhookSecret(ctx, jobs, args[1:], stdout, stderr)
+	case len(args) >= 2 && args[0] == "job":
+		err = runJob(ctx, jobs, args[1], args[2:], stdout, stderr)
 	default:
-		err = usageError{fmt.Sprintf("unknown command %q", cmd)}
+		fmt.Fprint(stderr, usage)
+		return exitUsage
 	}
 
 	var ue usageError
@@ -100,16 +99,131 @@ func Run(ctx context.Context, args []string, jobs Jobs, stdout, stderr io.Writer
 	}
 }
 
-func runCreate(ctx context.Context, jobs Jobs, args []string, stdout io.Writer) error {
-	if len(args) == 0 {
-		return usageError{"create: missing title"}
+func runJob(ctx context.Context, jobs Jobs, cmd string, rest []string, stdout, stderr io.Writer) error {
+	var err error
+	switch cmd {
+	case "create":
+		err = runCreate(ctx, jobs, rest, stdout, stderr)
+	case "attempts":
+		err = runAttempts(ctx, jobs, rest, stdout)
+	case "list":
+		err = runList(ctx, jobs, rest, stdout)
+	case "get":
+		err = runGet(ctx, jobs, rest, stdout)
+	case "delete":
+		err = runDelete(ctx, jobs, rest, stdout)
+	case "retry":
+		err = runRetry(ctx, jobs, rest, stdout)
+	default:
+		err = usageError{fmt.Sprintf("unknown command %q", cmd)}
+	}
+	return err
+}
+
+func runCreate(ctx context.Context, jobs Jobs, args []string, stdout, stderr io.Writer) error {
+	flags := flag.NewFlagSet("create", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	webhookURL := flags.String("webhook", "", "POST the body to this https URL")
+	body := flags.String("body", "", "the webhook's JSON body, or @file to read it from a file")
+	maxAttempts := flags.Int("max-attempts", 0, "attempts before the job is dead, 1 to 10")
+	if err := flags.Parse(args); err != nil {
+		return usageError{fmt.Sprintf("create: %v", err)}
+	}
+	if flags.NArg() == 0 {
+		return usageError{"create: missing title (options go before it)"}
+	}
+	n := client.NewJob{Title: strings.Join(flags.Args(), " "), MaxAttempts: *maxAttempts}
+
+	switch {
+	case *webhookURL == "" && *body != "":
+		return usageError{"create: --body needs --webhook"}
+	case *webhookURL != "" && *body == "":
+		return usageError{"create: --webhook needs --body (a JSON value, or @file)"}
+	case *webhookURL != "":
+		raw, fromFile, err := readBody(*body)
+		if err != nil {
+			return fmt.Errorf("create: %w", err)
+		}
+		if !fromFile {
+			fmt.Fprintln(stderr, "note: a --body typed on the command line stays in your shell history; use --body @file for anything sensitive")
+		}
+		n.Type = job.TypeWebhook
+		n.Webhook = &job.Webhook{URL: *webhookURL, Body: raw}
 	}
 
-	j, err := jobs.Create(ctx, strings.Join(args, " "))
+	j, err := jobs.CreateJob(ctx, n)
 	if err != nil {
 		return fmt.Errorf("create: %w", err)
 	}
 	fmt.Fprintln(stdout, j.ID)
+	return nil
+}
+
+// readBody returns --body's JSON: the text itself, or a file's contents
+// for "@path". It checks that it is JSON before anything is sent.
+func readBody(arg string) (raw json.RawMessage, fromFile bool, err error) {
+	b := []byte(arg)
+	if path, ok := strings.CutPrefix(arg, "@"); ok {
+		fromFile = true
+		info, err := os.Stat(path)
+		if err != nil {
+			return nil, true, fmt.Errorf("--body: %w", err)
+		}
+		if info.Size() > job.MaxWebhookBodyBytes {
+			return nil, true, fmt.Errorf("--body: %s is %d bytes, more than %d", path, info.Size(), job.MaxWebhookBodyBytes)
+		}
+		if b, err = os.ReadFile(path); err != nil {
+			return nil, true, fmt.Errorf("--body: %w", err)
+		}
+	}
+	if !json.Valid(b) {
+		return nil, fromFile, errors.New("--body is not JSON (a string needs quotes: '\"text\"')")
+	}
+	return json.RawMessage(b), fromFile, nil
+}
+
+func runAttempts(ctx context.Context, jobs Jobs, args []string, stdout io.Writer) error {
+	if len(args) != 1 {
+		return usageError{"attempts: expected exactly one job ID"}
+	}
+	list, err := jobs.Attempts(ctx, args[0])
+	if err != nil {
+		return fmt.Errorf("attempts %s: %w", args[0], err)
+	}
+	if len(list) == 0 {
+		fmt.Fprintln(stdout, "no attempts yet")
+		return nil
+	}
+	tw := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "ATTEMPT\tSTARTED\tTOOK\tSTATUS\tOUTCOME\tERROR")
+	for _, a := range list {
+		status := "-"
+		if a.StatusCode != 0 {
+			status = fmt.Sprint(a.StatusCode)
+		}
+		fmt.Fprintf(tw, "%d\t%s\t%dms\t%s\t%s\t%s\n", a.Attempt, a.StartedAt.Local().Format(time.DateTime),
+			a.DurationMS, status, a.Outcome, a.Error)
+	}
+	return tw.Flush()
+}
+
+// runWebhookSecret creates or replaces the signing secret and prints it,
+// alone on stdout so a script can capture it. GoFlow can't show it again:
+// it is never saved by the CLI, and no endpoint returns an existing one.
+func runWebhookSecret(ctx context.Context, jobs Jobs, args []string, stdout, stderr io.Writer) error {
+	if len(args) != 0 {
+		return usageError{"webhook-secret: takes no arguments"}
+	}
+	secret, previousUntil, err := jobs.RotateWebhookSecret(ctx)
+	if err != nil {
+		return fmt.Errorf("webhook-secret: %w", err)
+	}
+	fmt.Fprintln(stdout, secret)
+	fmt.Fprintln(stderr, "This is the only time this secret is shown. Put it in your receiver's configuration now.")
+	if previousUntil != nil {
+		fmt.Fprintf(stderr, "Your previous secret keeps signing deliveries, next to this one, until %s.\n",
+			previousUntil.Local().Format(time.DateTime))
+	}
 	return nil
 }
 

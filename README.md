@@ -20,7 +20,7 @@ I'm building it to learn production Go: the standard library first, then HTTP, P
 - **Phase 12 (done):** distributed workers. A claimed job is held under a lease (a token valid for 30 s on PostgreSQL's clock, renewed every 10 s while the job runs), and only the current token can record a result. A reaper takes back jobs whose lease ran out. Any number of worker processes can share one database and one Redis; the Compose stack runs three worker containers from the API's image, and a SIGKILL test shows a killed worker's jobs coming back on another worker only after their leases run out ([DEVELOPMENT.md](DEVELOPMENT.md#crash-test-kill-a-worker-mid-job)). `./scripts/check.sh` refuses to run unless the PostgreSQL and Redis tests can run too, because a skipped test prints `ok`.
 - **Phase 13 (done):** integration and load testing. Found first: the end-to-end tests that sometimes took 5.4 s were waiting for an HTTP connection the client never used ([FAILURES.md](FAILURES.md), case 48). Then: test servers' workers wait 1 s in Redis instead of the production 2 s, so stopping each one no longer waits out a 2 s take (case 49; `cmd/api` about 40 s → 32 s). The database tests now run in parallel, each on its own copy with 3 connections (case 50). Each end-to-end test now has its own database, Redis queue keys and events channel (case 51), and they run in parallel, except seven that measure time (case 52). `cmd/loadgen` and `scripts/loadtest.sh` measure jobs per second on the local stack with 1, 3 and 6 worker containers (DEVELOPMENT.md, Load testing). On the development laptop, with 2000-job runs, six workers finished about 720 jobs per second and fell behind the API; twelve kept up with it at about 900, so their own limit wasn't reached (DEVELOPMENT.md, Load testing). An earlier 500-job run had twelve slower than six; the longer runs didn't repeat that. `scripts/bench.sh` benchmarks one job's database writes (about 4.2 ms for a claim and completion on the laptop), one relay pass (20 ms for 100 rows), and the old Lock-versus-RLock question: with eight readers `Lock` is 4.3 times slower (DEVELOPMENT.md, Benchmarks).
 - **Phase 14 (done):** CI/CD. GitHub Actions runs `./scripts/check.sh` with PostgreSQL and Valkey, and `govulncheck`, on every pull request and every push to `main` (DEVELOPMENT.md, CI). `main` accepts only pull requests that passed both, with no bypass, and Render deploys a commit only after CI passed on it (DEPLOYMENT.md, Deploys wait for CI).
-- **Phase 15 (in progress):** webhook delivery. A `webhook` job POSTs a JSON body to an HTTPS URL, signed the [Standard Webhooks](https://www.standardwebhooks.com) way with the owner's signing secret, retried on timeouts, `408`, `429` and `5xx`, and buried on other answers. Every attempt is recorded. Requests only reach public addresses on port 443 (`internal/egress`). Signing secrets are stored encrypted with a master key Render generates. Next: the CLI and dashboard, then a live delivery to a receiver you run.
+- **Phase 15 (in progress):** webhook delivery. A `webhook` job POSTs a JSON body to an HTTPS URL, signed the [Standard Webhooks](https://www.standardwebhooks.com) way with the owner's signing secret, retried on timeouts, `408`, `429` and `5xx`, and buried on other answers. Every attempt is recorded, and shown by `goflow job attempts` and in the dashboard, which shows only the URL's host. Requests only reach public addresses on port 443 (`internal/egress`). Signing secrets are stored encrypted with a master key Render generates, and created from the CLI only (`goflow webhook-secret`). Next: a live delivery to a receiver you run.
 
 ## Requirements
 
@@ -269,6 +269,18 @@ goflow job delete <id>                   # remove a job
 goflow job retry <id>                    # re-run a dead job with fresh attempts
 goflow logout                            # ends the session on the server and deletes the saved login
 ```
+
+Webhooks (options go before the title):
+
+```bash
+goflow webhook-secret                    # creates your signing secret, or replaces it; printed once
+goflow job create --webhook https://example.com/hooks/goflow --body @order.json --max-attempts 5 order 1042 paid
+goflow job attempts <id>                 # each delivery attempt: when, how long, status, outcome, error
+```
+
+`goflow webhook-secret` prints the secret alone on standard output and the warning on standard error, so `goflow webhook-secret > receiver-secret.txt` keeps it out of your terminal's scrollback. Nothing can print it again: the CLI doesn't save it, and the API has no way to return an existing secret. Run it again only to rotate: the old secret keeps signing for 24 hours.
+
+`--body` takes a JSON value or `@file`. Prefer `@file`: text typed after `--body` stays in your shell history, and the CLI says so when you do it. The body is checked to be JSON, and a file to be at most 64 KiB, before anything is sent.
 
 Until GoFlow has real job types, a job's title can pick a test behaviour, to watch retries and timeouts happen:
 

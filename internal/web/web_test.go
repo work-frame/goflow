@@ -116,6 +116,24 @@ func TestScriptNeverTurnsTextIntoHTML(t *testing.T) {
 	}
 }
 
+// Daniel's condition for Task 66: the page shows a webhook's host and
+// nothing else of its URL, never its body, and never asks for a signing
+// secret. The URL is read in one place, hostOf.
+func TestScriptShowsOnlyTheWebhookHost(t *testing.T) {
+	js := read(t, "static/app.js")
+	if !strings.Contains(js, "hostOf(job.webhook.url)") {
+		t.Error("app.js doesn't show a webhook through hostOf(job.webhook.url): the whole URL may be on the page")
+	}
+	if n := strings.Count(js, "webhook.url"); n != 1 {
+		t.Errorf("app.js reads webhook.url %d times; only hostOf may read it", n)
+	}
+	for _, banned := range []string{"webhook.body", ".body)", "webhook-secret", "whsec_", ".search", ".pathname", ".href"} {
+		if strings.Contains(js, banned) {
+			t.Errorf("app.js contains %q", banned)
+		}
+	}
+}
+
 // Every message type the server can send has a case in app.js, and the
 // two that matter most do the right thing: "paused" shows the paused dot,
 // "resumed" reloads the list (events sent during the pause are gone). A

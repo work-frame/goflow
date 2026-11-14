@@ -86,7 +86,21 @@ func (c *Client) Logout(ctx context.Context, token string) error {
 
 // Create submits a new job.
 func (c *Client) Create(ctx context.Context, title string) (*job.Job, error) {
-	body, err := json.Marshal(map[string]string{"title": title})
+	return c.CreateJob(ctx, NewJob{Title: title})
+}
+
+// NewJob is what POST /api/v1/jobs takes. Zero fields are left out: a
+// demo job with the server's default attempts.
+type NewJob struct {
+	Title       string       `json:"title"`
+	Type        job.Type     `json:"type,omitempty"`
+	Webhook     *job.Webhook `json:"webhook,omitempty"`
+	MaxAttempts int          `json:"max_attempts,omitempty"`
+}
+
+// CreateJob creates a job of any type and returns it.
+func (c *Client) CreateJob(ctx context.Context, n NewJob) (*job.Job, error) {
+	body, err := json.Marshal(n)
 	if err != nil {
 		return nil, fmt.Errorf("client: encode request: %w", err)
 	}
@@ -141,6 +155,33 @@ func (c *Client) Retry(ctx context.Context, id string) (*job.Job, error) {
 		return nil, err
 	}
 	return &j, nil
+}
+
+// Attempts returns a webhook job's delivery attempts, oldest first, or
+// job.ErrNotFound.
+func (c *Client) Attempts(ctx context.Context, id string) ([]job.Attempt, error) {
+	var resp struct {
+		Attempts []job.Attempt `json:"attempts"`
+	}
+	if err := c.do(ctx, http.MethodGet, "/api/v1/jobs/"+url.PathEscape(id)+"/attempts", nil, http.StatusOK, &resp); err != nil {
+		return nil, err
+	}
+	return resp.Attempts, nil
+}
+
+// RotateWebhookSecret creates the caller's webhook signing secret, or
+// replaces it. The secret is returned once: nothing can fetch it again.
+// previousUntil is when the replaced secret stops signing (nil for a first
+// secret).
+func (c *Client) RotateWebhookSecret(ctx context.Context) (secret string, previousUntil *time.Time, err error) {
+	var resp struct {
+		Secret             string     `json:"secret"`
+		PreviousValidUntil *time.Time `json:"previous_valid_until"`
+	}
+	if err := c.do(ctx, http.MethodPost, "/api/v1/webhook-secret", nil, http.StatusCreated, &resp); err != nil {
+		return "", nil, err
+	}
+	return resp.Secret, resp.PreviousValidUntil, nil
 }
 
 // do sends one request, checks the status, and decodes the body into out if out is not nil.

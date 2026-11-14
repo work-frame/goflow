@@ -44,6 +44,22 @@ func TestJobChangesAndAttempts(t *testing.T) {
 	)
 }
 
+func TestWebhookDeliveries(t *testing.T) {
+	m := New()
+	m.ObserveWebhook(job.OutcomeDelivered, 120*time.Millisecond)
+	m.ObserveWebhook(job.OutcomeRetry, 10*time.Second)
+	m.ObserveWebhook(job.OutcomeRetry, 3*time.Second)
+	body := text(t, m)
+	expect(t, body,
+		`goflow_webhook_delivery_duration_seconds_count{outcome="delivered"} 1`,
+		`goflow_webhook_delivery_duration_seconds_count{outcome="retry"} 2`,
+		`goflow_webhook_delivery_duration_seconds_bucket{outcome="retry",le="5"} 1`,
+	)
+	if strings.Contains(body, "host=") {
+		t.Error("webhook metrics carry a host label")
+	}
+}
+
 func TestQueueSizesAreReadWhenScraped(t *testing.T) {
 	m := New()
 	calls := 0

@@ -6,7 +6,9 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/work-frame/goflow/internal/client"
 	"github.com/work-frame/goflow/internal/job"
 )
 
@@ -15,16 +17,36 @@ import (
 type fakeJobs struct {
 	m        *job.MemoryStore
 	pageSize int
+	created  []client.NewJob // every create, as sent
+	attempts []job.Attempt
+	rotated  int
 }
 
 func newFake() *fakeJobs { return &fakeJobs{m: job.NewMemoryStore(), pageSize: 2} }
 
-func (f *fakeJobs) Create(_ context.Context, title string) (*job.Job, error) {
-	j, err := job.New(title)
+func (f *fakeJobs) CreateJob(_ context.Context, n client.NewJob) (*job.Job, error) {
+	f.created = append(f.created, n)
+	j, err := job.New(n.Title)
 	if err != nil {
 		return nil, err
 	}
 	return j, f.m.Add(j)
+}
+
+func (f *fakeJobs) Attempts(_ context.Context, id string) ([]job.Attempt, error) {
+	if _, err := f.m.Get(id); err != nil {
+		return nil, err
+	}
+	return f.attempts, nil
+}
+
+func (f *fakeJobs) RotateWebhookSecret(context.Context) (string, *time.Time, error) {
+	f.rotated++
+	if f.rotated == 1 {
+		return "whsec_first", nil, nil
+	}
+	until := time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC)
+	return "whsec_second", &until, nil
 }
 
 func (f *fakeJobs) Get(_ context.Context, id string) (*job.Job, error) { return f.m.Get(id) }
@@ -56,10 +78,14 @@ func (f *fakeJobs) List(_ context.Context, status job.Status, cursor string) ([]
 // errJobs fails every call with the same error.
 type errJobs struct{ err error }
 
-func (e errJobs) Create(context.Context, string) (*job.Job, error) { return nil, e.err }
-func (e errJobs) Get(context.Context, string) (*job.Job, error)    { return nil, e.err }
-func (e errJobs) Delete(context.Context, string) error             { return e.err }
-func (e errJobs) Retry(context.Context, string) (*job.Job, error)  { return nil, e.err }
+func (e errJobs) CreateJob(context.Context, client.NewJob) (*job.Job, error) { return nil, e.err }
+func (e errJobs) Attempts(context.Context, string) ([]job.Attempt, error)    { return nil, e.err }
+func (e errJobs) RotateWebhookSecret(context.Context) (string, *time.Time, error) {
+	return "", nil, e.err
+}
+func (e errJobs) Get(context.Context, string) (*job.Job, error)   { return nil, e.err }
+func (e errJobs) Delete(context.Context, string) error            { return e.err }
+func (e errJobs) Retry(context.Context, string) (*job.Job, error) { return nil, e.err }
 func (e errJobs) List(context.Context, job.Status, string) ([]*job.Job, string, error) {
 	return nil, "", e.err
 }
