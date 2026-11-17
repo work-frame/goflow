@@ -173,3 +173,14 @@ func TestComposePublishesPortsOnLoopbackOnly(t *testing.T) {
 		t.Fatal("compose.yaml publishes no ports; the test can't be reading it right")
 	}
 }
+
+// Task 78: goflow-admin writes to the database by hand and exists only on
+// the owner's machine. The image builds and copies only the three
+// programs Render runs.
+func TestAdminToolIsNotInTheImage(t *testing.T) {
+	parallelTest(t)
+	dockerfile := readRepoFile(t, "Dockerfile")
+	if strings.Contains(dockerfile, "goflow-admin") {
+		t.Error("the Dockerfile mentions goflow-admin: the owner-only reset tool must not be in the image")
+	}
+}

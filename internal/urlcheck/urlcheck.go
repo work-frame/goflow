@@ -33,6 +33,27 @@ func DatabaseTLS(raw string) error {
 	return fmt.Errorf("GOFLOW_DATABASE_URL points at %s, a remote database, so it needs sslmode=verify-full (or require)", host)
 }
 
+// DatabaseVerifyFull is the stricter rule for goflow-admin, which writes to
+// production by hand: a database on another machine needs
+// sslmode=verify-full, so the connection is encrypted AND the server has to
+// prove it is the host in the URL. Only this machine (localhost, 127.0.0.1,
+// ::1) may skip TLS; a single-label name doesn't, because the tool runs on
+// a laptop, not inside Compose. Errors name the host, never the URL.
+func DatabaseVerifyFull(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return errors.New("the database URL must look like postgres://user:password@host/database")
+	}
+	host := u.Hostname()
+	if isThisMachine(host) {
+		return nil
+	}
+	if u.Query().Get("sslmode") != "verify-full" {
+		return fmt.Errorf("%s is a remote database, so the URL must end in sslmode=verify-full (require and verify-ca don't check the server's name)", host)
+	}
+	return nil
+}
+
 // RedisTLS is DatabaseTLS for Redis. TLS is chosen by the scheme:
 // rediss:// (two s's) is encrypted, redis:// is plain text and only allowed
 // for a Redis on this machine. Errors never include the URL.

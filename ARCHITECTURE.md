@@ -39,6 +39,7 @@ reconciler, start + hourly    re-sends from PostgreSQL whatever Redis lost      
 - **`internal/api`** owns HTTP: routes, middleware, handlers.
 - **`internal/client`** is a Go client for the API. **`internal/cli`** uses it. **`internal/credentials`** saves the login on disk.
 - **`cmd/*`** only wire things together: read environment variables, build dependencies, run, exit.
+- **`cmd/goflow-admin`** is the one exception to "one way in": an owner-only tool that resets a password straight in the database (`UserStore.ResetPassword`: new hash and every session deleted, one transaction). It runs only on the owner's machine, with the API's password and bcrypt rules (`auth.CostSetting`), needs `sslmode=verify-full` for a remote database and a login that can write, and isn't in the container image (Task 78).
 
 ## Domain: `internal/job`
 

@@ -312,6 +312,16 @@ Until GoFlow has real job types, a job's title can pick a test behaviour, to wat
 
 Exit codes: `0` success, `1` failure (including an unreachable API), `2` incorrect usage. Each command gives up after 90 seconds, long enough for a free hosting plan to wake a sleeping server; Ctrl+C stops it sooner.
 
+## Resetting a password (owner only)
+
+There is no "forgot password" email yet: the hosted API can't send mail on Render's free plan, and registration is closed, so the only account is the owner's. Until that changes, the owner resets a password from their own machine, straight against the database:
+
+```bash
+go run ./cmd/goflow-admin reset-password
+```
+
+It asks for everything at prompts, so nothing lands in shell history: the database URL and the email (hidden), the new password twice (hidden), then `reset` to confirm. It applies the API's own password rules and bcrypt cost (`GOFLOW_BCRYPT_COST`, default 12), then changes the password and ends every session of that account in one transaction. It prints the account's creation date and how many sessions it ended, never the URL, the password or the hash. A remote database needs `sslmode=verify-full`, and the login must be allowed to write: the owner role, not the read-only backup role. `goflow-admin` is not in the container image. How to rehearse it on a Neon branch before touching production: [DEPLOYMENT.md](DEPLOYMENT.md#resetting-a-password-by-hand-task-78).
+
 ## Development
 
 Run every check before committing:
@@ -349,6 +359,7 @@ internal/webhook/      webhook delivery: signing, one POST per attempt, outcomes
 cmd/worker/            worker entry point
 cmd/loadgen/           load generator for the local stack (refuses any other API)
 cmd/receiver/          example webhook receiver; runs on Render as goflow-receiver (Task 67)
+cmd/goflow-admin/      owner-only tools run on your own machine: reset-password (Task 78); not in the image
 scripts/               development scripts, and the SQL compose's PostgreSQL runs once
 Dockerfile             the container image: build stage, then distroless static
 .dockerignore          what the image build may see (an allowlist)

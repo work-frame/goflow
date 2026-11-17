@@ -998,6 +998,26 @@ Each case was reproduced on a real machine (Arch Linux, Go 1.27, PostgreSQL 17) 
   (Sandbox run.)
 - **Why:** after a wrong password the page empties the field and puts the cursor back in it, so the next try is typed straight away, in plain text, though nobody pressed **Show** again. A successful login would also leave the field in text mode behind the dashboard, for whoever logs in next on that screen. Showing a password is fine when you choose to; staying shown is a surprise.
 
+## 70. The owner reset ends no sessions
+
+- **Safeguard:** `UserStore.ResetPassword` (Task 78) changes the hash and runs `DELETE FROM sessions WHERE user_id = $1`: every session of that account, in the same transaction.
+- **Removed:** the break-it gives it `ChangePassword`'s rule, "every session except the caller's", `AND token_hash <> $2`, with no caller session to keep (nil). That comparison is with NULL, which is never true, so nothing is deleted.
+- **Caught by:** `TestUserStoreResetPasswordEndsEverySession` and `TestResetChangesThePasswordAndEndsEverySession`.
+- **Observed:**
+  ```text
+  --- FAIL: TestUserStoreResetPasswordEndsEverySession (0.40s)
+      sessions_test.go:345: ended 0 sessions, want all 3
+      sessions_test.go:349: a session survived the reset: err = <nil>
+      sessions_test.go:353: 3 of dan's sessions left after the reset, want 0
+  --- FAIL: TestResetChangesThePasswordAndEndsEverySession (0.65s)
+      main_test.go:147: output lacks "password changed for dan@example.com (bcrypt cost 10); 3 sessions ended":
+          account dan@example.com on 127.0.0.1: created 2026-11-17 20:35 UTC, 3 open sessions
+          password changed for dan@example.com (bcrypt cost 10); 0 sessions ended. Log in again everywhere.
+      main_test.go:161: 3 of dan's sessions survived the reset, want 0
+  ```
+  (Sandbox run; the three "survived" lines of the first test shortened to one.)
+- **Why:** this is the mistake that's easiest to make, because reusing the existing, tested `ChangePassword` with "no session to keep" looks right and raises no error. The password changes and the tool says it's done; but the usual reason to reset a password is that someone else may have it, and every session they already opened would keep working for up to 24 hours. In SQL, anything compared with NULL is unknown, not true.
+
 ## Experiment: the naive dual write loses a job
 
 Not a removed safeguard but the design of Task 22, run live on 2 November 2026 to see the failure Task 23 fixes. `POST /api/v1/jobs` saved the job in PostgreSQL, then pushed its ID to Redis, with nothing tying the two together.

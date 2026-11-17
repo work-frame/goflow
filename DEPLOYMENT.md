@@ -583,3 +583,26 @@ Render keeps previous deploys. In the dashboard: `goflow-api` → **Deploys** �
 ## Rotating the database password
 
 If the URL may have leaked: in the Neon console, open the `production` branch's roles and reset the password for `neondb_owner`. Build the new URL as above, then update `GOFLOW_DATABASE_URL` in Render (**Environment**) and save with a redeploy. The old password stops working at once, so the API fails its database calls until the redeploy is live. Sessions and accounts are unaffected.
+
+## Resetting a password by hand (Task 78)
+
+Until email reset exists ([README](README.md#resetting-a-password-owner-only)), `go run ./cmd/goflow-admin reset-password` sets a new password straight in the database and ends every session of that account. It needs the **owner** role's URL (`neondb_owner`): the read-only `goflow_backup` role is refused. Rehearse it on a Neon branch first; production is only touched on the day a reset is really needed.
+
+**Rehearsal on a branch (nothing in production changes):**
+
+1. **Before.** Neon console → **SQL Editor**, branch `production`, run this read-only query and note the result (no secret in it: a fingerprint of the hash, its cost, and the session count):
+   ```sql
+   SELECT left(password_hash, 7) AS cost, md5(password_hash) AS fingerprint,
+          (SELECT count(*) FROM sessions s WHERE s.user_id = u.id) AS sessions
+   FROM users u;
+   ```
+2. **Branch.** **Branches** → **Create branch** from `production` (current data). Run the query on the new branch: same result.
+3. **Reset the branch.** **Connect** on the new branch, role `neondb_owner`, pooling off, password hidden; copy the URL and change its ending to `?sslmode=verify-full`. Then, in a GoFlow checkout:
+   ```bash
+   go run ./cmd/goflow-admin reset-password
+   ```
+   Paste the branch URL at the first prompt, give the email, a throwaway password twice, and `reset`. Expect `password changed for ...; N sessions ended`, N being the branch's session count.
+4. **Check.** Run the query again, on the branch: a new `fingerprint` and `sessions` 0. On `production`: exactly the result from step 1.
+5. **Delete the branch** in the console.
+
+**For real:** the same as step 3 with production's owner URL. Every device, the dashboard and `goflow login`, has to log in again. Write down when and why in the Results table.
