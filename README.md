@@ -252,7 +252,7 @@ Every response carries an `X-Request-ID` header, and the same ID appears in the 
 
 ## Dashboard
 
-Open the API's address in a browser: `http://localhost:8080/` locally, or https://goflow-api-hewh.onrender.com/ for the hosted one. Log in with the same email and password as `goflow login`. The page:
+Open the API's address in a browser: `http://localhost:8080/` locally, or https://goflow-api-hewh.onrender.com/ for the hosted one. Log in with the same email and password as `goflow login`; **Show** next to the password lets you check what you typed, and it's hidden again at every login attempt and at logout. The page:
 
 - shows an overview of your jobs: the total, how many are waiting, processing, retrying, completed and dead or failed, and the success rate (completed ÷ completed + dead + failed, `—` until a job has finished). It counts the full list the page holds, so the numbers change the moment an event arrives;
 - lists your jobs, newest first, 25 to a page, with a search (title or ID) and a status filter, and updates them as they change;

@@ -34,10 +34,13 @@
             <span>Email</span>
             <input id="email" type="email" autocomplete="username" required>
           </label>
-          <label class="field" for="password">
-            <span>Password</span>
-            <input id="password" type="password" autocomplete="current-password" required>
-          </label>
+          <div class="field">
+            <label for="password">Password</label>
+            <div class="password-wrap">
+              <input id="password" type="password" autocomplete="current-password" required>
+              <button id="password-toggle" class="btn quiet small" type="button" aria-controls="password" aria-label="Show password">Show</button>
+            </div>
+          </div>
           <p id="login-error" class="error" role="alert" hidden></p>
           <button id="login-submit" class="btn primary wide" type="submit">Log in</button>
         </form>

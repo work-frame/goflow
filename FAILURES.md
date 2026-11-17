@@ -985,6 +985,19 @@ Each case was reproduced on a real machine (Arch Linux, Go 1.27, PostgreSQL 17) 
   (Sandbox run.)
 - **Why:** nothing on the page changes. The answer has the same version as the list's copy, so `apply()` keeps the old one, and no test that looks at the screen would notice. But the body has crossed into the browser: it sits in the network panel, in memory, and in any extension that reads the page. A webhook body is the customer's payload, often with personal data in it. The dashboard's rule since Task 66 is that the browser sees a webhook's host and nothing else.
 
+## 69. A failed login leaves the password on screen
+
+- **Safeguard:** the dashboard's **Show** button turns the password field into plain text, and `login()` hides it again before anything else, so every attempt, right or wrong, ends with the password hidden; so does logout (Task 77).
+- **Removed:** the break-it deletes the `setPasswordVisible(false)` line at the top of `login()`.
+- **Caught by:** `TestPasswordIsShownOnlyWhileTyping`.
+- **Observed:**
+  ```text
+  --- FAIL: TestPasswordIsShownOnlyWhileTyping (0.00s)
+      web_test.go:362: login() doesn't hide the password before anything can return: a failed attempt would leave it on screen
+  ```
+  (Sandbox run.)
+- **Why:** after a wrong password the page empties the field and puts the cursor back in it, so the next try is typed straight away, in plain text, though nobody pressed **Show** again. A successful login would also leave the field in text mode behind the dashboard, for whoever logs in next on that screen. Showing a password is fine when you choose to; staying shown is a surprise.
+
 ## Experiment: the naive dual write loses a job
 
 Not a removed safeguard but the design of Task 22, run live on 2 November 2026 to see the failure Task 23 fixes. `POST /api/v1/jobs` saved the job in PostgreSQL, then pushed its ID to Redis, with nothing tying the two together.
