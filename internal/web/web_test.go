@@ -327,3 +327,41 @@ func TestFormControlsHaveLabels(t *testing.T) {
 		t.Error("the drawer and the delete confirmation must be modal <dialog>s")
 	}
 }
+
+// Task 77: the password can be shown while typing, through a real button
+// with a label that says what it does, and it's hidden again at every
+// login attempt and at logout, so it's never left on screen. Case 69 is
+// login() forgetting to hide it.
+func TestPasswordIsShownOnlyWhileTyping(t *testing.T) {
+	html, js := read(t, "static/index.html"), read(t, "static/app.js")
+	if !regexp.MustCompile(`<input id="password" type="password"`).MatchString(html) {
+		t.Error(`the password field doesn't start hidden (type="password")`)
+	}
+	toggle := regexp.MustCompile(`<button id="password-toggle"[^>]*>`).FindString(html)
+	for _, want := range []string{`type="button"`, `aria-controls="password"`, `aria-label="Show password"`} {
+		if !strings.Contains(toggle, want) {
+			t.Errorf("the show-password button lacks %s: %q", want, toggle)
+		}
+	}
+	for _, want := range []string{`"Hide password"`, `"Show password"`, `"text" : "password"`} {
+		if !strings.Contains(js, want) {
+			t.Errorf("setPasswordVisible no longer sets %s", want)
+		}
+	}
+	body := func(signature string) string {
+		i := strings.Index(js, signature)
+		if i < 0 {
+			t.Fatalf("app.js has no %q", signature)
+		}
+		end := strings.Index(js[i:], "\n}\n")
+		return js[i : i+end]
+	}
+	login := body("async function login(e) {")
+	if !strings.Contains(login, "setPasswordVisible(false)") ||
+		strings.Index(login, "setPasswordVisible(false)") > strings.Index(login, "return;") {
+		t.Error("login() doesn't hide the password before anything can return: a failed attempt would leave it on screen")
+	}
+	if !strings.Contains(body("async function logout("), "setPasswordVisible(false)") {
+		t.Error("logout() doesn't hide the password")
+	}
+}

@@ -14,6 +14,10 @@
 //     the query (often a token), the body or anything about the signing
 //     secret, which the dashboard never asks for. Attempts are shown as the
 //     API gives them: errors already cut to 300 characters, without URLs.
+//   - The password can be shown while it's typed (setPasswordVisible), but
+//     it's hidden again at every login attempt, right or wrong, and at
+//     logout, so it's never left on screen. The button's label says what
+//     pressing it will do: "Show password" or "Hide password".
 //   - The details drawer is drawn from the list's copy of the job, which
 //     has no webhook body. It never asks for the single job (that answer
 //     carries the body); only the job's attempts, retry and delete.
@@ -646,8 +650,19 @@ function deleteJob(id) {
 
 // ---------- session ----------
 
+// setPasswordVisible shows the password as text or hides it again. The
+// button's visible text and its screen-reader label always say what a
+// press will do next.
+function setPasswordVisible(visible) {
+  $("password").type = visible ? "text" : "password";
+  const b = $("password-toggle");
+  b.textContent = visible ? "Hide" : "Show";
+  b.setAttribute("aria-label", visible ? "Hide password" : "Show password");
+}
+
 async function login(e) {
   e.preventDefault();
+  setPasswordVisible(false); // every attempt hides it, whatever happens next
   const box = $("login-error");
   showError(box, "");
   const email = $("email").value.trim();
@@ -685,6 +700,7 @@ async function logout(tellServer = true) {
     await api("POST", "/auth/logout").catch(() => {});
   }
   sessionStorage.removeItem(TOKEN_KEY);
+  setPasswordVisible(false);
   clearTimeout(retryTimer);
   clearTimeout(healthTimer);
   if (events) events.close();
@@ -730,6 +746,10 @@ document.addEventListener("DOMContentLoaded", () => {
   $("login-form").addEventListener("submit", login);
   $("create-form").addEventListener("submit", createJob);
   $("logout").addEventListener("click", () => logout(true));
+  $("password-toggle").addEventListener("click", () => {
+    setPasswordVisible($("password").type === "password");
+    $("password").focus();
+  });
 
   $("filter-text").addEventListener("input", (e) => {
     view.text = e.target.value.trim();
