@@ -1018,6 +1018,19 @@ Each case was reproduced on a real machine (Arch Linux, Go 1.27, PostgreSQL 17) 
   (Sandbox run; the three "survived" lines of the first test shortened to one.)
 - **Why:** this is the mistake that's easiest to make, because reusing the existing, tested `ChangePassword` with "no session to keep" looks right and raises no error. The password changes and the tool says it's done; but the usual reason to reset a password is that someone else may have it, and every session they already opened would keep working for up to 24 hours. In SQL, anything compared with NULL is unknown, not true.
 
+## 71. A click on Retry or Delete also opens the drawer
+
+- **Safeguard:** a job's row opens its drawer when clicked (Task 79), but its click handler first returns if the click started on a button: `if (e.target.closest("button")) return;`.
+- **Removed:** the break-it deletes that line.
+- **Caught by:** `TestRowClickLeavesButtonsAlone`.
+- **Observed:**
+  ```text
+  --- FAIL: TestRowClickLeavesButtonsAlone (0.00s)
+      web_test.go:387: the row's click handler opens the drawer without first ignoring clicks on buttons: Retry, Delete and Copy ID would open it too
+  ```
+  (Sandbox run.)
+- **Why:** a click on a button inside a row reaches the row as well (the event bubbles up), so every button press would do two things: Retry retries and the drawer slides over the table; Delete opens its confirm dialog with the drawer behind it; Copy ID copies and hides the list you were working in. Nothing breaks outright, which is why it would ship: it just feels wrong, every time.
+
 ## Experiment: the naive dual write loses a job
 
 Not a removed safeguard but the design of Task 22, run live on 2 November 2026 to see the failure Task 23 fixes. `POST /api/v1/jobs` saved the job in PostgreSQL, then pushed its ID to Redis, with nothing tying the two together.

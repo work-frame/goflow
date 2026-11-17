@@ -365,3 +365,62 @@ func TestPasswordIsShownOnlyWhileTyping(t *testing.T) {
 		t.Error("logout() doesn't hide the password")
 	}
 }
+
+// Task 79 (U3): a click anywhere on a job's row opens its drawer, but a
+// click that starts on a button is only that button's: Retry, Delete and
+// Copy ID must never open the drawer as well. The title stays a real
+// button, so the keyboard keeps a way in. Case 71 is the row handler
+// without that check.
+func TestRowClickLeavesButtonsAlone(t *testing.T) {
+	js := read(t, "static/app.js")
+	i := strings.Index(js, "function jobRow(job) {")
+	if i < 0 {
+		t.Fatal("app.js has no jobRow")
+	}
+	row := js[i : i+strings.Index(js[i:], "\n}\n")]
+	handler := regexp.MustCompile(`(?s)tr\.addEventListener\("click", \(e\) => \{(.*?)\n  \}\);`).FindStringSubmatch(row)
+	if handler == nil {
+		t.Fatal("jobRow no longer opens the drawer from a row click")
+	}
+	guard, open := strings.Index(handler[1], `if (e.target.closest("button")) return;`), strings.Index(handler[1], "openDrawer(job.id)")
+	if guard < 0 || open < 0 || guard > open {
+		t.Error("the row's click handler opens the drawer without first ignoring clicks on buttons: Retry, Delete and Copy ID would open it too")
+	}
+	if !strings.Contains(row, `button(job.title, "link", () => openDrawer(job.id)`) {
+		t.Error("the job title is no longer a button that opens the drawer: keyboard and screen-reader users would lose their way in")
+	}
+}
+
+// Task 79 (U4): the drawer has four labelled sections, for every job type;
+// a job that isn't a webhook says why it has no attempt history instead
+// of drawing one.
+func TestDrawerHasFourSections(t *testing.T) {
+	html, js := read(t, "static/index.html"), read(t, "static/app.js")
+	for _, h := range []string{">Overview</h3>", ">Execution</h3>", ">Attempt history</h3>", ">Actions</h3>"} {
+		if !strings.Contains(html, h) {
+			t.Errorf("the drawer has no %s section", strings.TrimSuffix(strings.TrimPrefix(h, ">"), "</h3>"))
+		}
+	}
+	if strings.Contains(js, `$("drawer-attempts").hidden = job.type !== "webhook"`) {
+		t.Error("the attempt history section is hidden for demo jobs again")
+	}
+	if !strings.Contains(js, "Delivery attempts are recorded for webhook jobs.") {
+		t.Error("a demo job's drawer no longer explains why it has no attempt history")
+	}
+}
+
+// Task 79: copying an ID is a real button with a label that names the
+// full ID, it reports success or failure on itself and to screen readers,
+// and a refused clipboard is handled, not thrown.
+func TestCopyIDGivesFeedback(t *testing.T) {
+	html, js := read(t, "static/index.html"), read(t, "static/app.js")
+	for _, want := range []string{`setAttribute("aria-label", "Copy job ID " + id)`, `"Copied"`, `"Copy failed"`,
+		"await navigator.clipboard.writeText(id);\n  } catch {", "announce(ok ?"} {
+		if !strings.Contains(js, want) {
+			t.Errorf("app.js lacks %q", want)
+		}
+	}
+	if !strings.Contains(html, `<p id="announce" class="sr-only" aria-live="polite"></p>`) {
+		t.Error("index.html has no polite live region for announcements")
+	}
+}

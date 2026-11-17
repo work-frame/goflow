@@ -257,7 +257,8 @@ Open the API's address in a browser: `http://localhost:8080/` locally, or https:
 - shows an overview of your jobs: the total, how many are waiting, processing, retrying, completed and dead or failed, and the success rate (completed ÷ completed + dead + failed, `—` until a job has finished). It counts the full list the page holds, so the numbers change the moment an event arrives;
 - lists your jobs, newest first, 25 to a page, with a search (title or ID) and a status filter, and updates them as they change;
 - shows two health signals in the top bar: **API** (`GET /readyz`: the API and its database answer, checked every 30 s) and the live dot, which says `live` while updates flow;
-- opens a job's details in a drawer (full-screen on a phone): status, type, tries, times, the full ID, and for a webhook its host and delivery attempts;
+- opens a job's details in a drawer (full-screen on a phone) when you click its row or its title: Overview (ID with a copy button, type, status, a webhook's host), Execution (attempts, next attempt, created and updated with how long ago), Attempt history (each webhook delivery's outcome, HTTP status, duration and error; other jobs say they have none) and Actions;
+- copies a job's full ID from the table's ID column, saying "Copied" (or "Copy failed", if the browser refuses);
 - creates a job, with an optional max attempts from 1 to 10 (left empty, the server's default of 3), each click with its own `Idempotency-Key`; retries a dead one; and deletes one after asking;
 - keeps working through restarts: when the connection drops it says so, reconnects with a new ticket and reloads the list.
 
