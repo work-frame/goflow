@@ -18,6 +18,10 @@
 //     it's hidden again at every login attempt, right or wrong, and at
 //     logout, so it's never left on screen. The button's label says what
 //     pressing it will do: "Show password" or "Hide password".
+//   - A click anywhere on a job's row opens its drawer, except a click that
+//     starts on a button (Retry, Delete, Copy ID), which only does what
+//     that button says. The title stays a real button, so the keyboard and
+//     screen readers have the same way in (Task 79).
 //   - The details drawer is drawn from the list's copy of the job, which
 //     has no webhook body. It never asks for the single job (that answer
 //     carries the body); only the job's attempts, retry and delete.
@@ -312,6 +316,39 @@ function when(iso) {
   return iso ? new Date(iso).toLocaleString() : "–";
 }
 
+// short is the table's compact time: "17 Nov, 21:40", with the year only
+// when it isn't this year. The full time goes in the cell's title.
+function short(iso) {
+  if (!iso) return "–";
+  const d = new Date(iso);
+  const opts = { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" };
+  if (d.getFullYear() !== new Date().getFullYear()) opts.year = "numeric";
+  return d.toLocaleString(undefined, opts);
+}
+
+// ago says how far a time is from now, for the drawer: "3 min ago", or
+// "in 40 s" for a retry still to come.
+function ago(iso) {
+  if (!iso) return "";
+  const s = Math.round((Date.now() - new Date(iso).getTime()) / 1000);
+  const a = Math.abs(s);
+  const amount = a < 10 ? "" : a < 60 ? a + " s" : a < 3600 ? Math.round(a / 60) + " min"
+    : a < 86400 ? Math.round(a / 3600) + " h" : Math.round(a / 86400) + " days";
+  if (!amount) return "just now";
+  return s >= 0 ? amount + " ago" : "in " + amount;
+}
+
+// timeWithAgo is a drawer value: the full time, then how long ago, muted.
+function timeWithAgo(iso) {
+  const wrap = el("span", "time");
+  wrap.append(el("span", "", when(iso)), el("span", "muted ago", ago(iso)));
+  return wrap;
+}
+
+function announce(text) {
+  $("announce").textContent = text;
+}
+
 // ---------- overview ----------
 
 function count(list, ...statuses) {
@@ -393,18 +430,32 @@ function jobRow(job) {
 
   const actions = cell("", "actions");
   if (job.status === "dead" || job.status === "failed") {
-    actions.append(button("Retry", "small", () => retryJob(job.id, $("jobs-error")), "retry:" + job.id));
+    actions.append(button("Retry", "small action", () => retryJob(job.id, $("jobs-error")), "retry:" + job.id));
   }
-  actions.append(button("Delete", "small quiet", () => askDelete(job.id), "delete:" + job.id));
+  actions.append(button("Delete", "small action delete", () => askDelete(job.id), "delete:" + job.id));
+
+  const created = cell(short(job.created_at), "col-created time");
+  created.title = when(job.created_at);
+  const idCell = cell("", "col-id");
+  idCell.append(copyButton(job.id, job.id.slice(0, 8), "id-copy mono", "copy:" + job.id));
 
   tr.append(
     status,
     title,
     cell(job.attempts + "/" + job.max_attempts, "num"),
-    cell(when(job.created_at), "col-created muted"),
-    cell(job.id.slice(0, 8), "col-id mono muted"),
+    created,
+    idCell,
     actions,
   );
+  // The row is a bigger target for a mouse or a finger. A click that
+  // starts on a button is that button's: Retry, Delete and Copy ID never
+  // open the drawer as well. Selecting text in the row doesn't either.
+  tr.className = "row-link";
+  tr.addEventListener("click", (e) => {
+    if (e.target.closest("button")) return;
+    if (String(window.getSelection())) return;
+    openDrawer(job.id);
+  });
   return tr;
 }
 
@@ -456,6 +507,35 @@ function render() {
 
 // ---------- the details drawer ----------
 
+// copied remembers the last Copy ID press for 2 s, so the button can say
+// how it went even if a live event redraws the table meanwhile.
+let copied = { id: "", ok: false, until: 0 };
+
+// copyButton copies a job's full ID. It says "Copied" or "Copy failed" on
+// itself, tells screen readers through #announce, and on failure points
+// to the drawer, where the full ID can be selected by hand.
+function copyButton(id, label, className, focusKey) {
+  const fresh = copied.id === id && Date.now() < copied.until;
+  const text = !fresh ? label : copied.ok ? "Copied" : "Copy failed";
+  const b = button(text, "small " + className, () => copyId(id), focusKey);
+  b.setAttribute("aria-label", "Copy job ID " + id);
+  b.title = fresh && !copied.ok ? "Your browser didn't allow it: select the ID in the details and copy it by hand" : "Copy the full ID";
+  return b;
+}
+
+async function copyId(id) {
+  let ok = true;
+  try {
+    await navigator.clipboard.writeText(id);
+  } catch {
+    ok = false;
+  }
+  copied = { id, ok, until: Date.now() + 2000 };
+  announce(ok ? "Job ID copied" : "Couldn't copy the job ID. Select it in the details and copy it by hand.");
+  render();
+  setTimeout(render, 2100);
+}
+
 function field(dl, label, value, className) {
   const wrap = el("div", "field-row");
   wrap.append(el("dt", "", label));
@@ -504,12 +584,17 @@ function renderAttempts() {
     const li = el("li", "attempt outcome-" + a.outcome);
     const top = el("div", "attempt-top");
     top.append(
-      el("span", "attempt-n", "#" + a.attempt),
+      el("span", "attempt-n", "Attempt " + a.attempt),
       el("span", "attempt-outcome", a.outcome),
-      el("span", "muted", a.status_code ? "HTTP " + a.status_code : "no response"),
-      el("span", "muted", a.duration_ms + " ms"),
     );
-    li.append(top, el("p", "muted small", when(a.started_at)));
+    const facts = el("dl", "attempt-facts");
+    for (const [k, v] of [["HTTP", a.status_code ? String(a.status_code) : "no response"],
+      ["Took", a.duration_ms + " ms"], ["Started", when(a.started_at)]]) {
+      const d = el("div");
+      d.append(el("dt", "", k), el("dd", "", v));
+      facts.append(d);
+    }
+    li.append(top, facts);
     if (a.error) li.append(el("p", "attempt-error mono", a.error));
     ol.append(li);
   }
@@ -522,29 +607,42 @@ function renderDrawer() {
   const gone = !job;
   $("drawer-gone").hidden = !gone;
   $("drawer-delete").disabled = gone;
+  for (const id of ["drawer-overview", "drawer-execution", "drawer-attempts"]) $(id).hidden = gone;
   if (gone) {
     $("drawer-retry").hidden = true;
-    $("drawer-attempts").hidden = true;
     return;
   }
   $("drawer-title").textContent = job.title;
-  const dl = $("drawer-fields");
-  dl.replaceChildren();
-  field(dl, "Status", badge(job.status));
-  field(dl, "Type", job.type);
-  const host = webhookHost(job);
-  if (host) field(dl, "Delivers to", host, "mono");
-  field(dl, "Tries", job.attempts + " of " + job.max_attempts);
-  if (job.status === "retrying" && job.next_attempt_at) field(dl, "Next attempt", when(job.next_attempt_at));
-  field(dl, "Created", when(job.created_at));
-  field(dl, "Updated", when(job.updated_at));
+
+  // Overview: what the job is.
+  const overview = $("drawer-overview-fields");
+  overview.replaceChildren();
   const idWrap = el("span", "id-wrap");
-  idWrap.append(el("code", "mono", job.id), button("Copy", "small quiet", () => copyId(job.id)));
-  field(dl, "ID", idWrap);
+  idWrap.append(el("code", "mono", job.id), copyButton(job.id, "Copy", "quiet", "copy-drawer:" + job.id));
+  field(overview, "ID", idWrap);
+  field(overview, "Type", job.type);
+  field(overview, "Status", badge(job.status));
+  const host = webhookHost(job);
+  if (host) field(overview, "Delivers to", host, "mono");
+
+  // Execution: how it ran, from the list's copy (no body, no last error:
+  // the API doesn't send them to the browser).
+  const exec = $("drawer-execution-fields");
+  exec.replaceChildren();
+  field(exec, "Attempts", job.attempts + " of " + job.max_attempts);
+  if (job.status === "retrying" && job.next_attempt_at) field(exec, "Next attempt", timeWithAgo(job.next_attempt_at));
+  field(exec, "Created", timeWithAgo(job.created_at));
+  field(exec, "Updated", timeWithAgo(job.updated_at));
 
   $("drawer-retry").hidden = !(job.status === "dead" || job.status === "failed");
-  $("drawer-attempts").hidden = job.type !== "webhook";
-  if (job.type === "webhook") renderAttempts();
+  if (job.type === "webhook") {
+    renderAttempts();
+  } else {
+    // Only webhook deliveries are recorded one by one (webhook_attempts).
+    // Say so instead of drawing a history that doesn't exist.
+    $("attempts-body").replaceChildren(el("p", "muted small",
+      "Delivery attempts are recorded for webhook jobs. This job ran " + job.attempts + " of " + job.max_attempts + " times."));
+  }
 }
 
 async function loadAttempts(id) {
@@ -559,15 +657,6 @@ async function loadAttempts(id) {
     if (drawer.id === id) drawer.attempts = err;
   }
   renderDrawer();
-}
-
-async function copyId(id) {
-  try {
-    await navigator.clipboard.writeText(id);
-    showError($("drawer-error"), "");
-  } catch {
-    showError($("drawer-error"), "Couldn't copy: select the ID and copy it by hand.");
-  }
 }
 
 // ---------- actions ----------
@@ -773,6 +862,7 @@ document.addEventListener("DOMContentLoaded", () => {
   $("page-next").addEventListener("click", () => { view.page++; render(); });
 
   $("drawer-close").addEventListener("click", closeDrawer);
+  $("drawer-close-bottom").addEventListener("click", closeDrawer);
   $("drawer").addEventListener("close", () => { drawer.id = ""; drawer.attempts = undefined; });
   // A click on the backdrop (the dialog itself, outside its content) closes it.
   $("drawer").addEventListener("click", (e) => { if (e.target === $("drawer")) closeDrawer(); });
