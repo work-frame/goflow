@@ -53,3 +53,35 @@ func TestDatabaseTLS(t *testing.T) {
 		}
 	}
 }
+
+// goflow-admin's stricter rule (Task 78, R1): remote means verify-full,
+// and a Compose-style single-label name doesn't count as this machine.
+func TestDatabaseVerifyFull(t *testing.T) {
+	ok := []string{
+		"postgres://u:p@ep-x.eu-central-1.aws.neon.tech/neondb?sslmode=verify-full",
+		"postgres://u:p@ep-x.eu-central-1.aws.neon.tech/neondb?channel_binding=require&sslmode=verify-full",
+		"postgres://goflow:goflow@localhost:5432/goflow?sslmode=disable",
+		"postgres://goflow:goflow@127.0.0.1:5432/goflow",
+		"postgres://goflow:goflow@[::1]:5432/goflow",
+	}
+	for _, raw := range ok {
+		if err := DatabaseVerifyFull(raw); err != nil {
+			t.Errorf("refused %s: %v", raw, err)
+		}
+	}
+	bad := []string{
+		"postgres://u:pw-in-url@ep-x.eu-central-1.aws.neon.tech/neondb?sslmode=require",
+		"postgres://u:pw-in-url@ep-x.eu-central-1.aws.neon.tech/neondb?sslmode=verify-ca",
+		"postgres://u:pw-in-url@ep-x.eu-central-1.aws.neon.tech/neondb",
+		"postgres://u:pw-in-url@postgres:5432/goflow?sslmode=disable",
+		"not a url",
+	}
+	for _, raw := range bad {
+		err := DatabaseVerifyFull(raw)
+		if err == nil {
+			t.Errorf("accepted %s", raw)
+		} else if strings.Contains(err.Error(), "pw-in-url") {
+			t.Errorf("the error shows the password: %v", err)
+		}
+	}
+}

@@ -319,3 +319,83 @@ func TestUserStoreChangePasswordIsAllOrNothing(t *testing.T) {
 		t.Error("the password changed although ending the sessions failed")
 	}
 }
+
+// Task 78: the owner reset ends every session the user has, because
+// nobody resetting a password from goflow-admin is signed in. Case 70 is
+// ResetPassword written as ChangePassword with no session to keep, which
+// ends none: "token_hash <> NULL" matches no row.
+func TestUserStoreResetPasswordEndsEverySession(t *testing.T) {
+	t.Parallel()
+	db, dan, eve, s := newTwoUserFixture(t)
+	users := NewUserStore(db)
+	ctx := context.Background()
+
+	tokens := sessionsOf(t, s, dan.ID, 3, time.Now())
+	sessionsOf(t, s, eve.ID, 1, time.Now())
+
+	newHash, err := testHasher.Hash("a reset password for dan")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ended, err := users.ResetPassword(ctx, dan.ID, newHash)
+	if err != nil {
+		t.Fatalf("ResetPassword: %v", err)
+	}
+	if ended != 3 {
+		t.Errorf("ended %d sessions, want all 3", ended)
+	}
+	for _, tok := range tokens {
+		if _, err := s.Lookup(ctx, auth.HashToken(tok)); !errors.Is(err, auth.ErrSessionNotFound) {
+			t.Errorf("a session survived the reset: err = %v", err)
+		}
+	}
+	if got := countSessions(t, db, dan.ID); got != 0 {
+		t.Errorf("%d of dan's sessions left after the reset, want 0", got)
+	}
+	if countSessions(t, db, eve.ID) != 1 {
+		t.Error("dan's reset ended eve's session")
+	}
+	got, err := users.GetByEmail(ctx, dan.Email)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.PasswordHash != newHash {
+		t.Error("password hash was not changed")
+	}
+
+	if _, err := users.ResetPassword(ctx, "ffffffffffffffffffffffffffffffff", newHash); !errors.Is(err, auth.ErrUserNotFound) {
+		t.Errorf("unknown user: err = %v, want auth.ErrUserNotFound", err)
+	}
+}
+
+// If deleting the sessions fails, the password must not change either.
+func TestUserStoreResetPasswordIsAllOrNothing(t *testing.T) {
+	t.Parallel()
+	db, dan, _, s := newTwoUserFixture(t)
+	users := NewUserStore(db)
+	ctx := context.Background()
+	sessionsOf(t, s, dan.ID, 2, time.Now())
+
+	before, err := users.GetByEmail(ctx, dan.Email)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Renaming the column makes the DELETE fail after the UPDATE has run.
+	if _, err := db.ExecContext(ctx, `ALTER TABLE sessions RENAME COLUMN user_id TO user_id_gone`); err != nil {
+		t.Fatal(err)
+	}
+	newHash, err := testHasher.Hash("a reset that must not stick")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := users.ResetPassword(ctx, dan.ID, newHash); err == nil {
+		t.Fatal("ResetPassword succeeded with a broken sessions table")
+	}
+	after, err := users.GetByEmail(ctx, dan.Email)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.PasswordHash != before.PasswordHash {
+		t.Error("the password changed although ending the sessions failed")
+	}
+}

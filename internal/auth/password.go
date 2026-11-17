@@ -5,6 +5,7 @@ package auth
 import (
 	"errors"
 	"fmt"
+	"strconv"
 	"unicode/utf8"
 
 	"golang.org/x/crypto/bcrypt"
@@ -18,6 +19,11 @@ const (
 	MaxPasswordBytes = 72
 	// DefaultCost makes one hash take roughly a quarter of a second.
 	DefaultCost = 12
+	// MinSettingCost and MaxSettingCost bound GOFLOW_BCRYPT_COST. Below 10,
+	// stolen hashes are too cheap to crack. Each step doubles the time, so
+	// 14 is already about 7 s per login on a laptop.
+	MinSettingCost = 10
+	MaxSettingCost = 14
 )
 
 var (
@@ -87,4 +93,21 @@ func (h Hasher) effectiveCost() int {
 		return bcrypt.DefaultCost
 	}
 	return h.Cost
+}
+
+// CostSetting reads GOFLOW_BCRYPT_COST: DefaultCost when raw is empty,
+// otherwise a whole number from MinSettingCost to MaxSettingCost. The API
+// and goflow-admin both use it, so they can never disagree on the rule.
+func CostSetting(raw string) (int, error) {
+	if raw == "" {
+		return DefaultCost, nil
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, fmt.Errorf("GOFLOW_BCRYPT_COST must be a whole number, got %q", raw)
+	}
+	if n < MinSettingCost || n > MaxSettingCost {
+		return 0, fmt.Errorf("GOFLOW_BCRYPT_COST must be between %d and %d, got %d", MinSettingCost, MaxSettingCost, n)
+	}
+	return n, nil
 }

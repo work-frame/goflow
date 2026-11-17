@@ -108,3 +108,17 @@ func BenchmarkHashMinCost(b *testing.B) {
 		}
 	}
 }
+
+// The API (GOFLOW_BCRYPT_COST) and goflow-admin share this rule.
+func TestCostSetting(t *testing.T) {
+	for raw, want := range map[string]int{"": DefaultCost, "10": 10, "12": 12, "14": 14} {
+		if got, err := CostSetting(raw); err != nil || got != want {
+			t.Errorf("CostSetting(%q) = %d, %v; want %d", raw, got, err, want)
+		}
+	}
+	for raw, msg := range map[string]string{"9": "between 10 and 14, got 9", "15": "between 10 and 14, got 15", "x": `whole number, got "x"`} {
+		if _, err := CostSetting(raw); err == nil || !strings.Contains(err.Error(), msg) {
+			t.Errorf("CostSetting(%q): err = %v, want it to contain %q", raw, err, msg)
+		}
+	}
+}
