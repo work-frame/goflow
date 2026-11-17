@@ -3,45 +3,164 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
   <title>GoFlow</title>
   <link rel="icon" href="data:,">
   <link rel="stylesheet" href="/style.css">
   <script src="/app.js" defer></script>
 </head>
 <body>
-  <header>
-    <h1>GoFlow</h1>
-    <div id="session" hidden>
-      <span id="live" class="live off">offline</span>
-      <button id="logout" type="button">Log out</button>
+  <a class="skip" href="#jobs-heading">Skip to jobs</a>
+  <header class="topbar">
+    <div class="brand">
+      <span class="mark" aria-hidden="true"></span>
+      <span class="name">GoFlow</span>
+    </div>
+    <div id="session" class="session" hidden>
+      <span id="api-health" class="health wait" title="GET /readyz: the API and its database">API: checking</span>
+      <span id="live" class="live wait" title="The live event stream">connecting</span>
+      <span id="who" class="who"></span>
+      <button id="logout" class="btn ghost" type="button">Log out</button>
     </div>
   </header>
 
   <main>
-    <section id="login-view" hidden>
-      <h2>Log in</h2>
-      <form id="login-form">
-        <label>Email <input id="email" type="email" autocomplete="username" required></label>
-        <label>Password <input id="password" type="password" autocomplete="current-password" required></label>
-        <button type="submit">Log in</button>
-      </form>
-      <p id="login-error" class="error" hidden></p>
+    <section id="login-view" class="login" aria-labelledby="login-heading" hidden>
+      <div class="login-card">
+        <h1 id="login-heading">Log in to GoFlow</h1>
+        <p class="muted">Your jobs, their attempts and live status.</p>
+        <form id="login-form" novalidate>
+          <label class="field" for="email">
+            <span>Email</span>
+            <input id="email" type="email" autocomplete="username" required>
+          </label>
+          <label class="field" for="password">
+            <span>Password</span>
+            <input id="password" type="password" autocomplete="current-password" required>
+          </label>
+          <p id="login-error" class="error" role="alert" hidden></p>
+          <button id="login-submit" class="btn primary wide" type="submit">Log in</button>
+        </form>
+      </div>
     </section>
 
-    <section id="jobs-view" hidden>
-      <form id="create-form">
-        <input id="title" maxlength="200" placeholder="New job title, e.g. sleep:3s, flaky:2, fail" required>
-        <button type="submit">Create</button>
-      </form>
-      <p id="jobs-error" class="error" hidden></p>
-      <table>
-        <thead>
-          <tr><th>Status</th><th>Title</th><th>Tries</th><th>Created</th><th>ID</th><th></th></tr>
-        </thead>
-        <tbody id="jobs"></tbody>
-      </table>
-      <p id="empty" class="muted" hidden>No jobs yet.</p>
-    </section>
+    <div id="jobs-view" class="app" hidden>
+      <p id="jobs-error" class="banner error" role="alert" hidden></p>
+
+      <section class="overview" aria-labelledby="overview-heading">
+        <div class="section-head">
+          <h1 id="overview-heading">Overview</h1>
+          <p class="muted small">Your jobs, counted from the full list and kept current by live updates.</p>
+        </div>
+        <dl id="metrics" class="metrics" aria-busy="true">
+          <div class="metric"><dt>Total</dt><dd id="m-total" class="skeleton-text">0</dd></div>
+          <div class="metric"><dt>Waiting</dt><dd id="m-waiting" class="skeleton-text">0</dd></div>
+          <div class="metric"><dt>Processing</dt><dd id="m-processing" class="skeleton-text">0</dd></div>
+          <div class="metric"><dt>Retrying</dt><dd id="m-retrying" class="skeleton-text">0</dd></div>
+          <div class="metric"><dt>Completed</dt><dd id="m-completed" class="skeleton-text">0</dd></div>
+          <div class="metric"><dt>Dead or failed</dt><dd id="m-dead" class="skeleton-text">0</dd></div>
+          <div class="metric"><dt>Success rate</dt><dd id="m-rate" class="skeleton-text">0</dd></div>
+        </dl>
+      </section>
+
+      <section class="panel" aria-labelledby="create-heading">
+        <h2 id="create-heading">New job</h2>
+        <form id="create-form" class="create" novalidate>
+          <label class="field grow" for="title">
+            <span>Title</span>
+            <input id="title" maxlength="200" autocomplete="off" required aria-describedby="title-help create-error" placeholder="sleep:3s">
+          </label>
+          <label class="field narrow" for="max-attempts">
+            <span>Max attempts <span class="muted">(optional)</span></span>
+            <input id="max-attempts" type="number" inputmode="numeric" min="1" max="10" step="1" placeholder="3" aria-describedby="title-help create-error">
+          </label>
+          <button id="create-submit" class="btn primary" type="submit">Create job</button>
+        </form>
+        <p id="title-help" class="muted small">Demo titles: <code>sleep:3s</code>, <code>flaky:2</code>, <code>fail</code>. Max attempts is 1 to 10; left empty, the server uses its default.</p>
+        <p id="create-error" class="error small" role="alert" hidden></p>
+      </section>
+
+      <section class="panel" aria-labelledby="jobs-heading">
+        <div class="table-head">
+          <h2 id="jobs-heading" tabindex="-1">Jobs</h2>
+          <div class="filters">
+            <label class="field inline" for="filter-text">
+              <span class="sr-only">Search jobs</span>
+              <input id="filter-text" type="search" placeholder="Search title or ID" autocomplete="off">
+            </label>
+            <label class="field inline" for="filter-status">
+              <span class="sr-only">Filter by status</span>
+              <select id="filter-status"></select>
+            </label>
+          </div>
+        </div>
+
+        <div class="table-wrap">
+          <table class="jobs">
+            <caption class="sr-only">Your jobs, newest first</caption>
+            <thead>
+              <tr>
+                <th scope="col">Status</th>
+                <th scope="col">Title</th>
+                <th scope="col" class="num">Tries</th>
+                <th scope="col" class="col-created">Created</th>
+                <th scope="col" class="col-id">ID</th>
+                <th scope="col"><span class="sr-only">Actions</span></th>
+              </tr>
+            </thead>
+            <tbody id="jobs"></tbody>
+          </table>
+        </div>
+
+        <div id="empty" class="empty" hidden>
+          <p id="empty-title" class="empty-title"></p>
+          <p id="empty-text" class="muted small"></p>
+          <button id="empty-clear" class="btn ghost" type="button" hidden>Clear filters</button>
+        </div>
+
+        <nav class="pager" aria-label="Job pages">
+          <p id="page-info" class="muted small" aria-live="polite"></p>
+          <div class="pager-buttons">
+            <button id="page-prev" class="btn ghost" type="button">Previous</button>
+            <button id="page-next" class="btn ghost" type="button">Next</button>
+          </div>
+        </nav>
+      </section>
+    </div>
   </main>
+
+  <dialog id="drawer" class="drawer" aria-labelledby="drawer-title">
+    <div class="drawer-inner">
+      <header class="drawer-head">
+        <div>
+          <p class="muted small">Job</p>
+          <h2 id="drawer-title"></h2>
+        </div>
+        <button id="drawer-close" class="btn ghost" type="button" aria-label="Close job details">Close</button>
+      </header>
+      <p id="drawer-gone" class="banner" hidden>This job was deleted.</p>
+      <dl id="drawer-fields" class="fields"></dl>
+      <div class="drawer-actions">
+        <button id="drawer-retry" class="btn" type="button" hidden>Retry</button>
+        <button id="drawer-delete" class="btn danger" type="button">Delete</button>
+      </div>
+      <section id="drawer-attempts" class="attempts" aria-labelledby="attempts-heading" hidden>
+        <h3 id="attempts-heading">Delivery attempts</h3>
+        <div id="attempts-body"></div>
+      </section>
+      <p id="drawer-error" class="error small" role="alert" hidden></p>
+    </div>
+  </dialog>
+
+  <dialog id="confirm" class="confirm" aria-labelledby="confirm-title" aria-describedby="confirm-text">
+    <form method="dialog">
+      <h2 id="confirm-title">Delete this job?</h2>
+      <p id="confirm-text" class="muted"></p>
+      <div class="confirm-actions">
+        <button class="btn ghost" value="cancel" type="submit">Cancel</button>
+        <button id="confirm-ok" class="btn danger" value="delete" type="submit">Delete</button>
+      </div>
+    </form>
+  </dialog>
 </body>
 </html>
