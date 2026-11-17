@@ -972,6 +972,19 @@ Each case was reproduced on a real machine (Arch Linux, Go 1.27, PostgreSQL 17) 
   (Sandbox run.)
 - **Why:** the drill still works with the key in a file, so no run would ever notice. But that file is the one thing that opens every backup, sitting unencrypted in a home folder that gets synced, backed up and copied to new laptops, long after the drill is over. The whole point of public-key backups is that only the password manager holds it.
 
+## 68. The job drawer fetches the full job
+
+- **Safeguard:** the dashboard's details drawer (Task 76) is drawn from the list's copy of a job, which never has a webhook body. Its only requests are the job's attempts, retry and delete. `GET /api/v1/jobs/{id}` answers with the body, so the page never calls it.
+- **Removed:** the break-it makes `openDrawer` "refresh" the job from `GET /api/v1/jobs/{id}`.
+- **Caught by:** `TestDrawerNeverFetchesTheFullJob`.
+- **Observed:**
+  ```text
+  --- FAIL: TestDrawerNeverFetchesTheFullJob (0.00s)
+      web_test.go:198: app.js makes a GET the dashboard must not make: api("GET", "/jobs/" + encodeURIComponent(id)).then(apply).then(render); // break-it: refresh from the single-job endpoint
+  ```
+  (Sandbox run.)
+- **Why:** nothing on the page changes. The answer has the same version as the list's copy, so `apply()` keeps the old one, and no test that looks at the screen would notice. But the body has crossed into the browser: it sits in the network panel, in memory, and in any extension that reads the page. A webhook body is the customer's payload, often with personal data in it. The dashboard's rule since Task 66 is that the browser sees a webhook's host and nothing else.
+
 ## Experiment: the naive dual write loses a job
 
 Not a removed safeguard but the design of Task 22, run live on 2 November 2026 to see the failure Task 23 fixes. `POST /api/v1/jobs` saved the job in PostgreSQL, then pushed its ID to Redis, with nothing tying the two together.

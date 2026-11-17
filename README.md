@@ -254,9 +254,14 @@ Every response carries an `X-Request-ID` header, and the same ID appears in the 
 
 Open the API's address in a browser: `http://localhost:8080/` locally, or https://goflow-api-hewh.onrender.com/ for the hosted one. Log in with the same email and password as `goflow login`. The page:
 
-- lists your jobs, newest first, and updates them as they change (the dot next to **Log out** says `live` while updates flow);
-- creates a job (each click sends its own `Idempotency-Key`), retries a dead one, and deletes one;
+- shows an overview of your jobs: the total, how many are waiting, processing, retrying, completed and dead or failed, and the success rate (completed ÷ completed + dead + failed, `—` until a job has finished). It counts the full list the page holds, so the numbers change the moment an event arrives;
+- lists your jobs, newest first, 25 to a page, with a search (title or ID) and a status filter, and updates them as they change;
+- shows two health signals in the top bar: **API** (`GET /readyz`: the API and its database answer, checked every 30 s) and the live dot, which says `live` while updates flow;
+- opens a job's details in a drawer (full-screen on a phone): status, type, tries, times, the full ID, and for a webhook its host and delivery attempts;
+- creates a job, with an optional max attempts from 1 to 10 (left empty, the server's default of 3), each click with its own `Idempotency-Key`; retries a dead one; and deletes one after asking;
 - keeps working through restarts: when the connection drops it says so, reconnects with a new ticket and reloads the list.
+
+It is dark only, checked for WCAG AA contrast by `TestColorsMeetWCAGAA`, and stops its animations for anyone whose system asks for reduced motion.
 
 The session token stays in the tab's `sessionStorage`: a refresh keeps you logged in, closing the tab forgets it. **Log out** also ends the session on the server. The page is three files embedded in the API binary ([`internal/web`](internal/web)); there is no build step.
 
