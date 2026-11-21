@@ -518,9 +518,9 @@ The drill branches were deleted in the Neon console afterwards.
 
 **First numbers.** RPO: up to 6 hours from Neon's history; past that, everything since the last `backup.sh` run. RTO: not measured. The restore itself takes under a second at this size; the time goes to the manual steps of the [disaster recovery runbook](#disaster-recovery-restoring-production-from-a-backup), estimated at 15 to 30 minutes until someone times it.
 
-### Automated backups (Phase 18, in progress)
+### Automated backups (Phase 18)
 
-Phase 16's backups depend on someone remembering to run `backup.sh`. Phase 18 runs them on a schedule. Decided on 14 November 2026; nothing below exists yet except the `age` support in the scripts (Task 74):
+Phase 16's backups depend on someone remembering to run `backup.sh`. Since 21 November 2026 they run on a schedule: every night at 02:41 UTC, from the private repository [`goflow-backups`](https://github.com/work-frame/goflow-backups) (its README says what each step does and where each secret lives). Decided on 14 November 2026:
 
 | Part | Choice | Why |
 |---|---|---|
@@ -540,6 +540,37 @@ GOFLOW_AGE_RECIPIENT=age1... ./scripts/backup.sh                     # the publi
 ```
 
 `restore-drill.sh` hands the private key to age through a pipe (`<(...)`): it is never written to disk, and it is cleared from the script's memory once the dump is decrypted. Old `.gpg` backups restore exactly as before. An age file is about the size of the plain dump (age doesn't compress; gpg does).
+
+**How each part was checked before production relied on it** (16 to 21 November 2026):
+
+| Check | Result |
+|---|---|
+| Test bucket, 1-day compliance lock | The account owner's delete in the web console was refused ("1 files were locked and could not be deleted"); an unauthenticated download got `401` |
+| The web console's "Write Only" key | Turned out to grant every write capability, `deleteFiles` and the bucket's lifecycle and lock settings included. Not used: keys are made through the API with exactly `listBuckets` and `writeFiles` |
+| The upload-only key, 7 checks | Upload worked; delete, list, download and a lifecycle change were refused (`401`); a lock change was refused (`403`); hide worked, but only adds an empty marker over the locked version |
+| Lifecycle after the lock | Once the 1-day locks ended, the rule removed both test files and the hidden version: 0 files, 0 bytes (checked 21 November) |
+| Read-only role `goflow_backup` | Created with SQL (a console-made Neon role joins `neon_superuser`). Reads every table and `pg_dump`s; INSERT, UPDATE, DELETE, TRUNCATE, ALTER, DROP and CREATE are each refused |
+| Production bucket `goflow-backups-prod` | Read back through the API before its key was made: private, SSE-B2 encryption, Object Lock in **compliance** mode for 35 days, one lifecycle rule (hide after 35 days, delete 1 day later) |
+| Heartbeat | A test `/fail` ping reached the inbox as a "down" email; the first successful run sent "up" |
+
+**Results**
+
+| What | When (UTC) | Result |
+|---|---|---|
+| First manual run | 21 Nov 2026 | Did not start: `gh workflow run` answered "does not have 'workflow_dispatch' trigger". `backup.yml` wasn't valid YAML, so GitHub had ignored it ([FAILURES.md](FAILURES.md#what-tests-did-not-catch)). Fixed in `goflow-backups` (Task 83) |
+| First backup | 21 Nov 2026, 20:23 | Run 44945978114, 46 s, every step passed: `goflow-20261121T202338Z.dump.age`, 20.8 KB, locked |
+| First restore drill | 21 Nov 2026 | Failed before decrypting: the age private key had never been saved in the password manager ([FAILURES.md](FAILURES.md#what-tests-did-not-catch)). That backup can't be opened by anyone; it expires with its lock. A new key pair was made and its public key derived from the saved copy; the workflow uses it since `goflow-backups` Task 84 |
+| Second backup | 21 Nov 2026, 20:40 | Run 44947406809, 53 s: `goflow-20261121T204002Z.dump.age`, 20,808 bytes |
+| Restore drill with the real key | 21 Nov 2026, ~20:45 | Decrypted with the key pasted from the password manager. 0 `pg_attver` lines this time (18 on 14 November: Neon's dumps no longer carry them; the filter stays for older backups). Foreign keys 5/5, indexes 18/18, CHECKs 31/31. Rows: users 1, sessions 0, jobs 20, outbox 0, secrets 1, attempts 2, migrations 13, newest job 2026-11-17 20:40:56, the dashboard's newest |
+
+**RPO now:** up to 6 hours from Neon's history; past that, up to a day (the newest nightly backup). 35 days of backups exist at any time. **RTO:** still the [runbook](#disaster-recovery-restoring-production-from-a-backup), untimed until Task 81.
+
+**Keeping it working:**
+
+- **A restore drill on the 1st of every month** (a reminder arrives): download the newest backup from the B2 console and run `restore-drill.sh` on it. The heartbeat proves the workflow said it succeeded; only a restore proves a backup and the key still work together.
+- **Secrets** are set by scripts that read the source at a hidden prompt and hand the value to `gh secret set` on its standard input, so no key is ever on screen or copied by hand. They are kept in `goflow-backups/admin/`, and running one again rotates that secret.
+- **Moving the pinned GoFlow commit** (`GOFLOW_SHA` in `backup.yml`) is a deliberate change: read what changed in `scripts/restore-filter.awk` and `scripts/pgurl.sh` first.
+- **GitHub disables a scheduled workflow after 60 days without activity** in its repository. The heartbeat's "down" email is what would say so.
 
 ### Disaster recovery: restoring production from a backup
 
