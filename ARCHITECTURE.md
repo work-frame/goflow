@@ -89,6 +89,18 @@ sessions (
 INDEX (user_id)     -- log out everywhere
 INDEX (expires_at)  -- hourly cleanup
 
+api_keys (                                  -- Task 86
+  id           TEXT        PRIMARY KEY     -- 32 hex
+  user_id      TEXT        NOT NULL REFERENCES users ON DELETE CASCADE
+  name         TEXT        NOT NULL        -- 1 to 100 characters
+  key_hash     BYTEA       NOT NULL UNIQUE -- SHA-256 of the gfk_ secret, 32 bytes
+  hint         TEXT        NOT NULL        -- the secret's last 4 characters
+  scopes       TEXT[]      NOT NULL        -- 'jobs:create' and/or 'jobs:read', none twice
+  created_at, expires_at   TIMESTAMPTZ NOT NULL  -- expires after created
+  last_used_at, revoked_at TIMESTAMPTZ     -- revoking keeps the row, as history
+)
+INDEX (user_id, created_at DESC)
+
 jobs (
   id         TEXT        PRIMARY KEY  -- 32 lowercase hex characters
   user_id    TEXT        NOT NULL REFERENCES users ON DELETE CASCADE
@@ -106,6 +118,7 @@ jobs (
   lease_expires_at TIMESTAMPTZ                     -- when that lease runs out, PostgreSQL's clock
   type            TEXT        NOT NULL DEFAULT 'demo'  -- 'demo' or 'webhook' (Task 63)
   payload         JSONB                            -- webhook jobs only: {"url": "...", "body": ...}
+  api_key_id      TEXT REFERENCES api_keys ON DELETE SET NULL  -- the key that made it; NULL from a session (Task 86)
   CHECK (type = 'webhook') = (payload IS NOT NULL), and a webhook payload has a string url and a body
   CHECK (status = 'processing') = (lease_token IS NOT NULL AND lease_expires_at IS NOT NULL)
 )
@@ -134,8 +147,17 @@ Every rule is also a `CHECK` constraint, so bad data is rejected even if it does
 ### Request flow
 
 ```text
-client → withRequestID → logRequests → recoverPanics → jsonMuxErrors → ServeMux → requireSession → handler → stores
+client → withRequestID → logRequests → recoverPanics → jsonMuxErrors → ServeMux → requireSession or requireAuth(scope) → handler → stores
 ```
+
+**API keys (Task 86).** Four routes are wrapped in `requireAuth(scope)` instead: `POST /api/v1/jobs` (`jobs:create`), and listing jobs, getting one and its attempts (`jobs:read`). They accept a session, which may do everything, or a `gfk_` key that holds the scope; a key without it gets `403` naming the scope. Every other route keeps `requireSession`, which answers a working key with `403` and a dead one with `401`. Deny by default: `requireAuth` can't be called without a scope, and a new route is closed to keys unless it is added with one. `TestEveryRouteIsInTheKeyTable` reads `api.go` and fails if a route is missing from the table of what each kind of key gets, and `TestAPIKeyScopesOnEveryRoute` calls every route with every kind of key (FAILURES.md, case 73).
+
+- **Checked on every request:** the key's hash is looked up with `revoked_at IS NULL AND expires_at > now()` on PostgreSQL's clock. Nothing is cached, so a revoked key fails on its next request.
+- **Scope and ownership are separate:** scope decides what a key may do; ownership, the same `user_id` filter as for sessions, decides whose jobs it reaches. A key with every scope still sees only its owner's jobs.
+- **`last_used_at`** is written at most once a minute. The condition is in the `UPDATE` itself, so 50 requests at once write one row version, not 50 (the row lock queues them, and READ COMMITTED re-checks the condition for each).
+- **At most 10 active keys:** the owner's `users` row is locked, then the active keys counted, in two statements. In one statement, a create that waited for the lock got a count from before it waited: 20 creates at once made 17 keys (found while building).
+- **Limits:** 60 key-made job creates a minute per key and 120 per account, both atomic counters in Redis, checked before any other work. Making a key needs the password again and is limited like a password change.
+- **An owner reset** (`goflow-admin reset-password`) revokes the account's active keys in the same transaction as the password and the sessions.
 
 `requireSession` wraps every endpoint except `healthz`, `readyz`, `register` and `login`. It reads `Authorization: Bearer <token>`, checks the token's format, hashes it and looks the hash up. Every failure (no header, wrong scheme, bad format, unknown, expired) gets the same `401` with `WWW-Authenticate: Bearer realm="goflow"`, so the response says nothing about why. The user ID then travels in the request context. Handlers read it with `callerID`, which panics if there is none, so a route that forgot `requireSession` fails loudly instead of serving everyone's data.
 
@@ -159,6 +181,10 @@ Every storage call gets `context.WithTimeout(r.Context(), 3s)`: it stops when th
 | `GET` | `/api/v1/jobs/{id}` | `200` + job |
 | `DELETE` | `/api/v1/jobs/{id}` | `204` |
 | `POST` | `/api/v1/jobs/{id}/retry` | `200` + job (`pending`, 0 attempts); `409` unless `dead` or `failed` |
+| `POST` | `/api/v1/keys` | `201` + `{"key", "secret"}`, `Cache-Control: no-store`; needs the password |
+| `GET` | `/api/v1/keys` | `200` + `{"keys": [...]}`, newest first, each with its status |
+| `DELETE` | `/api/v1/keys/{id}` | `204`; idempotent |
+| `POST` | `/api/v1/keys/revoke-all` | `200` + `{"revoked": n}` |
 
 Listing uses **keyset pagination**: `WHERE (created_at, id) > (cursor)`, `LIMIT limit + 1`. The extra row shows whether another page exists. Cursors are opaque base64url strings, validated on every request.
 
@@ -513,6 +539,7 @@ Everything runs with the race detector (`./scripts/check.sh`). Tests that need P
 | Decision | Reason |
 |---|---|
 | Standard library first; dependencies are `pgx`, `go-redis`, `golang.org/x/crypto` (bcrypt) and `golang.org/x/term` | Learn what frameworks hide. Never write your own password hashing |
+| API keys: `gfk_` bearer tokens stored as SHA-256 hashes, with scopes, 30 to 365 days, made only with the password (Task 86) | The same proven mechanism as sessions. A key reaches only the routes that name one of its scopes, so a leaked key for a contact form can create jobs and do nothing else. The password check stops a stolen 24-hour session becoming a year-long key |
 | Opaque session tokens stored as SHA-256 hashes, not JWTs | Logout and password changes end a session immediately. A copy of the `sessions` table can't be used to log in. Tokens are 256 random bits, so a fast hash is enough; passwords need bcrypt because people pick guessable ones |
 | Ownership checked in SQL (`WHERE id = $1 AND user_id = $2`); another user's job is `404` | A forgotten check in a handler can't leak data, and the response doesn't confirm the job exists |
 | The same `401` and the same time for every login failure | Response and timing can't reveal which emails have accounts |

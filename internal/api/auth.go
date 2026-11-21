@@ -229,10 +229,13 @@ func (h *handler) upgradeHash(ctx context.Context, r *http.Request, userID, pass
 // sessionKey stores the caller's session in the request context.
 const sessionKey ctxKey = 1
 
-// session is who is calling, as found by requireSession.
+// session is who is calling, as found by requireSession or requireAuth.
+// key is set when the caller used an API key (tokenHash is then the key's
+// hash); it is nil for a logged-in person.
 type session struct {
 	user      *auth.User
 	tokenHash []byte
+	key       *auth.APIKey
 }
 
 func currentSession(ctx context.Context) *session {
@@ -242,29 +245,26 @@ func currentSession(ctx context.Context) *session {
 
 // requireSession lets a request through only with a valid, unexpired session
 // token in "Authorization: Bearer <token>". It puts the session in the context.
+// A working API key gets 403: a route that names no scope is closed to keys
+// (Task 86). A key that doesn't work gets the same 401 as a bad session.
 func (h *handler) requireSession(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		token, ok := bearerToken(r)
-		if !ok || !auth.ValidTokenFormat(token) {
+		if ok && auth.IsKey(token) {
+			if _, ok := h.authenticateKey(w, r, token); ok {
+				writeError(w, http.StatusForbidden, "API keys can't use this route; log in instead")
+			}
+			return
+		}
+		if !ok {
 			unauthorized(w)
 			return
 		}
-		hash := auth.HashToken(token)
-
-		ctx, cancel := dbContext(r)
-		u, err := h.sessions.Lookup(ctx, hash)
-		cancel()
-		if errors.Is(err, auth.ErrSessionNotFound) {
-			unauthorized(w)
+		s, ok := h.sessionFor(w, r, token)
+		if !ok {
 			return
 		}
-		if err != nil {
-			h.storeError(w, r, err)
-			return
-		}
-
-		ctx = context.WithValue(r.Context(), sessionKey, &session{user: u, tokenHash: hash})
-		next(w, r.WithContext(ctx))
+		next(w, r.WithContext(context.WithValue(r.Context(), sessionKey, s)))
 	}
 }
 
@@ -283,6 +283,28 @@ func bearerToken(r *http.Request) (string, bool) {
 func unauthorized(w http.ResponseWriter) {
 	w.Header().Set("WWW-Authenticate", `Bearer realm="goflow"`)
 	writeError(w, http.StatusUnauthorized, "missing, invalid or expired session token")
+}
+
+// sessionFor finds the session behind a gfs_ token, or answers 401 or the
+// store's error and returns false.
+func (h *handler) sessionFor(w http.ResponseWriter, r *http.Request, token string) (*session, bool) {
+	if !auth.ValidTokenFormat(token) {
+		unauthorized(w)
+		return nil, false
+	}
+	hash := auth.HashToken(token)
+	ctx, cancel := dbContext(r)
+	u, err := h.sessions.Lookup(ctx, hash)
+	cancel()
+	if errors.Is(err, auth.ErrSessionNotFound) {
+		unauthorized(w)
+		return nil, false
+	}
+	if err != nil {
+		h.storeError(w, r, err)
+		return nil, false
+	}
+	return &session{user: u, tokenHash: hash}, true
 }
 
 func (h *handler) me(w http.ResponseWriter, r *http.Request) {

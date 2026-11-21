@@ -276,6 +276,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg config, ready func(addr s
 		ClientIPHeader:     cfg.ClientIPHeader,
 		WebhookSecrets:     secretStore,
 		WebhookAttempts:    attemptStore,
+		Keys:               database.NewAPIKeyStore(db),
 	}
 	// Only a real relay goes into the interface. Assigning a nil *relay.Relay
 	// would make deps.Relay != nil (an interface holding a nil pointer is not

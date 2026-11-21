@@ -72,10 +72,10 @@ func (s *JobStore) Add(ctx context.Context, j *job.Job) error {
 	defer tx.Rollback() // does nothing once Commit has succeeded
 
 	_, err = tx.ExecContext(ctx,
-		`INSERT INTO jobs (id, user_id, title, status, created_at, updated_at, max_attempts, idempotency_key, type, payload)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+		`INSERT INTO jobs (id, user_id, title, status, created_at, updated_at, max_attempts, idempotency_key, type, payload, api_key_id)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
 		j.ID, j.UserID, j.Title, string(j.Status), j.CreatedAt, j.UpdatedAt, maxAttempts(j), nullIfEmpty(j.IdempotencyKey),
-		typ, payload,
+		typ, payload, nullIfEmpty(j.APIKeyID),
 	)
 	// With a key, a second request waits here until the first one's
 	// transaction ends, then fails with this error if it committed.
@@ -316,11 +316,12 @@ type scanned struct {
 	j    job.Job
 	next sql.NullTime
 	url  sql.NullString
+	key  sql.NullString
 }
 
 func (s *scanned) targets() []any {
 	return []any{&s.j.ID, &s.j.UserID, &s.j.Title, &s.j.Status, &s.j.CreatedAt, &s.j.UpdatedAt,
-		&s.j.Attempts, &s.j.MaxAttempts, &s.next, &s.j.Version, &s.j.Type, &s.url}
+		&s.j.Attempts, &s.j.MaxAttempts, &s.next, &s.j.Version, &s.j.Type, &s.url, &s.key}
 }
 
 func (s *scanned) job() *job.Job {
@@ -334,6 +335,7 @@ func (s *scanned) job() *job.Job {
 	if s.url.Valid {
 		j.Webhook = &job.Webhook{URL: s.url.String}
 	}
+	j.APIKeyID = s.key.String
 	return &j
 }
 

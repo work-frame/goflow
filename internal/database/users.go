@@ -116,41 +116,51 @@ func (s *UserStore) ChangePassword(ctx context.Context, userID, hash string, kee
 	return ended, nil
 }
 
-// ResetPassword replaces a user's password hash and deletes EVERY session
-// the user has, in one transaction: if either step fails, neither happens.
-// It is for goflow-admin's owner-only reset, where nobody is signed in, so
-// there is no session to keep. Don't reuse ChangePassword with an empty
-// token for this: "token_hash <> NULL" matches no row, so it would end
-// nothing (FAILURES.md, case 70). It returns how many sessions it ended,
-// or auth.ErrUserNotFound.
-func (s *UserStore) ResetPassword(ctx context.Context, userID, hash string) (int64, error) {
+// ResetResult is what an owner reset ended.
+type ResetResult struct {
+	SessionsEnded int64
+	KeysRevoked   int64
+}
+
+// ResetPassword replaces a user's password hash, deletes EVERY session the
+// user has and revokes every API key (Task 86, decision K4), in one
+// transaction: if any step fails, none happens. It is for goflow-admin's
+// owner-only reset, used when the account may be in someone else's hands,
+// so nothing is kept. Don't reuse ChangePassword with an empty token for
+// this: "token_hash <> NULL" matches no row, so it would end nothing
+// (FAILURES.md, case 70). It returns what it ended, or auth.ErrUserNotFound.
+func (s *UserStore) ResetPassword(ctx context.Context, userID, hash string) (ResetResult, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return 0, fmt.Errorf("database: reset password for user %s: %w", userID, err)
+		return ResetResult{}, fmt.Errorf("database: reset password for user %s: %w", userID, err)
 	}
 	defer tx.Rollback() // a no-op after Commit
 
 	res, err := tx.ExecContext(ctx, `UPDATE users SET password_hash = $1 WHERE id = $2`, hash, userID)
 	if err != nil {
-		return 0, fmt.Errorf("database: reset password for user %s: %w", userID, err)
+		return ResetResult{}, fmt.Errorf("database: reset password for user %s: %w", userID, err)
 	}
 	if n, err := res.RowsAffected(); err != nil {
-		return 0, fmt.Errorf("database: reset password for user %s: %w", userID, err)
+		return ResetResult{}, fmt.Errorf("database: reset password for user %s: %w", userID, err)
 	} else if n == 0 {
-		return 0, auth.ErrUserNotFound
+		return ResetResult{}, auth.ErrUserNotFound
 	}
 
+	var r ResetResult
 	res, err = tx.ExecContext(ctx, `DELETE FROM sessions WHERE user_id = $1`, userID)
 	if err != nil {
-		return 0, fmt.Errorf("database: end sessions for user %s: %w", userID, err)
+		return ResetResult{}, fmt.Errorf("database: end sessions for user %s: %w", userID, err)
 	}
-	ended, err := res.RowsAffected()
-	if err != nil {
-		return 0, fmt.Errorf("database: end sessions for user %s: %w", userID, err)
+	if r.SessionsEnded, err = res.RowsAffected(); err != nil {
+		return ResetResult{}, fmt.Errorf("database: end sessions for user %s: %w", userID, err)
+	}
+	// tx, not s.db: a failed commit must leave the keys working too.
+	if r.KeysRevoked, err = revokeAllKeys(ctx, tx, userID); err != nil {
+		return ResetResult{}, err
 	}
 
 	if err := tx.Commit(); err != nil {
-		return 0, fmt.Errorf("database: reset password for user %s: %w", userID, err)
+		return ResetResult{}, fmt.Errorf("database: reset password for user %s: %w", userID, err)
 	}
-	return ended, nil
+	return r, nil
 }

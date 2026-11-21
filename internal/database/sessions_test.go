@@ -337,12 +337,12 @@ func TestUserStoreResetPasswordEndsEverySession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ended, err := users.ResetPassword(ctx, dan.ID, newHash)
+	res, err := users.ResetPassword(ctx, dan.ID, newHash)
 	if err != nil {
 		t.Fatalf("ResetPassword: %v", err)
 	}
-	if ended != 3 {
-		t.Errorf("ended %d sessions, want all 3", ended)
+	if res.SessionsEnded != 3 {
+		t.Errorf("ended %d sessions, want all 3", res.SessionsEnded)
 	}
 	for _, tok := range tokens {
 		if _, err := s.Lookup(ctx, auth.HashToken(tok)); !errors.Is(err, auth.ErrSessionNotFound) {
