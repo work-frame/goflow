@@ -1046,6 +1046,25 @@ Each case was reproduced on a real machine (Arch Linux, Go 1.27, PostgreSQL 17) 
   (Sandbox run.)
 - **Why:** the target for that test holds one table that isn't GoFlow's, `stranger`, so nothing in the dump collides with it and the load succeeds: the backup lands beside data nobody checked. Against a database that is GoFlow's, the load would fail on the first `CREATE TABLE` and roll back, which looks like protection but isn't the rule, only luck. The rule matters because the URL is pasted at a hidden prompt: the one mistake nobody can see is pasting production's URL. With the check, that paste stops at "the target isn't empty" before any key is asked for.
 
+## 73. Any API key passes every scope check
+
+- **Safeguard:** `requireAuth(scope)` (Task 86) lets a `gfk_` key through only if it holds the route's scope: `if !s.key.Allows(scope)` answers `403` naming the scope. A route that names no scope keeps `requireSession`, closed to keys.
+- **Removed:** the break-it changes the check to `if len(s.key.Scopes) == 0`: "does the key hold any scope?". Every stored key holds at least one, so every key may use every key route.
+- **Caught by:** `TestAPIKeyScopesOnEveryRoute` and `TestAPIKeysNeverReachTheLog`.
+- **Observed:**
+  ```text
+  --- FAIL: TestAPIKeyScopesOnEveryRoute (0.50s)
+      apikeys_test.go:110: POST /api/v1/jobs with a read key: status 201, want 403 ({"id":"108c4b1a...","title":"made by a key",...})
+      apikeys_test.go:110: GET /api/v1/jobs with a create key: status 200, want 403 ({"jobs":[...]})
+      apikeys_test.go:110: GET /api/v1/jobs/4bdac609... with a create key: status 200, want 403 ({"id":"4bdac609...",...})
+      apikeys_test.go:110: GET /api/v1/jobs/4bdac609.../attempts with a create key: status 200, want 403 ({"attempts":[]})
+      apikeys_test.go:124: a create-only key reading attempts got {"attempts":[]}; want the jobs:read scope named
+  --- FAIL: TestAPIKeysNeverReachTheLog (0.25s)
+      apikeys_test.go:448: the log doesn't show the refusal by key ID; is the logger wired?
+  ```
+  (Sandbox run; the response bodies shortened.)
+- **Why:** this is the shape the mistake would take in real code: a check that asks whether the key is "allowed to do things" instead of "allowed to do this". Nothing errors, every key still works, and the session paths are untouched, so every older test passes. The cost: a contact form's `jobs:create` key, readable from that site's server, would also read every job the account ever ran, webhook bodies included. Ownership still held (the jobs were the owner's own), which is why scope and ownership have separate tests.
+
 ## Experiment: the naive dual write loses a job
 
 Not a removed safeguard but the design of Task 22, run live on 2 November 2026 to see the failure Task 23 fixes. `POST /api/v1/jobs` saved the job in PostgreSQL, then pushed its ID to Redis, with nothing tying the two together.

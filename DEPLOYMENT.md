@@ -659,6 +659,18 @@ Phase 17 changed how the relay and the reconciler talk to Redis (no row lock hel
 
 Not tested live: a Redis that hangs. That is what the tests cover (FAILURES.md, case 66); doing it on Render would mean breaking the hosted queue on purpose.
 
+## API keys (Task 86)
+
+Migration 0014 adds `api_keys` and a nullable `jobs.api_key_id`. The code before it keeps working on the migrated tables, so a rollback is safe; the keys made in between simply stop being accepted until the newer code is back.
+
+**Checks after the deploy:**
+
+1. `goflow-api` → **Logs**: `migrations applied versions=[14]`.
+2. The dashboard still logs in and lists jobs: every job query now reads `api_key_id`, so a page that loads proves the column is there.
+3. A key is made and used in Task 88, the live test. Until the dashboard gets its Keys section (Task 87), there is nothing more to see.
+
+The owner reset (`goflow-admin reset-password`) now also revokes the account's active keys and says how many: `...; N sessions ended, M API keys revoked`.
+
 ## Rolling back
 
 Render keeps previous deploys. In the dashboard: `goflow-api` → **Deploys** → pick the last good one → **Rollback**. A rollback doesn't undo migrations, so a migration must keep working with the code before it (add columns before using them, drop them a release later).
@@ -684,7 +696,7 @@ Until email reset exists ([README](README.md#resetting-a-password-owner-only)), 
    ```bash
    go run ./cmd/goflow-admin reset-password
    ```
-   Paste the branch URL at the first prompt, give the email, a throwaway password twice, and `reset`. Expect `password changed for ...; N sessions ended`, N being the branch's session count.
+   Paste the branch URL at the first prompt, give the email, a throwaway password twice, and `reset`. Expect `password changed for ...; N sessions ended, M API keys revoked`, N being the branch's session count.
 4. **Check.** Run the query again, on the branch: a new `fingerprint` and `sessions` 0. On `production`: exactly the result from step 1.
 5. **Delete the branch** in the console.
 

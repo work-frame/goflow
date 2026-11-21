@@ -45,6 +45,13 @@ func startServer(t *testing.T, dbURL string) (base string, stop func()) {
 // startServerWith is startServer with a config of the test's choosing.
 func startServerWith(t *testing.T, cfg config) (base string, stop func()) {
 	t.Helper()
+	return startServerLogging(t, cfg, discardLogger())
+}
+
+// startServerLogging is startServerWith with the server's logger chosen
+// by the test, for tests that read what the server logs.
+func startServerLogging(t *testing.T, cfg config, logger *slog.Logger) (base string, stop func()) {
+	t.Helper()
 
 	if cfg.RedisURL != "" && cfg.RedisKeyPrefix != "" {
 		// Registered before stop, so it runs after the server has stopped:
@@ -55,7 +62,7 @@ func startServerWith(t *testing.T, cfg config) (base string, stop func()) {
 	addrCh := make(chan string, 1)
 	runErr := make(chan error, 1)
 	go func() {
-		runErr <- run(ctx, discardLogger(), cfg, func(addr string) { addrCh <- addr })
+		runErr <- run(ctx, logger, cfg, func(addr string) { addrCh <- addr })
 	}()
 
 	select {

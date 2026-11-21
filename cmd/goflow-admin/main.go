@@ -104,7 +104,7 @@ func resetPassword(ctx context.Context, getenv func(string) string, p prompter, 
 
 	var writable bool
 	if err := db.QueryRowContext(dbCtx, `SELECT has_table_privilege('users', 'UPDATE')
-		AND has_table_privilege('sessions', 'DELETE')`).Scan(&writable); err != nil {
+		AND has_table_privilege('sessions', 'DELETE') AND has_table_privilege('api_keys', 'UPDATE')`).Scan(&writable); err != nil {
 		return fmt.Errorf("can't check what this login may do on %s: %w", host, err)
 	}
 	if !writable {
@@ -124,9 +124,11 @@ func resetPassword(ctx context.Context, getenv func(string) string, p prompter, 
 		id       string
 		created  time.Time
 		sessions int
+		keys     int
 	}
 	rows, err := db.QueryContext(dbCtx, `SELECT u.id, u.created_at,
-		(SELECT count(*) FROM sessions s WHERE s.user_id = u.id)
+		(SELECT count(*) FROM sessions s WHERE s.user_id = u.id),
+		(SELECT count(*) FROM api_keys k WHERE k.user_id = u.id AND k.revoked_at IS NULL AND k.expires_at > now())
 		FROM users u WHERE u.email = $1`, email)
 	if err != nil {
 		return fmt.Errorf("can't look up the account: %w", err)
@@ -134,7 +136,7 @@ func resetPassword(ctx context.Context, getenv func(string) string, p prompter, 
 	var found []account
 	for rows.Next() {
 		var a account
-		if err := rows.Scan(&a.id, &a.created, &a.sessions); err != nil {
+		if err := rows.Scan(&a.id, &a.created, &a.sessions, &a.keys); err != nil {
 			rows.Close()
 			return fmt.Errorf("can't look up the account: %w", err)
 		}
@@ -152,8 +154,8 @@ func resetPassword(ctx context.Context, getenv func(string) string, p prompter, 
 		return fmt.Errorf("%d accounts on %s have that email, so there's no telling which one; nothing changed", len(found), host)
 	}
 	acct := found[0]
-	fmt.Fprintf(out, "account %s on %s: created %s, %d open sessions\n",
-		email, host, acct.created.UTC().Format("2006-01-02 15:04 UTC"), acct.sessions)
+	fmt.Fprintf(out, "account %s on %s: created %s, %d open sessions, %d active API keys\n",
+		email, host, acct.created.UTC().Format("2006-01-02 15:04 UTC"), acct.sessions, acct.keys)
 
 	password, err := p.Secret("New password (hidden, at least 12 characters): ")
 	if err != nil {
@@ -169,7 +171,7 @@ func resetPassword(ctx context.Context, getenv func(string) string, p prompter, 
 	if again != password {
 		return errors.New("the two passwords differ; nothing changed")
 	}
-	confirm, err := p.Line(fmt.Sprintf("Type reset to change the password and end those %d sessions: ", acct.sessions))
+	confirm, err := p.Line(fmt.Sprintf("Type reset to change the password, end those %d sessions and revoke those %d API keys: ", acct.sessions, acct.keys))
 	if err != nil {
 		return err
 	}
@@ -181,15 +183,15 @@ func resetPassword(ctx context.Context, getenv func(string) string, p prompter, 
 	if err != nil {
 		return fmt.Errorf("can't hash the password: %w", err)
 	}
-	ended, err := database.NewUserStore(db).ResetPassword(dbCtx, acct.id, hash)
+	res, err := database.NewUserStore(db).ResetPassword(dbCtx, acct.id, hash)
 	if errors.Is(err, auth.ErrUserNotFound) {
 		return errors.New("the account was deleted while you typed; nothing changed")
 	}
 	if err != nil {
 		return fmt.Errorf("the reset failed and was rolled back, nothing changed: %w", err)
 	}
-	fmt.Fprintf(out, "password changed for %s (bcrypt cost %d); %d sessions ended. Log in again everywhere.\n",
-		email, cost, ended)
+	fmt.Fprintf(out, "password changed for %s (bcrypt cost %d); %d sessions ended, %d API keys revoked. Log in again everywhere, and make new keys.\n",
+		email, cost, res.SessionsEnded, res.KeysRevoked)
 	return nil
 }
 

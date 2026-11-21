@@ -43,7 +43,8 @@ func randomSuffix(t *testing.T) string {
 }
 
 // fixture is a disposable, migrated database with two accounts: dan, the
-// one being reset, with 3 sessions, and eve, with 1, who must be left alone.
+// one being reset, with 3 sessions and 3 API keys (2 working, 1 already
+// revoked), and eve, with 1 session and 1 key, who must be left alone.
 type fixture struct {
 	url, danEmail, danID, eveID string
 	db                          *sql.DB
@@ -81,7 +82,7 @@ func newFixture(t *testing.T) *fixture {
 	if _, err := database.Migrate(ctx, f.db); err != nil {
 		t.Fatal(err)
 	}
-	users, sessions := database.NewUserStore(f.db), database.NewSessionStore(f.db)
+	users, sessions, keys := database.NewUserStore(f.db), database.NewSessionStore(f.db), database.NewAPIKeyStore(f.db)
 	for _, who := range []struct {
 		email string
 		id    *string
@@ -100,9 +101,31 @@ func newFixture(t *testing.T) *fixture {
 			if err := sessions.Create(ctx, s); err != nil {
 				t.Fatal(err)
 			}
+			_, k, err := auth.NewAPIKey(user.ID, "key", []auth.Scope{auth.ScopeJobsCreate}, 90, time.Now())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := keys.Create(ctx, k); err != nil {
+				t.Fatal(err)
+			}
+			if i == 2 { // dan's third key was revoked before the reset
+				if err := keys.Revoke(ctx, user.ID, k.ID); err != nil {
+					t.Fatal(err)
+				}
+			}
 		}
 	}
 	return f
+}
+
+// activeKeys counts id's keys that still work.
+func (f *fixture) activeKeys(t *testing.T, id string) int {
+	t.Helper()
+	var n int
+	if err := f.db.QueryRow(`SELECT count(*) FROM api_keys WHERE user_id = $1 AND revoked_at IS NULL`, id).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
 }
 
 func (f *fixture) hash(t *testing.T, id string) string {
@@ -142,7 +165,8 @@ func TestResetChangesThePasswordAndEndsEverySession(t *testing.T) {
 		t.Fatalf("exit %d: %s", code, out.String())
 	}
 	got := out.String()
-	for _, want := range []string{"3 open sessions", "password changed for dan@example.com (bcrypt cost 10); 3 sessions ended"} {
+	for _, want := range []string{"3 open sessions, 2 active API keys",
+		"password changed for dan@example.com (bcrypt cost 10); 3 sessions ended, 2 API keys revoked"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("output lacks %q:\n%s", want, got)
 		}
@@ -162,6 +186,14 @@ func TestResetChangesThePasswordAndEndsEverySession(t *testing.T) {
 	}
 	if n := f.sessions(t, f.eveID); n != 1 {
 		t.Errorf("eve has %d sessions after dan's reset, want her 1", n)
+	}
+	// K4 A: an owner reset means the account may be in someone else's
+	// hands, so dan's keys stop too; eve's don't.
+	if n := f.activeKeys(t, f.danID); n != 0 {
+		t.Errorf("%d of dan's API keys survived the reset, want 0", n)
+	}
+	if n := f.activeKeys(t, f.eveID); n != 1 {
+		t.Errorf("eve has %d working keys after dan's reset, want her 1", n)
 	}
 	for _, secret := range []string{newPassword, f.url, hash, "$2a$"} {
 		if strings.Contains(got, secret) {

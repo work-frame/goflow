@@ -24,6 +24,7 @@ I'm building it to learn production Go: the standard library first, then HTTP, P
 - **Phase 16 (done):** production hardening. Neon's Free plan keeps 6 hours of history, so `scripts/backup.sh` makes an encrypted dump you keep yourself, and `scripts/restore-drill.sh` proves one restores. The first drill found that a Neon dump doesn't load into stock PostgreSQL (18 lines of a Neon-only column option); the drill now checks the whole dump before loading it, and restored production with every row, foreign key, index and CHECK accounted for. A Neon branch from a past moment was restored and compared too. A scheduled workflow asks the hosted `/readyz` every 6 hours, Dependabot alerts are on (no automatic PRs), and there's a [disaster recovery runbook](DEPLOYMENT.md#disaster-recovery-restoring-production-from-a-backup).
 - **Phase 17 (done):** the relay and the reconciler no longer hold PostgreSQL row locks while they wait for Redis. The relay claims outbox rows with a token and a deadline, commits, sends, and finishes only its own rows; the reconciler reads without locks and never overwrites a newer state. Every send to Redis gets 2 s, and the deadline now really reaches the Redis call. The tests were written first and seen failing (FAILURES.md, case 66). Live on Render since 14 November 2026: migration 13 applied, and a job went through claim, send and a retry to `completed` (DEPLOYMENT.md, Task 72).
 - **Phase 18 (done):** automated backups. A private repository, `goflow-backups`, backs up production every night at 02:41 UTC: dumped with a read-only role, restored in the runner and checked before anything else, encrypted with [age](https://age-encryption.org) to a public key (the private key is only in the password manager), and uploaded with an upload-only key to a Backblaze B2 bucket that refuses deletes for 35 days, even from the account owner. A heartbeat emails when a run fails or doesn't arrive. The first restore drill of a real backup found the first key's private half had never been saved; with a new key, a backup made by the workflow restored on the laptop with every row and constraint (DEPLOYMENT.md, Automated backups). A drill is due on the 1st of every month. A timed recovery drill (Task 81) restored the newest backup into a new Neon project with `scripts/recover.sh` and logged in on it locally: 20 min 20 s from the decision, under a minute of it machine work ([DEPLOYMENT.md](DEPLOYMENT.md#timed-recovery-drill-task-81)).
+- **Phase 19 (in progress):** API keys for programs. A `gfk_` key with the `jobs:create` and/or `jobs:read` scope lets another program, such as a website's backend, create or read its owner's jobs; account routes stay closed to keys. Keys are hashed, last 30 to 365 days, need the password to make, and are limited to 60 creates a minute each and 120 per account ([API keys](#api-keys)). The dashboard part and a live test on Render come next.
 
 ## Requirements
 
@@ -91,6 +92,10 @@ The server stops on `Ctrl+C` or `SIGTERM`, finishing in-flight requests first (u
 | `POST` | `/api/v1/jobs/{id}/retry` | `200` + job, back to `pending` with 0 attempts (needs token) | `401`, `404`, `409` job isn't `dead` or `failed` |
 | `POST` | `/api/v1/events/ticket` | `201 {"ticket","expires_in":30}`: opens one event stream, once, within 30 s (needs token) | `401`, `429`, `503` no Redis |
 | `GET` | `/api/v1/events?ticket=…` | `200`, a Server-Sent Events stream of your jobs' changes (see below) | `401` missing, unknown, expired or used ticket, `503` no Redis |
+| `POST` | `/api/v1/keys` | `201 {"key":{...},"secret":"gfk_..."}`: a new API key, the secret shown once (needs token and `password`) | `400`, `401`, `403` wrong password, `409` 10 active keys, `429` |
+| `GET` | `/api/v1/keys` | `200 {"keys":[...]}`: every key you ever made, newest first, each `active`, `expired` or `revoked` (needs token) | `401` |
+| `DELETE` | `/api/v1/keys/{id}` | `204`: the key stops working at once; revoking twice is fine (needs token) | `401`, `404` |
+| `POST` | `/api/v1/keys/revoke-all` | `200 {"revoked":n}` (needs token) | `401` |
 
 `GET /api/v1/jobs` returns jobs oldest first, one page at a time:
 
@@ -103,6 +108,39 @@ The server stops on `Ctrl+C` or `SIGTERM`, finishing in-flight requests first (u
 The response includes `next_cursor` until the last page, where it is omitted.
 
 Every job belongs to the user who created it. Users only ever see their own jobs: someone else's job answers `404`, exactly like a job that doesn't exist.
+
+### API keys
+
+An API key lets another program, such as your website's backend, create or read your jobs without logging in. Make one with your session token (`gf` above) and your password again: asking for it means a stolen 24-hour session can't be turned into a key that lasts a year. The body goes through `<(...)`, so the password is in no command line (`gf` already uses standard input for the token):
+
+```bash
+read -s "PW?Password: " && echo
+```
+
+```bash
+gf -X POST $API/keys -H 'Content-Type: application/json' \
+  --data @<(P="$PW" jq -n '{name: "contact form", scopes: ["jobs:create"], expires_in_days: 90, password: env.P}')
+unset PW
+```
+
+The answer holds `secret`, `gfk_` and 43 characters. It is shown this once; GoFlow keeps only its SHA-256. Lost it? Revoke the key and make another. The program then sends it like a token: `Authorization: Bearer gfk_...`.
+
+| Rule | |
+|---|---|
+| Scopes | `jobs:create` (`POST /api/v1/jobs`) and `jobs:read` (list jobs, get one, its attempts). Pick one or both. Nothing else accepts a key: account routes, deleting, retrying, the webhook secret, the event stream and the key routes themselves need a logged-in person. A key without the route's scope gets `403` naming it; a key that doesn't work (unknown, expired, revoked) gets `401` |
+| Whose jobs | The key's owner's, exactly like a session. Jobs made with a key say so in `api_key_id` |
+| Lifetime | 30, 90 or 365 days. Revoking takes effect on the next request |
+| How many | 10 active keys per account. Expired and revoked keys stay listed as history |
+| Limits | 60 job creates a minute per key, and 120 a minute for all of an account's keys together. Making keys: 5 tries in 15 minutes |
+| Owner reset | `goflow-admin reset-password` revokes every key too |
+
+**Never put a key in a web page.** Anything sent to a browser can be read there, in the page source, the developer tools or the downloaded script. A contact form posts to your site's own backend; the backend reads the key from its own environment and calls GoFlow:
+
+```text
+browser ──form──► your backend (holds GOFLOW_API_KEY) ──POST /api/v1/jobs, Bearer gfk_...──► GoFlow
+```
+
+GoFlow sends no CORS headers, so a browser page couldn't call it with a key anyway; that is a side effect, not the protection.
 
 ### Job types
 
@@ -233,6 +271,9 @@ Then create a job in a second terminal and watch it go by. Ctrl+C ends the strea
 | `POST /api/v1/auth/login` | 10 per 15 minutes | email, after trimming and lowercasing, registered or not |
 | `POST /api/v1/auth/password` | 5 per 15 minutes | account |
 | `POST /api/v1/events/ticket` | 30 per 5 minutes | account |
+| `POST /api/v1/jobs` with an API key | 60 per minute | key |
+| `POST /api/v1/jobs` with an API key | 120 per minute | account, all its keys together |
+| `POST /api/v1/keys` | 5 per 15 minutes | account |
 
 Every attempt counts, successful or not. Past a limit the answer is `429 {"error":"too many attempts; try again in N seconds"}` with a `Retry-After: N` header, until the window that started with the first counted attempt ends. Nothing is locked: the limit clears by itself.
 
@@ -339,7 +380,7 @@ It runs `gofmt`, `go vet` and `go test -race`, and stops at the first failure. I
 cmd/goflow/            CLI entry point
 cmd/api/               HTTP server: settings, startup, session cleanup, graceful shutdown
 internal/api/          routes, handlers, middleware, JSON helpers
-internal/auth/         users, password hashing, session tokens
+internal/auth/         users, password hashing, session tokens, API keys and their scopes
 internal/cli/          CLI commands, login prompt, output
 internal/client/       Go client for the HTTP API
 internal/credentials/  the saved login file (~/.config/goflow/credentials)
@@ -389,5 +430,6 @@ render.yaml            Render deployment (see DEPLOYMENT.md)
 16. Production hardening (done: encrypted backups beyond Neon's 6 hours, restore drills with real results, a disaster recovery runbook, an uptime check, Dependabot alerts)
 17. No locks held across a network call (done: the relay's outbox claims, the reconciler, Redis deadlines that reach the call; tests written red first)
 18. Automated backups (done: nightly, verified before upload, age encryption to a public key, a read-only database role, an upload-only key, B2 storage locked for 35 days, a heartbeat, a real backup restored with the real key)
+19. API keys for programs (in progress: scoped, hashed keys with limits, Task 86; the dashboard and a live test next)
 
 See [FAILURES.md](FAILURES.md) for what breaks when each safeguard is removed, with real output, and [DEPLOYMENT.md](DEPLOYMENT.md) for how the hosted API is set up.

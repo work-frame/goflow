@@ -27,7 +27,7 @@ type Notifier interface {
 // exactly as committed without a second query.
 // A webhook's URL is read from its payload, but not its body: lists and
 // notifications never carry the body (job.Job.WithoutBody).
-const jobColumns = `id, user_id, title, status, created_at, updated_at, attempts, max_attempts, next_attempt_at, version, type, payload->>'url'`
+const jobColumns = `id, user_id, title, status, created_at, updated_at, attempts, max_attempts, next_attempt_at, version, type, payload->>'url', api_key_id`
 
 func notifyChanged(ctx context.Context, n Notifier, jobs ...*job.Job) {
 	if n == nil {

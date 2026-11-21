@@ -100,6 +100,10 @@ type Deps struct {
 	WebhookSecrets WebhookSecrets
 	// WebhookAttempts lists delivery attempts. nil: the endpoint answers 503.
 	WebhookAttempts WebhookAttempts
+
+	// Keys keeps API keys (Task 86). nil: keys are refused with 401 and the
+	// key endpoints answer 503.
+	Keys KeyStore
 }
 
 // NewRouter returns the HTTP handler for the whole API, wrapped in middleware.
@@ -108,7 +112,7 @@ type Deps struct {
 // withRequestID → logRequests → recordMetrics → recoverPanics → jsonMuxErrors → mux → handler
 func NewRouter(d Deps) http.Handler {
 	h := &handler{store: d.Jobs, relay: d.Relay, live: d.Live, heartbeat: d.StreamHeartbeat, users: d.Users, sessions: d.Sessions, hasher: d.Hasher, db: d.DB, logger: d.Logger, registrationClosed: d.RegistrationClosed, limiter: d.Limiter, clientIPHeader: d.ClientIPHeader, metrics: d.Metrics,
-		secrets: d.WebhookSecrets, attempts: d.WebhookAttempts}
+		secrets: d.WebhookSecrets, attempts: d.WebhookAttempts, keys: d.Keys}
 	h.prepareDummyHash()
 
 	mux := http.NewServeMux()
@@ -123,14 +127,21 @@ func NewRouter(d Deps) http.Handler {
 	mux.HandleFunc("POST /api/v1/auth/logout-all", h.requireSession(h.logoutAll))
 	mux.HandleFunc("POST /api/v1/auth/password", h.requireSession(h.changePassword))
 	mux.HandleFunc("GET /api/v1/auth/me", h.requireSession(h.me))
-	mux.HandleFunc("POST /api/v1/jobs", h.requireSession(h.createJob))
-	mux.HandleFunc("GET /api/v1/jobs", h.requireSession(h.listJobs))
-	mux.HandleFunc("GET /api/v1/jobs/{id}", h.requireSession(h.getJob))
+	// requireAuth: a session, or an API key with the named scope (Task 86).
+	// Every other route takes a session only: a new route is closed to
+	// keys unless it is added here with a scope.
+	mux.HandleFunc("POST /api/v1/jobs", h.requireAuth(auth.ScopeJobsCreate, h.createJob))
+	mux.HandleFunc("GET /api/v1/jobs", h.requireAuth(auth.ScopeJobsRead, h.listJobs))
+	mux.HandleFunc("GET /api/v1/jobs/{id}", h.requireAuth(auth.ScopeJobsRead, h.getJob))
+	mux.HandleFunc("GET /api/v1/jobs/{id}/attempts", h.requireAuth(auth.ScopeJobsRead, h.listAttempts))
 	mux.HandleFunc("DELETE /api/v1/jobs/{id}", h.requireSession(h.deleteJob))
 	mux.HandleFunc("POST /api/v1/jobs/{id}/retry", h.requireSession(h.retryJob))
-	mux.HandleFunc("GET /api/v1/jobs/{id}/attempts", h.requireSession(h.listAttempts))
 	mux.HandleFunc("POST /api/v1/webhook-secret", h.requireSession(h.rotateSecret))
 	mux.HandleFunc("POST /api/v1/events/ticket", h.requireSession(h.createTicket))
+	mux.HandleFunc("POST /api/v1/keys", h.requireSession(h.keysAvailable(h.createKey)))
+	mux.HandleFunc("GET /api/v1/keys", h.requireSession(h.keysAvailable(h.listKeys)))
+	mux.HandleFunc("DELETE /api/v1/keys/{id}", h.requireSession(h.keysAvailable(h.revokeKey)))
+	mux.HandleFunc("POST /api/v1/keys/revoke-all", h.requireSession(h.keysAvailable(h.revokeAllKeys)))
 	// No requireSession: a browser's EventSource can't send the
 	// Authorization header, so the stream authenticates with a ticket.
 	mux.HandleFunc("GET /api/v1/events", h.streamEvents)
@@ -173,6 +184,7 @@ type handler struct {
 
 	secrets  WebhookSecrets  // nil: webhooks unavailable
 	attempts WebhookAttempts // nil: attempts unavailable
+	keys     KeyStore        // nil: API keys unavailable
 }
 
 // dbContext derives a storage context from the request: it ends when the client
@@ -293,6 +305,10 @@ func idempotencyKey(r *http.Request) (string, error) {
 }
 
 func (h *handler) createJob(w http.ResponseWriter, r *http.Request) {
+	// First, before any other work: a key over its limits costs nothing more.
+	if h.limitKeyJobs(w, r) {
+		return
+	}
 	key, err := idempotencyKey(r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest,
@@ -338,9 +354,13 @@ func (h *handler) createJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// The owner always comes from the session, never from the request body.
+	// The owner always comes from the session or the key, never from the
+	// request body.
 	j.UserID = callerID(r)
 	j.IdempotencyKey = key
+	if k := currentKey(r); k != nil {
+		j.APIKeyID = k.ID
+	}
 	// One transaction: the job and its outbox row. Redis is not involved,
 	// so a Redis outage can't fail this request or lose the job.
 	err = h.store.Add(ctx, j)

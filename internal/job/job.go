@@ -213,6 +213,10 @@ type Job struct {
 
 	// Webhook is set on webhook jobs only.
 	Webhook *Webhook `json:"webhook,omitempty"`
+
+	// APIKeyID names the API key that created the job (Task 86), or is ""
+	// for a job made by a logged-in person. The key's ID, never its secret.
+	APIKeyID string `json:"api_key_id,omitempty"`
 }
 
 // WithoutBody returns j itself if it carries no webhook body, or else a
