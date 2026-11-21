@@ -563,7 +563,7 @@ GOFLOW_AGE_RECIPIENT=age1... ./scripts/backup.sh                     # the publi
 | Second backup | 21 Nov 2026, 20:40 | Run 44947406809, 53 s: `goflow-20261121T204002Z.dump.age`, 20,808 bytes |
 | Restore drill with the real key | 21 Nov 2026, ~20:45 | Decrypted with the key pasted from the password manager. 0 `pg_attver` lines this time (18 on 14 November: Neon's dumps no longer carry them; the filter stays for older backups). Foreign keys 5/5, indexes 18/18, CHECKs 31/31. Rows: users 1, sessions 0, jobs 20, outbox 0, secrets 1, attempts 2, migrations 13, newest job 2026-11-17 20:40:56, the dashboard's newest |
 
-**RPO now:** up to 6 hours from Neon's history; past that, up to a day (the newest nightly backup). 35 days of backups exist at any time. **RTO:** still the [runbook](#disaster-recovery-restoring-production-from-a-backup), untimed until Task 81.
+**RPO now:** up to 6 hours from Neon's history; past that, up to a day (the newest nightly backup). 35 days of backups exist at any time. **RTO:** 20 min 20 s in the [timed drill](#timed-recovery-drill-task-81) (21 November 2026, to a new Neon project and a local GoFlow); a real recovery adds the Render switch, so about 25 to 30 minutes.
 
 **Keeping it working:**
 
@@ -594,8 +594,10 @@ You need, from the password manager: the **age private key** ("GoFlow backup age
 4. **Make an empty database.** In the Neon console, create a **new project** in the same region (AWS Frankfurt). In **Connect**: role `neondb_owner`, pooling **off**, password hidden; copy the URL. Find its endpoint ID under **Branches** → `production` → **Computes** (`ep-...`).
 5. **Restore** (`docker compose build api` first, if you will log in locally):
    ```bash
-   ./scripts/recover.sh ~/Downloads/goflow-<time>.dump.age
+   f=$(ls -t ~/Downloads/goflow-*.dump.age | head -1) && ls -l "$f"
+   ./scripts/recover.sh "$f"
    ```
+   Check that `ls` shows the file you just downloaded before running the second line.
    It asks for the time from step 1, the URL (hidden), the endpoint ID, then the age key (hidden). It refuses a target that holds anything, a pooled URL, or an endpoint that isn't the one you typed, and sends nothing until the whole dump has passed its checks. The load is one transaction. Then it compares the foreign keys, indexes and CHECKs with the dump's and prints the rows per table. Answer `yes` to start GoFlow on `http://127.0.0.1:8081` against the restored database (it asks for `GOFLOW_SECRETS_KEY`): log in, see the jobs, press Enter. It prints every step's time and the RTO so far.
 6. **Point Render at it.** `goflow-api` → **Environment** → `GOFLOW_DATABASE_URL` = the new URL, ending changed to `?sslmode=verify-full` ([The database URL](#the-database-url)); save, then **Resume Service**. On start the API finds every migration already applied, and the reconciler re-queues every `pending`, `queued` and `retrying` job from PostgreSQL, so the empty Valkey doesn't lose them.
 7. **Check** `/readyz`, log in on the hosted dashboard, list jobs. Note the time: step 1 to here is the real RTO.
@@ -623,15 +625,30 @@ The runbook above, rehearsed without touching production: steps 2, 6 and 7 are s
 
 **Results**
 
-| Step | Time (UTC) | Took |
+Run on 21 November 2026 from the laptop, with the newest backup at the time, `goflow-20261121T204002Z.dump.age` (20,808 bytes, SHA-1 equal to the backup run's log), into a new Neon project `goflow-drill` (Frankfurt, PostgreSQL 17). It was `recover.sh`'s first real run, Docker path included, and it worked first time.
+
+| Step | Done (UTC) | Took |
 |---|---|---|
-| Decision (step 1) | not yet run | |
-| Backup downloaded (step 3) | | |
-| Neon project made, URL and endpoint copied (step 4) | | |
-| `recover.sh`: target checked, key given, decrypted and checked, loaded, verified | | |
-| GoFlow ready locally | | |
-| Logged in, restored jobs visible | | |
-| **RTO (drill)** | | |
+| Decision (step 1) | 22:09 | |
+| Backup downloaded from B2 (step 3) | 22:16 | ~7 min, one of them lost to a command with a `<name>` placeholder that zsh refused |
+| `recover.sh` started | 22:16:28 | |
+| New Neon project made, URL pasted, endpoint ID typed; target checked: 0 objects, 0 `schema_migrations` | 22:21:36 | 5 min 8 s |
+| age key pasted from the password manager | 22:21:54 | 18 s |
+| Whole dump decrypted and checked in memory: `removed=0 foreign_keys=5 indexes=18 checks=31` | 22:21:54 | 0 s |
+| Loaded, one transaction | 22:22:11 | 17 s |
+| Structure 5/5, 18/18, 31/31. Rows: users 1, sessions 0, jobs 20, outbox 0, secrets 1, attempts 2, migrations 13, newest job 2026-11-17 20:40:56 | 22:22:30 | 19 s |
+| GoFlow ready on `127.0.0.1:8081`: `database schema up to date`, `secrets key loaded key_id=675f4c8f secrets_reencrypted=0` | 22:27:33 | 5 min 3 s, most of it finding `GOFLOW_SECRETS_KEY` |
+| Logged in with the hosted account; the 20 jobs on screen (14 completed, 6 dead or failed, 70%, as on the hosted dashboard) | 22:29:20 | 1 min 47 s |
+| **RTO (drill)** | | **20 min 20 s** |
+
+What it showed:
+
+- **The machine part takes under a minute.** Decrypting, checking, loading and verifying took 36 s together, and each query of those 36 s starts a new `postgres:17` container and a new TLS connection to Frankfurt. The other 19 minutes were people work: finding the file, making the Neon project, copying values, looking for a key.
+- **The backup and the saved keys work together.** The age key from the password manager decrypted it, and GoFlow started on the restored data with `GOFLOW_SECRETS_KEY`: with a different key it refuses to start (`MissingKeysError`), so `secrets_reencrypted=0` with no error proves the key decrypts the restored signing secret.
+- **The secrets key had one copy.** On the night it was pasted straight from Render: the password manager didn't have it yet. It was saved right after the drill and that copy checked with `secrets-key-id.sh` (`675f4c8f`). With Render gone, the drill would have stopped at that step.
+- **Not covered:** steps 2, 6 and 7 (suspending Render, switching `GOFLOW_DATABASE_URL`, the redeploy) and recreating `goflow_backup`. A real recovery takes those minutes on top: expect about 25 to 30 minutes, an estimate until it happens.
+
+**To make it faster next time:** keep the two keys as clearly named items in the password manager ("GoFlow backup age key", "GoFlow secrets key"), and note `date -u` before anything else. The command steps are in the runbook with no placeholders.
 
 ## Relay claims live (Task 72)
 
