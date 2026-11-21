@@ -401,7 +401,7 @@ The two merges before it started deploying in the minute they were merged, while
 
 `render.yaml` adds `GOFLOW_SECRETS_KEY` with `generateValue: true`: the Blueprint sync creates it with 32 random bytes in base64, the same way it created `GOFLOW_METRICS_TOKEN` in Task 40, and later syncs keep the value. Task 65a only adds the variable; nothing reads it yet. Task 65b makes the API and the worker require it, so it must exist before that deploy.
 
-- **Check after the deploy:** `goflow-api` → **Environment** lists `GOFLOW_SECRETS_KEY`. Don't reveal it, copy it or take a screenshot of that page: there is nothing to do with the value.
+- **Check after the deploy:** `goflow-api` → **Environment** lists `GOFLOW_SECRETS_KEY`. Don't take a screenshot of that page. Since Task 81 the value is copied once, into the password manager, because a restored database needs it ([Saving the secrets key](#saving-the-secrets-key-task-81)); otherwise there is nothing to do with it.
 - **Never delete or regenerate it.** It encrypts every user's signing secret; without it they can't be read. Rotation keeps the old key until everything is re-encrypted (documented with Task 65b).
 
 ## Webhook delivery (Task 65b)
@@ -572,31 +572,66 @@ GOFLOW_AGE_RECIPIENT=age1... ./scripts/backup.sh                     # the publi
 - **Moving the pinned GoFlow commit** (`GOFLOW_SHA` in `backup.yml`) is a deliberate change: read what changed in `scripts/restore-filter.awk` and `scripts/pgurl.sh` first.
 - **GitHub disables a scheduled workflow after 60 days without activity** in its repository. The heartbeat's "down" email is what would say so.
 
+### What the checksum proves (and what it doesn't)
+
+Each backup run logs the file's SHA-1, as B2 records it, and `recover.sh` prints the SHA-1 of the file you downloaded. A match shows the download is the same file that run uploaded: nothing was cut off or damaged on the way. It is **not** proof the backup is genuine:
+
+- **Anyone can make a valid backup.** The workflow encrypts to the age **public** key, which is public (it is in `backup.yml`). A forged dump encrypted to it decrypts with the real private key like any other.
+- **The log is not independent.** Someone with write access to `goflow-backups` (or to the GitHub account) could change the workflow so it logs whatever they upload, or alter what a later run reports. The checksum then matches the forgery.
+- **The upload key can add files.** It can't delete or overwrite a locked backup, but whoever holds it can upload a new one under a plausible name.
+
+What does protect a restore: the dump must pass `restore-filter.awk` and the structure checks; the row counts and the newest job must look like production; and the bucket's 35-day compliance lock keeps the earlier backups unchanged, so a suspicious newest file can be skipped for an older one. Every one of these attacks needs write access to `goflow-backups`, its secrets, or the B2 account, which is why those need the strongest protection: two-factor login on GitHub and B2, the upload-only key, administrative keys never in GitHub. Real authenticity would need the backups signed with a key the workflow doesn't hold; not done.
+
 ### Disaster recovery: restoring production from a backup
 
-For when Neon's 6 hours of history can't help: the project is gone, or the damage is older than 6 hours. Nothing here is scripted on purpose: `restore-drill.sh` only ever writes to the local Compose database, and every step that touches a real database is typed by a person who has read it first. Do it in a `bash` shell, from the repository.
+For when Neon's 6 hours of history can't help: the project is gone, or the damage is older than 6 hours. `scripts/recover.sh` (Task 81) does the part that touches a database, with guards; switching Render over stays a manual step. Do it from the repository, with Docker running.
 
-1. **Stop the writes.** In Render: `goflow-api` → **Settings** → **Suspend Service**. The API runs the workers, so this stops both. Note the time. (Not yet tried on the free plan; if the button isn't there, anything written from now on goes to the old database and is lost when you switch.)
-2. **Prove the newest backup** with the drill above (step 3), on this laptop. Note its counts. If it fails, stop here: fix the drill, don't improvise on production.
-3. **Make an empty database.** In the Neon console, create a new project in the same region (AWS Frankfurt). Copy its connection string; never use one that already holds data.
-4. **Load the backup into it.** Read the new URL without echo, build the verified URL, and check the whole dump in memory before anything is sent:
-   ```bash
-   set -o pipefail
-   . scripts/pgurl.sh
-   read -rsp "NEW database URL (not shown): " url; echo
-   export PGURL="$(verified_url "$url" /etc/goflow-ca.crt)"; unset url
-   sql="$(gpg --decrypt --quiet ~/goflow-backups/goflow-<time>.dump.gpg | docker compose exec -T postgres pg_restore --no-owner --no-privileges -f - | awk -f scripts/restore-filter.awk)" && echo "checked" || echo "STOP: the dump failed its checks"
-   ```
-   Only after `checked`:
-   ```bash
-   printf '%s\n' "$sql" | docker run --rm -i -e PGURL -v /etc/ssl/certs/ca-certificates.crt:/etc/goflow-ca.crt:ro postgres:17 sh -c 'exec psql --dbname="$PGURL" -X -q -v ON_ERROR_STOP=1 --single-transaction' >/dev/null && echo "restored"
-   unset sql PGURL
-   ```
-5. **Compare** `./scripts/count-rows.sh` on the new URL with step 2's counts.
-6. **Point the API at it.** In Render, `goflow-api` → **Environment** → `GOFLOW_DATABASE_URL` = the new URL (built as in [The database URL](#the-database-url)); save, then **Resume Service**. On start the API finds 12 migrations already applied, and the reconciler re-queues every `pending`, `queued` and `retrying` job from PostgreSQL, so the empty Valkey doesn't lose them.
-7. **Check** `/readyz`, log in, list jobs. Note the time: step 1 to here is the real RTO. Record it in the table above.
+You need, from the password manager: the **age private key** ("GoFlow backup age key") and **`GOFLOW_SECRETS_KEY`** ("GoFlow secrets key"). Without the second, the API refuses to start on the restored database (`MissingKeysError`): every webhook signing secret in it was encrypted with that key.
 
-What comes back is the database as it was at the backup: anything later is lost, and users who logged in after it log in again. Webhook signing secrets come back only if `GOFLOW_SECRETS_KEY` on Render is the same key that encrypted them; with a different key the API refuses to start (`MissingKeysError`), and recovering from that isn't written down yet.
+1. **Note the time** (`date -u`): the RTO starts here.
+2. **Stop the writes.** In Render: `goflow-api` → **Settings** → **Suspend Service**. The API runs the workers, so this stops both. (Not yet tried on the free plan; if the button isn't there, anything written from now on goes to the old database and is lost when you switch.)
+3. **Download the newest backup** from the B2 console (`goflow-backups-prod` → Browse Files; reload the page). Note its SHA-1 from the console or the run's log ([what that proves](#what-the-checksum-proves-and-what-it-doesnt)).
+4. **Make an empty database.** In the Neon console, create a **new project** in the same region (AWS Frankfurt). In **Connect**: role `neondb_owner`, pooling **off**, password hidden; copy the URL. Find its endpoint ID under **Branches** → `production` → **Computes** (`ep-...`).
+5. **Restore** (`docker compose build api` first, if you will log in locally):
+   ```bash
+   ./scripts/recover.sh ~/Downloads/goflow-<time>.dump.age
+   ```
+   It asks for the time from step 1, the URL (hidden), the endpoint ID, then the age key (hidden). It refuses a target that holds anything, a pooled URL, or an endpoint that isn't the one you typed, and sends nothing until the whole dump has passed its checks. The load is one transaction. Then it compares the foreign keys, indexes and CHECKs with the dump's and prints the rows per table. Answer `yes` to start GoFlow on `http://127.0.0.1:8081` against the restored database (it asks for `GOFLOW_SECRETS_KEY`): log in, see the jobs, press Enter. It prints every step's time and the RTO so far.
+6. **Point Render at it.** `goflow-api` → **Environment** → `GOFLOW_DATABASE_URL` = the new URL, ending changed to `?sslmode=verify-full` ([The database URL](#the-database-url)); save, then **Resume Service**. On start the API finds every migration already applied, and the reconciler re-queues every `pending`, `queued` and `retrying` job from PostgreSQL, so the empty Valkey doesn't lose them.
+7. **Check** `/readyz`, log in on the hosted dashboard, list jobs. Note the time: step 1 to here is the real RTO.
+8. **Afterwards:** recreate the read-only role `goflow_backup` in the new project and give the backup workflow its URL (`goflow-backups/admin/neon-url-to-github.sh`), or the next nightly backup fails. Write down what happened in the Results table.
+
+What comes back is the database as it was at the backup: anything later is lost, and users who logged in after it log in again.
+
+### Saving the secrets key (Task 81)
+
+Until 21 November 2026 `GOFLOW_SECRETS_KEY` existed only in Render's environment: had the Render service been lost with the database, every webhook signing secret in every backup would have been unreadable. Now a copy is in the password manager, checked against the live key without either being shown:
+
+1. Render → `goflow-api` → **Environment** → `GOFLOW_SECRETS_KEY` → reveal, copy, and paste it into a new password manager item "GoFlow secrets key" (password field). No screenshot. Clear the clipboard afterwards.
+2. Copy it back **from the password manager** and run:
+   ```bash
+   ./scripts/secrets-key-id.sh
+   ```
+   Paste, Enter, Ctrl+D. It prints only `key_id=` and 8 hex characters, the same ID the API computes.
+3. Render → `goflow-api` → **Logs**, search `secrets key loaded`: the newest line's `key_id=` must be the same. Different: the copy is wrong; delete it and start again.
+
+If the key is ever rotated ([Rotating the secrets key](#rotating-the-secrets-key)), save the new one the same way, and keep the old one until no backup within the 35 days needs it.
+
+### Timed recovery drill (Task 81)
+
+The runbook above, rehearsed without touching production: steps 2, 6 and 7 are skipped, and the target is a throwaway Neon project. The clock runs from "decide to restore" (step 1) until the restored jobs are on screen at `http://127.0.0.1:8081`. Logging in there with the real `GOFLOW_SECRETS_KEY` also proves the saved copy decrypts the restored signing secrets. Afterwards: delete the drill's Neon project (**Settings** → **Delete project**), and the local container is already gone.
+
+**Results**
+
+| Step | Time (UTC) | Took |
+|---|---|---|
+| Decision (step 1) | not yet run | |
+| Backup downloaded (step 3) | | |
+| Neon project made, URL and endpoint copied (step 4) | | |
+| `recover.sh`: target checked, key given, decrypted and checked, loaded, verified | | |
+| GoFlow ready locally | | |
+| Logged in, restored jobs visible | | |
+| **RTO (drill)** | | |
 
 ## Relay claims live (Task 72)
 

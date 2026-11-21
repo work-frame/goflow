@@ -1031,6 +1031,21 @@ Each case was reproduced on a real machine (Arch Linux, Go 1.27, PostgreSQL 17) 
   (Sandbox run.)
 - **Why:** a click on a button inside a row reaches the row as well (the event bubbles up), so every button press would do two things: Retry retries and the drawer slides over the table; Delete opens its confirm dialog with the drawer behind it; Copy ID copies and hides the list you were working in. Nothing breaks outright, which is why it would ship: it just feels wrong, every time.
 
+## 72. Recovery loads over a database that isn't empty
+
+- **Safeguard:** `scripts/recover.sh` (Task 81) counts the tables, views and sequences in the target's schema `public`, and any `schema_migrations` table, before it asks for the age key: `if [ "$objects" != 0 ] || [ "$migrations" != 0 ]; then` stop.
+- **Removed:** the break-it turns that line into `if false; then`.
+- **Caught by:** `TestRecoverRefusesANonEmptyTarget` and `TestRecoverScriptRules`.
+- **Observed:**
+  ```text
+  --- FAIL: TestRecoverScriptRules (0.00s)
+      recover_test.go:219: recover.sh lacks "if [ \"$objects\" != 0 ] || [ \"$migrations\" != 0 ]; then"
+  --- FAIL: TestRecoverRefusesANonEmptyTarget (0.64s)
+      recover_test.go:155: recover.sh didn't refuse a target with a table: err <nil>
+  ```
+  (Sandbox run.)
+- **Why:** the target for that test holds one table that isn't GoFlow's, `stranger`, so nothing in the dump collides with it and the load succeeds: the backup lands beside data nobody checked. Against a database that is GoFlow's, the load would fail on the first `CREATE TABLE` and roll back, which looks like protection but isn't the rule, only luck. The rule matters because the URL is pasted at a hidden prompt: the one mistake nobody can see is pasting production's URL. With the check, that paste stops at "the target isn't empty" before any key is asked for.
+
 ## Experiment: the naive dual write loses a job
 
 Not a removed safeguard but the design of Task 22, run live on 2 November 2026 to see the failure Task 23 fixes. `POST /api/v1/jobs` saved the job in PostgreSQL, then pushed its ID to Redis, with nothing tying the two together.
