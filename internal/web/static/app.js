@@ -34,6 +34,15 @@
 //     but the server says events stopped reaching it, so the list may be
 //     stale) and offline/reconnecting (stream closed). An open stream
 //     alone never shows "live".
+//   - API keys (Task 87): a key's secret is shown once, in the key dialog,
+//     and lives only in keySecret and the read-only field while that step
+//     is open. It is never put in sessionStorage, localStorage, a URL, the
+//     console or an error message, and it reaches the clipboard only when
+//     Copy is clicked. "I've saved it" is the only way out of that step:
+//     Escape is refused, and if the browser closes the dialog anyway it is
+//     opened again. Closing clears the field, the variable and the copy
+//     status (clearKeySecret). JavaScript can't wipe a string from memory;
+//     dropping every reference to it is as far as a page can go.
 "use strict";
 
 const TOKEN_KEY = "goflow.token";
@@ -57,6 +66,15 @@ let loaded = false;     // the first full load has finished
 // drawer is the job the details drawer shows, and its attempts:
 // undefined (not a webhook), null (loading), an array, or an Error.
 const drawer = { id: "", attempts: undefined };
+
+// keys is the account's API keys as GET /keys gave them, newest first.
+let keys = [];
+let keysLoaded = false;
+// keySecret is a new key's secret, only while the dialog shows it once.
+let keySecret = "";
+let keySaved = false;   // "I've saved it" was pressed: the dialog may close
+let keyOpener = null;   // the control that opened the key dialog
+let pendingRevoke = null; // { id } for one key, { all: true } for every key
 
 let events = null;      // the open EventSource, if any
 let retryDelay = 1000;  // reconnect backoff, doubling to 30 s
@@ -621,6 +639,7 @@ function renderDrawer() {
   idWrap.append(el("code", "mono", job.id), copyButton(job.id, "Copy", "quiet", "copy-drawer:" + job.id));
   field(overview, "ID", idWrap);
   field(overview, "Type", job.type);
+  field(overview, "Created by", createdBy(job));
   field(overview, "Status", badge(job.status));
   const host = webhookHost(job);
   if (host) field(overview, "Delivers to", host, "mono");
@@ -643,6 +662,17 @@ function renderDrawer() {
     $("attempts-body").replaceChildren(el("p", "muted small",
       "Delivery attempts are recorded for webhook jobs. This job ran " + job.attempts + " of " + job.max_attempts + " times."));
   }
+}
+
+// createdBy says who made a job (Task 87, V6): one of your API keys, by
+// name and hint, or a logged-in session. A key no longer in the list (it
+// can't be, while the account exists, but the page may not have loaded
+// it yet) is shown by its short ID.
+function createdBy(job) {
+  if (!job.api_key_id) return "You, logged in (dashboard or CLI)";
+  const k = keys.find((x) => x.id === job.api_key_id);
+  if (!k) return "API key " + job.api_key_id.slice(0, 8);
+  return "API key: " + k.name + " (gfk_…" + k.hint + ")";
 }
 
 async function loadAttempts(id) {
@@ -737,6 +767,235 @@ function deleteJob(id) {
   }, box);
 }
 
+// ---------- views ----------
+
+// The page has two views, picked by the address's #: #keys shows the API
+// keys, anything else the jobs. The # never holds anything secret.
+function currentView() {
+  return location.hash === "#keys" ? "keys" : "jobs";
+}
+
+function showView() {
+  const onKeys = currentView() === "keys";
+  $("jobs-view").hidden = onKeys;
+  $("keys-view").hidden = !onKeys;
+  for (const [id, on] of [["nav-jobs", !onKeys], ["nav-keys", onKeys]]) {
+    if (on) $(id).setAttribute("aria-current", "page");
+    else $(id).removeAttribute("aria-current");
+  }
+  if (onKeys) loadKeys();
+}
+
+// ---------- API keys ----------
+
+function loadKeys() {
+  return handle(async () => {
+    keys = (await api("GET", "/keys")).keys;
+    keysLoaded = true;
+    renderKeys();
+    renderDrawer();
+  }, $("keys-error"));
+}
+
+const KEY_LIMIT = 10;
+
+function keyBadge(status) {
+  const known = ["active", "expired", "revoked"].includes(status) ? status : "expired";
+  const b = el("span", "badge key-" + known);
+  b.append(el("span", "dot"), el("span", "", status));
+  return b;
+}
+
+// labelled is a table cell that, on a phone, shows its column's name
+// before its value (the rows become cards there; see style.css).
+function labelled(label, content, className) {
+  const td = el("td", className);
+  td.dataset.label = label;
+  if (content instanceof Node) td.append(content);
+  else td.textContent = content;
+  return td;
+}
+
+function keyRow(k) {
+  // "is-", not "key-": key-active and the rest are the badge's colors.
+  const tr = el("tr", "is-" + k.status);
+  const scopes = el("span", "scope-list");
+  for (const s of k.scopes) scopes.append(el("code", "", s));
+  const created = labelled("Created", short(k.created_at), "time");
+  created.title = when(k.created_at);
+  const used = labelled("Last used", k.last_used_at ? ago(k.last_used_at) : "never", "time");
+  if (k.last_used_at) used.title = when(k.last_used_at);
+  const expires = labelled("Expires", short(k.expires_at), "time");
+  expires.title = when(k.expires_at);
+  const actions = labelled("", "", "actions");
+  if (k.status === "active") {
+    const b = button("Revoke", "small action delete", () => askRevoke(k), "revoke:" + k.id);
+    b.setAttribute("aria-label", "Revoke key " + k.name);
+    actions.append(b);
+  }
+  tr.append(
+    labelled("Name", k.name, "key-name"),
+    labelled("Status", keyBadge(k.status)),
+    labelled("Scopes", scopes),
+    labelled("Key", "gfk_…" + k.hint, "mono"),
+    created, used, expires, actions,
+  );
+  return tr;
+}
+
+function renderKeys() {
+  const active = keys.filter((k) => k.status === "active").length;
+  $("keys").replaceChildren(...keys.map(keyRow));
+  $("keys-empty").hidden = !keysLoaded || keys.length > 0;
+  $("keys-count").textContent = keysLoaded ? active + " of " + KEY_LIMIT + " active" : "Loading keys…";
+  $("key-revoke-all").disabled = active === 0;
+  $("key-new").disabled = keysLoaded && active >= KEY_LIMIT;
+  $("key-new").title = $("key-new").disabled ? "You have " + KEY_LIMIT + " active keys: revoke one first" : "";
+}
+
+function setKeyPasswordVisible(visible) {
+  $("key-password").type = visible ? "text" : "password";
+  const b = $("key-password-toggle");
+  b.textContent = visible ? "Hide" : "Show";
+  b.setAttribute("aria-label", visible ? "Hide password" : "Show password");
+}
+
+// clearKeySecret forgets a shown secret: the field, the variable and the
+// copy status, and puts the dialog back on its form.
+function clearKeySecret() {
+  keySecret = "";
+  $("key-secret").value = "";
+  $("key-copy-status").textContent = "";
+  $("key-reveal").hidden = true;
+  $("key-form").hidden = false;
+}
+
+function openKeyDialog() {
+  keyOpener = document.activeElement;
+  keySaved = false;
+  clearKeySecret();
+  $("key-name").value = "";
+  $("key-scope-create").checked = true;
+  $("key-scope-read").checked = false;
+  $("key-expiry").value = "90";
+  $("key-password").value = "";
+  setKeyPasswordVisible(false);
+  showError($("key-error"), "");
+  $("key-dialog").showModal();
+  $("key-name").focus();
+}
+
+// closeKeyDialog is the only way the dialog closes on purpose: Cancel on
+// the form, or "I've saved it" once the secret has been shown.
+function closeKeyDialog() {
+  keySaved = true;
+  clearKeySecret();
+  $("key-password").value = "";
+  setKeyPasswordVisible(false);
+  if ($("key-dialog").open) $("key-dialog").close();
+  if (keyOpener && document.contains(keyOpener)) keyOpener.focus();
+  keyOpener = null;
+}
+
+function sentence(msg) {
+  return msg ? msg[0].toUpperCase() + msg.slice(1) + (msg.endsWith(".") ? "" : ".") : "";
+}
+
+async function createKey(e) {
+  e.preventDefault();
+  setKeyPasswordVisible(false);
+  const box = $("key-error");
+  showError(box, "");
+  const name = $("key-name").value.trim();
+  const scopes = [$("key-scope-create"), $("key-scope-read")].filter((c) => c.checked).map((c) => c.value);
+  const password = $("key-password").value;
+  if (!name) return showError(box, "Enter a name, such as the program that will use the key.");
+  if (scopes.length === 0) return showError(box, "Pick at least one scope.");
+  if (!password) return showError(box, "Enter your password.");
+
+  const submit = $("key-create");
+  submit.disabled = true;
+  submit.textContent = "Creating…";
+  let data;
+  try {
+    data = await api("POST", "/keys", { name, scopes, expires_in_days: Number($("key-expiry").value), password });
+  } catch (err) {
+    if (err instanceof Unauthorized) {
+      closeKeyDialog();
+      logout(false);
+      return;
+    }
+    showError(box, err.status === 403 ? "Wrong password." : sentence(err.message));
+    return;
+  } finally {
+    $("key-password").value = "";
+    submit.disabled = false;
+    submit.textContent = "Create key";
+  }
+  // Only a real key from a successful answer is ever shown (condition 3).
+  if (!data || typeof data.secret !== "string" || !/^gfk_[A-Za-z0-9_-]{43}$/.test(data.secret)) {
+    showError(box, "The server's answer had no key. If a new key shows up in the list, revoke it.");
+    loadKeys();
+    return;
+  }
+  keySecret = data.secret;
+  data = null;
+  $("key-secret").value = keySecret;
+  $("key-form").hidden = true;
+  $("key-reveal").hidden = false;
+  $("key-secret").focus();
+  $("key-secret").select();
+  announce("Key created. This is the only time it is shown.");
+  loadKeys();
+}
+
+// copyKey copies the secret only because Copy was clicked (condition 1).
+async function copyKey() {
+  let ok = true;
+  try {
+    await navigator.clipboard.writeText(keySecret);
+  } catch {
+    ok = false;
+  }
+  $("key-copy-status").textContent = ok
+    ? "Copied. Paste it where your program keeps its secrets."
+    : "Copy failed: select the key above and copy it by hand.";
+}
+
+function askRevoke(k) {
+  pendingRevoke = { id: k.id };
+  $("key-confirm-title").textContent = "Revoke this key?";
+  $("key-confirm-text").textContent = "“" + k.name + "” (gfk_…" + k.hint + ") stops working at once: programs using it get 401 from their next request. It stays in the list as revoked.";
+  $("key-confirm-ok").textContent = "Revoke";
+  $("key-confirm").returnValue = "";
+  $("key-confirm").showModal();
+}
+
+function askRevokeAll() {
+  const n = keys.filter((k) => k.status === "active").length;
+  if (n === 0) return;
+  pendingRevoke = { all: true };
+  $("key-confirm-title").textContent = "Revoke all keys?";
+  $("key-confirm-text").textContent = "All " + n + " active " + (n === 1 ? "key stops" : "keys stop") + " working at once: programs using them get 401 from their next request.";
+  $("key-confirm-ok").textContent = "Revoke all";
+  $("key-confirm").returnValue = "";
+  $("key-confirm").showModal();
+}
+
+function revoke(what) {
+  return handle(async () => {
+    if (what.all) {
+      const r = await api("POST", "/keys/revoke-all");
+      announce(r.revoked + " keys revoked");
+    } else {
+      await api("DELETE", "/keys/" + encodeURIComponent(what.id));
+      announce("Key revoked");
+    }
+    await loadKeys();
+    $("keys-heading").focus();
+  }, $("keys-error"));
+}
+
 // ---------- session ----------
 
 // setPasswordVisible shows the password as text or hides it again. The
@@ -796,6 +1055,11 @@ async function logout(tellServer = true) {
   events = null;
   closeDrawer();
   if ($("confirm").open) $("confirm").close();
+  if ($("key-confirm").open) $("key-confirm").close();
+  closeKeyDialog();
+  keys = [];
+  keysLoaded = false;
+  renderKeys();
   jobs.clear();
   deleted.clear();
   loaded = false;
@@ -806,7 +1070,9 @@ async function logout(tellServer = true) {
   $("who").textContent = "";
   render();
   $("session").hidden = true;
+  $("views").hidden = true;
   $("jobs-view").hidden = true;
+  $("keys-view").hidden = true;
   $("login-view").hidden = false;
   $("email").focus();
 }
@@ -823,9 +1089,13 @@ async function loadMe() {
 function start() {
   $("login-view").hidden = true;
   $("session").hidden = false;
-  $("jobs-view").hidden = false;
+  $("views").hidden = false;
+  showView();
   retryDelay = 1000;
   render();
+  // The drawer names the key that made a job, so the list is needed on
+  // the jobs view too.
+  if (currentView() !== "keys") loadKeys();
   loadMe();
   checkHealth();
   connect();
@@ -868,6 +1138,41 @@ document.addEventListener("DOMContentLoaded", () => {
   $("drawer").addEventListener("click", (e) => { if (e.target === $("drawer")) closeDrawer(); });
   $("drawer-retry").addEventListener("click", () => retryJob(drawer.id, $("drawer-error")));
   $("drawer-delete").addEventListener("click", () => askDelete(drawer.id));
+
+  window.addEventListener("hashchange", () => {
+    if (sessionStorage.getItem(TOKEN_KEY)) showView();
+  });
+  $("key-new").addEventListener("click", openKeyDialog);
+  $("key-revoke-all").addEventListener("click", askRevokeAll);
+  $("key-form").addEventListener("submit", createKey);
+  $("key-cancel").addEventListener("click", closeKeyDialog);
+  $("key-copy").addEventListener("click", copyKey);
+  $("key-saved").addEventListener("click", closeKeyDialog);
+  $("key-password-toggle").addEventListener("click", () => {
+    setKeyPasswordVisible($("key-password").type === "password");
+    $("key-password").focus();
+  });
+  // While the secret is shown, Escape does nothing (V4). Browsers may
+  // still close a dialog on a second Escape; then it opens again, secret
+  // and all, until "I've saved it" is pressed.
+  $("key-dialog").addEventListener("cancel", (e) => {
+    if (keySecret) e.preventDefault();
+    else keySaved = true;
+  });
+  $("key-dialog").addEventListener("close", () => {
+    if (keySecret && !keySaved) {
+      $("key-dialog").showModal();
+      $("key-secret").focus();
+      return;
+    }
+    clearKeySecret();
+    $("key-password").value = "";
+  });
+  $("key-confirm").addEventListener("close", () => {
+    const what = pendingRevoke;
+    pendingRevoke = null;
+    if ($("key-confirm").returnValue === "revoke" && what) revoke(what);
+  });
 
   $("confirm").addEventListener("close", () => {
     const id = pendingDelete;

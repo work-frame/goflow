@@ -667,7 +667,9 @@ Migration 0014 adds `api_keys` and a nullable `jobs.api_key_id`. The code before
 
 1. `goflow-api` → **Logs**: `migrations applied versions=[14]`.
 2. The dashboard still logs in and lists jobs: every job query now reads `api_key_id`, so a page that loads proves the column is there.
-3. A key is made and used in Task 88, the live test. Until the dashboard gets its Keys section (Task 87), there is nothing more to see.
+3. A key is made and used in Task 88, the live test.
+
+**Task 87 (the dashboard's keys view):** no migration. After the deploy, the hosted dashboard has **Jobs** and **API keys** links in its top bar.
 
 The owner reset (`goflow-admin reset-password`) now also revokes the account's active keys and says how many: `...; N sessions ended, M API keys revoked`.
 

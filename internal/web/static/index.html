@@ -16,6 +16,10 @@
       <span class="mark" aria-hidden="true"></span>
       <span class="name">GoFlow</span>
     </div>
+    <nav id="views" class="views" aria-label="Views" hidden>
+      <a id="nav-jobs" class="view-link" href="#jobs" aria-current="page">Jobs</a>
+      <a id="nav-keys" class="view-link" href="#keys">API keys</a>
+    </nav>
     <div id="session" class="session" hidden>
       <span id="api-health" class="health wait" title="GET /readyz: the API and its database">API: checking</span>
       <span id="live" class="live wait" title="The live event stream">connecting</span>
@@ -130,6 +134,45 @@
         </nav>
       </section>
     </div>
+
+    <div id="keys-view" class="app" hidden>
+      <section class="panel" aria-labelledby="keys-heading">
+        <div class="table-head">
+          <div>
+            <h1 id="keys-heading" tabindex="-1">API keys</h1>
+            <p class="muted small keys-intro">A key lets another program, such as your website's backend, create or read your jobs without logging in. Keep keys on servers: never in a web page.</p>
+          </div>
+          <div class="keys-buttons">
+            <button id="key-new" class="btn primary" type="button">New key</button>
+            <button id="key-revoke-all" class="btn danger" type="button">Revoke all</button>
+          </div>
+        </div>
+        <p id="keys-error" class="banner error" role="alert" hidden></p>
+        <p id="keys-count" class="muted small" aria-live="polite"></p>
+        <div class="table-wrap">
+          <table class="jobs keys">
+            <caption class="sr-only">Your API keys, newest first, with their status</caption>
+            <thead>
+              <tr>
+                <th scope="col">Name</th>
+                <th scope="col">Status</th>
+                <th scope="col">Scopes</th>
+                <th scope="col">Key</th>
+                <th scope="col">Created</th>
+                <th scope="col">Last used</th>
+                <th scope="col">Expires</th>
+                <th scope="col"><span class="sr-only">Actions</span></th>
+              </tr>
+            </thead>
+            <tbody id="keys"></tbody>
+          </table>
+        </div>
+        <div id="keys-empty" class="empty" hidden>
+          <p class="empty-title">No keys yet</p>
+          <p class="muted small">Make one for each program that sends you jobs, with only the scopes it needs.</p>
+        </div>
+      </section>
+    </div>
   </main>
 
   <dialog id="drawer" class="drawer" aria-labelledby="drawer-title">
@@ -167,6 +210,69 @@
   </dialog>
 
   <p id="announce" class="sr-only" aria-live="polite"></p>
+
+  <!-- Making a key: the form, then the secret, once (Task 87, V3 and V4). -->
+  <dialog id="key-dialog" class="confirm key-dialog" aria-labelledby="key-dialog-title">
+    <form id="key-form" class="key-form" novalidate>
+      <h2 id="key-dialog-title">New API key</h2>
+      <label class="field" for="key-name">
+        <span>Name</span>
+        <input id="key-name" maxlength="100" autocomplete="off" required placeholder="contact form">
+      </label>
+      <fieldset class="field scopes">
+        <legend>Scopes</legend>
+        <label class="check" for="key-scope-create"><input id="key-scope-create" type="checkbox" value="jobs:create" checked> <span><code>jobs:create</code>: create jobs</span></label>
+        <label class="check" for="key-scope-read"><input id="key-scope-read" type="checkbox" value="jobs:read"> <span><code>jobs:read</code>: list jobs, read one and its attempts</span></label>
+      </fieldset>
+      <label class="field" for="key-expiry">
+        <span>Expires after</span>
+        <select id="key-expiry">
+          <option value="30">30 days</option>
+          <option value="90" selected>90 days</option>
+          <option value="365">365 days</option>
+        </select>
+      </label>
+      <div class="field">
+        <label for="key-password">Your password</label>
+        <div class="password-wrap">
+          <input id="key-password" type="password" autocomplete="current-password" required aria-describedby="key-password-help">
+          <button id="key-password-toggle" class="btn quiet small" type="button" aria-controls="key-password" aria-label="Show password">Show</button>
+        </div>
+        <span id="key-password-help" class="muted small">Asked again because a key outlives your login.</span>
+      </div>
+      <p id="key-error" class="error small" role="alert" hidden></p>
+      <div class="confirm-actions">
+        <button id="key-cancel" class="btn ghost" type="button">Cancel</button>
+        <button id="key-create" class="btn primary" type="submit">Create key</button>
+      </div>
+    </form>
+    <section id="key-reveal" class="key-reveal" aria-labelledby="key-reveal-title" hidden>
+      <h2 id="key-reveal-title">Copy your key now</h2>
+      <p id="key-reveal-warning" class="banner warn">This is the only time you'll see this key. GoFlow keeps only a hash of it. Don't share your screen or take a screenshot while it's shown.</p>
+      <label class="field" for="key-secret">
+        <span>Your new key</span>
+        <input id="key-secret" class="mono" type="text" readonly autocomplete="off" spellcheck="false" aria-describedby="key-reveal-warning">
+      </label>
+      <div class="key-copy-row">
+        <button id="key-copy" class="btn" type="button">Copy</button>
+        <span id="key-copy-status" class="muted small" role="status"></span>
+      </div>
+      <div class="confirm-actions">
+        <button id="key-saved" class="btn primary" type="button">I've saved it</button>
+      </div>
+    </section>
+  </dialog>
+
+  <dialog id="key-confirm" class="confirm" aria-labelledby="key-confirm-title" aria-describedby="key-confirm-text">
+    <form method="dialog">
+      <h2 id="key-confirm-title">Revoke this key?</h2>
+      <p id="key-confirm-text" class="muted confirm-text"></p>
+      <div class="confirm-actions">
+        <button class="btn ghost" value="cancel" type="submit">Cancel</button>
+        <button id="key-confirm-ok" class="btn danger" value="revoke" type="submit">Revoke</button>
+      </div>
+    </form>
+  </dialog>
 
   <dialog id="confirm" class="confirm" aria-labelledby="confirm-title" aria-describedby="confirm-text">
     <form method="dialog">
