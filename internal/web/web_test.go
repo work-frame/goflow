@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
@@ -193,6 +194,7 @@ func TestDrawerNeverFetchesTheFullJob(t *testing.T) {
 		arg := g[1]
 		switch {
 		case strings.HasPrefix(arg, `"/jobs?"`), strings.HasPrefix(arg, `"/auth/me"`):
+		case strings.HasPrefix(arg, `"/keys")`): // the key list: names and hints, never secrets (Task 87)
 		case strings.HasPrefix(arg, `"/jobs/" +`) && strings.Contains(arg, `+ "/attempts")`):
 		default:
 			t.Errorf("app.js makes a GET the dashboard must not make: api(\"GET\", %s", arg)
@@ -323,8 +325,10 @@ func TestFormControlsHaveLabels(t *testing.T) {
 			t.Errorf("app.js uses %s: use the page's own <dialog>", banned)
 		}
 	}
-	if strings.Count(html, "<dialog") != 2 || !strings.Contains(js, ".showModal()") {
-		t.Error("the drawer and the delete confirmation must be modal <dialog>s")
+	// The drawer, the delete confirmation, the key dialog and the revoke
+	// confirmation (Task 87).
+	if strings.Count(html, "<dialog") != 4 || !strings.Contains(js, ".showModal()") {
+		t.Error("the drawer, the delete confirmation and the two key dialogs must be modal <dialog>s")
 	}
 }
 
@@ -422,5 +426,132 @@ func TestCopyIDGivesFeedback(t *testing.T) {
 	}
 	if !strings.Contains(html, `<p id="announce" class="sr-only" aria-live="polite"></p>`) {
 		t.Error("index.html has no polite live region for announcements")
+	}
+}
+
+// codeOnly is app.js without its comment lines, for tests that look for
+// words the comments use to explain the rules.
+func codeOnly(js string) string {
+	var out []string
+	for _, line := range strings.Split(js, "\n") {
+		if !strings.HasPrefix(strings.TrimSpace(line), "//") {
+			out = append(out, line)
+		}
+	}
+	return strings.Join(out, "\n")
+}
+
+// funcBody returns the text of a top-level function in app.js.
+func funcBody(t *testing.T, js, signature string) string {
+	t.Helper()
+	i := strings.Index(js, signature)
+	if i < 0 {
+		t.Fatalf("app.js has no %q", signature)
+	}
+	return js[i : i+strings.Index(js[i:], "\n}\n")]
+}
+
+// Task 87 (V4, conditions 1 and 3): a new key's secret lives in keySecret
+// and the read-only field, and nowhere else: never in storage, a URL, the
+// console, an error message or an announcement. It reaches the clipboard
+// only in copyKey, run by the Copy button, and it is only ever taken from
+// a successful answer that looks like a key.
+func TestKeySecretStaysInThePage(t *testing.T) {
+	js := codeOnly(read(t, "static/app.js"))
+	if strings.Contains(js, "localStorage") || strings.Contains(js, "console.") {
+		t.Error("app.js uses localStorage or the console")
+	}
+	if n := strings.Count(js, "sessionStorage.setItem("); n != 1 || !strings.Contains(js, "sessionStorage.setItem(TOKEN_KEY, data.token)") {
+		t.Errorf("app.js writes to sessionStorage %d times; only the login token may be stored", n)
+	}
+	allowed := []string{
+		`let keySecret = "";`,
+		`keySecret = "";`,
+		`keySecret = data.secret;`,
+		`$("key-secret").value = keySecret;`,
+		`await navigator.clipboard.writeText(keySecret);`,
+		`if (keySecret) e.preventDefault();`,
+		`if (keySecret && !keySaved) {`,
+	}
+	for _, line := range strings.Split(js, "\n") {
+		code := strings.TrimSpace(line)
+		if strings.HasPrefix(code, "//") || !strings.Contains(code, "keySecret") {
+			continue
+		}
+		if !slices.Contains(allowed, code) {
+			t.Errorf("app.js uses the key's secret in a new way: %q", code)
+		}
+	}
+	if !strings.Contains(funcBody(t, js, "async function copyKey() {"), "writeText(keySecret)") {
+		t.Error("copyKey doesn't copy the secret")
+	}
+	if !strings.Contains(js, `$("key-copy").addEventListener("click", copyKey);`) || strings.Count(js, "copyKey") != 2 {
+		t.Error("copyKey must run from the Copy button's click and nowhere else")
+	}
+	create := funcBody(t, js, "async function createKey(e) {")
+	check, take := strings.Index(create, `/^gfk_[A-Za-z0-9_-]{43}$/.test(data.secret)`), strings.Index(create, "keySecret = data.secret;")
+	if check < 0 || take < 0 || check > take {
+		t.Error("createKey shows a secret without first checking the answer holds a real key")
+	}
+	if strings.Contains(create, "catch") && strings.Index(create, "keySecret = data.secret;") < strings.Index(create, "} catch") {
+		t.Error("createKey sets the secret before the request can have failed")
+	}
+}
+
+// Task 87 (V4): once the secret is shown, "I've saved it" is the only way
+// out. Escape is refused, a browser that closes the dialog anyway gets it
+// opened again, and a click outside does nothing.
+func TestKeyDialogClosesOnlyThroughItsButton(t *testing.T) {
+	html, js := read(t, "static/index.html"), read(t, "static/app.js")
+	for _, want := range []string{
+		`$("key-dialog").addEventListener("cancel", (e) => {`,
+		`if (keySecret) e.preventDefault();`,
+		`if (keySecret && !keySaved) {` + "\n" + `      $("key-dialog").showModal();`,
+		`$("key-saved").addEventListener("click", closeKeyDialog);`,
+	} {
+		if !strings.Contains(js, want) {
+			t.Errorf("app.js lacks %q", want)
+		}
+	}
+	if strings.Contains(js, `$("key-dialog").addEventListener("click"`) {
+		t.Error("a click on the key dialog's backdrop must not close it")
+	}
+	reveal := html[strings.Index(html, `<section id="key-reveal"`):]
+	reveal = reveal[:strings.Index(reveal, "</section>")]
+	if strings.Contains(reveal, `method="dialog"`) || strings.Count(reveal, "<button") != 2 {
+		t.Error(`the secret step must have exactly two buttons, Copy and "I've saved it", and no form that closes the dialog`)
+	}
+	if !strings.Contains(html, `<input id="key-secret" class="mono" type="text" readonly autocomplete="off" spellcheck="false"`) {
+		t.Error("the secret field must be read-only, with autocomplete and spellcheck off")
+	}
+}
+
+// Task 87 (condition 2): closing the dialog forgets the secret: the field,
+// the variable and the copy status. Case 74 is the field left filled.
+func TestKeySecretIsClearedWhenTheDialogCloses(t *testing.T) {
+	js := read(t, "static/app.js")
+	clear := funcBody(t, js, "function clearKeySecret() {")
+	for _, want := range []string{`keySecret = "";`, `$("key-secret").value = "";`, `$("key-copy-status").textContent = "";`, `$("key-reveal").hidden = true;`} {
+		if !strings.Contains(clear, want) {
+			t.Errorf("clearKeySecret lacks %q: the secret would stay in the page after the dialog closes", want)
+		}
+	}
+	closeFn := funcBody(t, js, "function closeKeyDialog() {")
+	if c, x := strings.Index(closeFn, "clearKeySecret();"), strings.Index(closeFn, `$("key-dialog").close()`); c < 0 || x < 0 || c > x {
+		t.Error("closeKeyDialog doesn't clear the secret before closing")
+	}
+	if !strings.Contains(funcBody(t, js, "async function logout("), "closeKeyDialog();") {
+		t.Error("logout doesn't close the key dialog and clear its secret")
+	}
+}
+
+// Task 87 (V6): the job drawer says who made a job: a key by name and
+// hint, or a logged-in session.
+func TestDrawerSaysWhoCreatedTheJob(t *testing.T) {
+	js := read(t, "static/app.js")
+	for _, want := range []string{`field(overview, "Created by", createdBy(job));`, `"API key: " + k.name + " (gfk_…" + k.hint + ")"`, `"You, logged in (dashboard or CLI)"`} {
+		if !strings.Contains(js, want) {
+			t.Errorf("app.js lacks %q", want)
+		}
 	}
 }

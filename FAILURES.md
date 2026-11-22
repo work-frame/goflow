@@ -1065,6 +1065,25 @@ Each case was reproduced on a real machine (Arch Linux, Go 1.27, PostgreSQL 17) 
   (Sandbox run; the response bodies shortened.)
 - **Why:** this is the shape the mistake would take in real code: a check that asks whether the key is "allowed to do things" instead of "allowed to do this". Nothing errors, every key still works, and the session paths are untouched, so every older test passes. The cost: a contact form's `jobs:create` key, readable from that site's server, would also read every job the account ever ran, webhook bodies included. Ownership still held (the jobs were the owner's own), which is why scope and ownership have separate tests.
 
+## 74. Closing the key dialog leaves the key in the page
+
+- **Safeguard:** `clearKeySecret` (Task 87) empties the read-only field that showed a new key, and the variable that held it, whenever the dialog closes: "I've saved it", Cancel or logout.
+- **Removed:** the break-it deletes `$("key-secret").value = "";` from it.
+- **Caught by:** `TestKeySecretIsClearedWhenTheDialogCloses`, and the browser check (`pw/keys87.js` in the sandbox).
+- **Observed:**
+  ```text
+  --- FAIL: TestKeySecretIsClearedWhenTheDialogCloses (0.00s)
+      web_test.go:536: clearKeySecret lacks "$(\"key-secret\").value = \"\";": the secret would stay in the page after the dialog closes
+  ```
+  and in Chromium:
+  ```text
+  FAIL after closing, the secret is nowhere in the page: #key-secret
+  FAIL ... not even part of it
+  FAIL 375 px: the secret is gone after closing
+  ```
+  (Sandbox run.)
+- **Why:** nothing looks wrong. The dialog closes, the list shows the new key, and the field is hidden with it. But a hidden field is still in the page: any script running there (an extension with page access, or an injected script the policy failed to stop) can read `#key-secret` until the tab closes, and the next time the dialog opens, the old key would be there for a moment before the form resets. "Hidden" is not "gone"; the browser check reads every field, not what's on screen.
+
 ## Experiment: the naive dual write loses a job
 
 Not a removed safeguard but the design of Task 22, run live on 2 November 2026 to see the failure Task 23 fixes. `POST /api/v1/jobs` saved the job in PostgreSQL, then pushed its ID to Redis, with nothing tying the two together.

@@ -89,6 +89,16 @@ code, .mono { font-family: var(--mono); font-size: 12.5px; }
   box-shadow: inset -6px -6px 0 rgba(11, 13, 16, 0.35);
 }
 .session { display: flex; align-items: center; gap: 12px; min-width: 0; }
+
+/* the two views: Jobs and API keys (Task 87, V1) */
+.views { display: flex; gap: 4px; margin-right: auto; margin-left: 12px; }
+.view-link {
+  display: inline-flex; align-items: center; height: 32px; padding: 0 12px;
+  color: var(--muted); text-decoration: none; font-weight: 500;
+  border-radius: var(--r-control);
+}
+.view-link:hover { color: var(--text); background: var(--surface-2); }
+.view-link[aria-current="page"] { color: var(--text); background: var(--surface-2); box-shadow: inset 0 -2px 0 var(--accent); }
 .who {
   color: var(--muted); font-size: 12.5px;
   max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -165,6 +175,7 @@ select { cursor: pointer; }
   background: var(--surface-2); border: 1px solid var(--line-strong);
 }
 .banner.error { background: var(--bad-bg); border-color: #5a2a2b; }
+.banner.warn { background: var(--warn-bg); border-color: #5c4718; }
 
 /* ---------- login ---------- */
 
@@ -214,7 +225,9 @@ select { cursor: pointer; }
 .filters input { width: 240px; }
 .filters select { width: 190px; }
 
-.table-wrap { overflow-x: auto; margin: 0 -18px; }
+/* position: relative keeps the table's screen-reader-only text inside the
+   scrolling box, so it can't widen the page. */
+.table-wrap { position: relative; overflow-x: auto; margin: 0 -18px; }
 table.jobs { width: 100%; border-collapse: collapse; }
 .jobs th {
   text-align: left; font-weight: 500; font-size: 12px; color: var(--muted);
@@ -259,6 +272,33 @@ table.jobs { width: 100%; border-collapse: collapse; }
 .status-retrying { color: var(--warn); background: var(--warn-bg); }
 .status-dead, .status-failed { color: var(--bad); background: var(--bad-bg); }
 .status-processing .dot { animation: pulse 1.4s ease-in-out infinite; }
+.key-active { color: var(--ok); background: var(--ok-bg); }
+.key-expired, .key-revoked { color: var(--neutral); background: var(--neutral-bg); }
+
+/* ---------- API keys ---------- */
+
+.keys-intro { margin-top: 4px; max-width: 640px; }
+.keys-buttons { display: flex; gap: 8px; flex-wrap: wrap; }
+#keys-error { margin-bottom: 10px; }
+#keys-count { margin-bottom: 8px; }
+.keys td { font-size: 13px; }
+.keys .key-name { font-weight: 600; word-break: break-word; min-width: 120px; }
+.keys .time { white-space: nowrap; color: var(--muted); }
+.keys tr.is-expired td, .keys tr.is-revoked td { color: var(--muted); }
+.keys tr.is-expired .key-name, .keys tr.is-revoked .key-name { font-weight: 500; }
+.keys tbody tr:hover td { background: transparent; }
+.scope-list { display: inline-flex; gap: 4px; flex-wrap: wrap; }
+.scope-list code { padding: 1px 6px; border-radius: var(--r-control); background: var(--surface-2); }
+
+.key-dialog { width: min(460px, calc(100vw - 32px)); }
+.key-form, .key-reveal { padding: 20px; display: grid; gap: 14px; }
+.scopes { border: 0; margin: 0; padding: 0; gap: 8px; }
+.scopes legend { padding: 0; margin-bottom: 6px; font-weight: 500; }
+.check { display: flex; align-items: flex-start; gap: 8px; color: var(--text); font-size: 13px; cursor: pointer; }
+.check input { width: 16px; height: 16px; margin: 2px 0 0; flex: none; accent-color: var(--accent); }
+.check code { color: var(--text); }
+#key-secret { word-break: break-all; font-size: 13px; }
+.key-copy-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 
 .empty { padding: 36px 16px; text-align: center; display: grid; justify-items: center; gap: 6px; }
 .empty-title { font-weight: 600; }
@@ -359,6 +399,21 @@ dialog::backdrop { background: rgba(5, 6, 8, 0.6); }
   .metric:last-child { grid-column: span 2; }
 }
 
+/* Eight columns don't fit a tablet: below 960 px each key becomes a card,
+   its column names in front of the values. */
+@media (max-width: 960px) {
+  .keys thead { display: none; }
+  .keys, .keys tbody, .keys tr, .keys td { display: block; width: 100%; }
+  .keys tr { padding: 12px 18px; border-bottom: 1px solid var(--line); }
+  .keys tbody tr:last-child { border-bottom: 0; }
+  .keys td { display: flex; gap: 12px; padding: 3px 0 !important; border: 0; }
+  .keys td[data-label]:not([data-label=""])::before {
+    content: attr(data-label); flex: none; width: 84px; color: var(--muted); font-size: 12px;
+  }
+  .keys td.actions { justify-content: flex-start; padding-top: 8px !important; }
+  .keys td.actions:empty { display: none; }
+}
+
 @media (max-width: 768px) {
   .app { padding: 16px; gap: 16px; }
   .topbar { padding: 10px 16px; }
@@ -371,6 +426,10 @@ dialog::backdrop { background: rgba(5, 6, 8, 0.6); }
 }
 
 @media (max-width: 640px) {
+  /* the topbar takes two rows: brand and session, then the views */
+  .topbar { flex-wrap: wrap; row-gap: 6px; }
+  .views { order: 3; width: 100%; margin: 0; }
+  .view-link { flex: 1; justify-content: center; }
   .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
   .metric:last-child { grid-column: 1 / -1; }
   .metric { padding: 14px 16px; }
