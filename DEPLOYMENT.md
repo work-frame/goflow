@@ -665,9 +665,11 @@ Migration 0014 adds `api_keys` and a nullable `jobs.api_key_id`. The code before
 
 **Checks after the deploy:**
 
-1. `goflow-api` → **Logs**: `migrations applied versions=[14]`.
-2. The dashboard still logs in and lists jobs: every job query now reads `api_key_id`, so a page that loads proves the column is there.
-3. A key is made and used in Task 88, the live test (below).
+1. `goflow-api` → **Logs**: `migrations applied versions=[14]`. Seen at `2026-11-21T23:13:27.877Z`.
+2. The dashboard still logs in and lists jobs: every job query now reads `api_key_id`, so a page that loads proves the column is there. It did, after the deploy of Task 86 and again after Task 87.
+3. A key is made and used in Task 88, the live test (below): passed on 27 November 2026.
+
+The Blueprint `goflow` showed **Failed sync** for 8 days after Task 86. Its only failed sync was the one from Task 67, whose step "Create web service goflow-receiver" failed on purpose (the receiver's first deploy has no `RECEIVER_SECRET` yet), and `render.yaml` hadn't changed since, so nothing had synced again. A manual sync on 22 November (21:38 UTC) was green: "Resources already up to date".
 
 **The live key check (Task 88):** `scripts/key-check.sh` runs seven steps against the hosted API with a real key, then revokes it. It needs `curl` and `jq`.
 
@@ -690,6 +692,20 @@ Migration 0014 adds `api_keys` and a nullable `jobs.api_key_id`. The code before
 | 7 | `POST /api/v1/jobs` (the revoked key) | `401` at once |
 
 The key, the password and the session token reach curl through `/dev/fd`, never its arguments; the script refuses to run under `bash -x`, prints the key only as its 4-character hint, and logs its session out at the end. The job from step 2 stays in the account, shown with **Created by live test**.
+
+**Result (27 November 2026, from the laptop, branch `test/api-key-live` at 0db5b04, main at a93ee89 on Render):** all seven passed on the first full run. Key `...uwJk`, ID `1101efe2`, scope `jobs:create`, 30 days.
+
+| Step | Got |
+|---|---|
+| 1 | the key active in the account (`1101efe2`, scopes `jobs:create`) |
+| 2 | `201`, job `3bfd0e9b`, status `pending`, `api_key_id` `1101efe2` |
+| 3 | `200`, same job, `api_key_id` `1101efe2` |
+| 4 | `403` `this API key doesn't have the jobs:read scope` |
+| 5 | `403` `API keys can't use this route; log in instead` |
+| 6 | `204`; the list says `revoked`, `last_used_at` `2026-11-27T14:05:08.21208Z` |
+| 7 | `401` `missing, invalid or expired session token` |
+
+Run before it: one attempt stopped at the first prompt, before anything was sent; no key was touched. Two things the run showed: `last_used_at` holds step 2's time, though the key was presented again in steps 4 and 5; those came within the same minute, and the column is written at most once a minute (a working key refused for its scope still counts as used). And the revoked key's `401` says "session token": the message is shared by every refused bearer token, so it names the wrong kind of token for a key. Left as it is; it tells an attacker nothing either way.
 
 **Task 87 (the dashboard's keys view):** no migration. After the deploy, the hosted dashboard has **Jobs** and **API keys** links in its top bar.
 

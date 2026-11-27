@@ -1,6 +1,6 @@
 # Architecture
 
-This describes GoFlow at the end of Phase 18. It changes as each phase lands.
+This describes GoFlow at the end of Phase 19. It changes as each phase lands.
 
 ## Overview
 
@@ -532,6 +532,7 @@ golang:1.27-trixie                         gcr.io/distroless/static-debian13:non
 | Relay and reconciler locks (Tasks 71–72) | Written first and run red against the old code (case 66). A send held open by the test stands in for a Redis that never answers: deleting the job and claiming it must each finish in under 1 s meanwhile; a claim that ran out is sent again and the stale pass finishes nothing; an ID sent twice is claimed once; a failed send releases its claim; the reconciler leaves a job claimed meanwhile untouched. In `internal/queue`, a fake Redis that accepts and never answers: a 500 ms deadline and a 200 ms cancel both return in under 1 s. In `internal/relay`, each send is given 2 s |
 | age backups (Task 74) | Read: every dump piped into `encrypt_` (gpg or age), never into a file; the age private key used in exactly two lines, a format check and a pipe to `age` (case 67). Run in the sandbox: an age backup to a fresh public key restored with every count and structure equal; a wrong key refused before anything reached PostgreSQL; a malformed key refused at the prompt; a `.gpg` backup still restored |
 | `scripts/restore-filter.awk`, `scripts/pgurl.sh` (Task 69b) | Run: the filter on a dump shaped like Neon's (one `pg_attver` line removed and printed, a COPY row that looks like one kept, six kinds of bad input refused with no SQL printed); then, with `psql` installed, each loaded into a database the test creates and drops: a cut-off dump restores nothing, a complete one restores every foreign key, index and CHECK. `verified_url` on eight URLs: `verify-full` always, except localhost (case 65) |
+| `scripts/key-check.sh` (Task 88) | Run against a real test server: all seven steps pass and leave the key revoked; a key that fails step 4 is still revoked by the exit trap; a key not named `live test` and a wrong password touch nothing; `bash -x` is refused before any prompt; a stand-in `curl` first on `PATH` records every argument and none holds the key, the password or a `Bearer` header (case 75). Run once against Render by hand (DEPLOYMENT.md, API keys) |
 | `.github/workflows/ci.yml` | `cmd/api/ci_test.go` reads the workflow: actions pinned to commit SHAs, a read-only token, no secrets, the same database images as `compose.yaml` and the same Go minor version as the Dockerfile (case 55). The workflow itself is tested by running: its first green run is on its own pull request |
 | `internal/loadgen`, `cmd/loadgen` | Only addresses on this machine are accepted, and a remote API is refused before anything is sent. Jobs finish through polling alone, with no events at all. Against a real test server, a job that never finishes is listed by ID and the run counts as failed (case 53). The load itself is measured by hand, never in `check.sh` (DEVELOPMENT.md, Load testing and Benchmarks) |
 
