@@ -1084,6 +1084,25 @@ Each case was reproduced on a real machine (Arch Linux, Go 1.27, PostgreSQL 17) 
   (Sandbox run.)
 - **Why:** nothing looks wrong. The dialog closes, the list shows the new key, and the field is hidden with it. But a hidden field is still in the page: any script running there (an extension with page access, or an injected script the policy failed to stop) can read `#key-secret` until the tab closes, and the next time the dialog opens, the old key would be there for a moment before the form resets. "Hidden" is not "gone"; the browser check reads every field, not what's on screen.
 
+## 75. The live key check puts the key on curl's command line
+
+- **Safeguard:** `scripts/key-check.sh` (Task 88) hands curl the `Authorization` header as a config file read from `/dev/fd` (`-K <(auth_config "$3")`), and the login body the same way (`--data-binary @<(...)`). The key, the password and the session token are in no process's arguments, which any user on the machine can read with `ps` while curl runs.
+- **Removed:** the break-it changes the curl call that sends a body to `-H "Authorization: Bearer $3"`: the usual way to write it.
+- **Caught by:** `TestKeyCheckScriptRules` and `TestKeyCheckKeepsSecretsOffCurlsCommandLine`.
+- **Observed:**
+  ```text
+  --- FAIL: TestKeyCheckScriptRules (0.00s)
+      keycheck_test.go:298: key-check.sh builds the Authorization header in 2 places, want 1
+      keycheck_test.go:302: key-check.sh contains "-H \"Authorization"
+      keycheck_test.go:311: key-check.sh calls curl without the header from /dev/fd: out=$(curl "${args[@]}" -H "Authorization: Bearer $3" -H 'Content-Type: application/json' --data-binary @<(printf '%s' "$4") "$base$2" 2>/dev/null) || out=""
+  --- FAIL: TestKeyCheckKeepsSecretsOffCurlsCommandLine (0.44s)
+      keycheck_test.go:253: curl's arguments held a secret or the email (gfk_4b...)
+      keycheck_test.go:253: curl's arguments held a secret or the email (vq1Fas...)
+      keycheck_test.go:253: curl's arguments held a secret or the email (Bearer...)
+  ```
+  (Sandbox run, a throwaway test key.)
+- **Why:** every other test still passes, because the requests are the same: the server can't tell how the header reached curl. Only two things notice: the rules test, which reads the script, and a stand-in `curl` first on `PATH` that writes down every argument it was started with. That second test is the stronger one; it would also catch a secret on the command line written in a way the rules test doesn't know. The cost of the mistake is small on a one-person laptop and real anywhere else: `/proc/<pid>/cmdline` is readable by every local user, and process listings end up in logs and monitoring.
+
 ## Experiment: the naive dual write loses a job
 
 Not a removed safeguard but the design of Task 22, run live on 2 November 2026 to see the failure Task 23 fixes. `POST /api/v1/jobs` saved the job in PostgreSQL, then pushed its ID to Redis, with nothing tying the two together.
