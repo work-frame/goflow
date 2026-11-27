@@ -111,7 +111,7 @@ Every job belongs to the user who created it. Users only ever see their own jobs
 
 ### API keys
 
-An API key lets another program, such as your website's backend, create or read your jobs without logging in. Make one with your session token (`gf` above) and your password again: asking for it means a stolen 24-hour session can't be turned into a key that lasts a year. The body goes through `<(...)`, so the password is in no command line (`gf` already uses standard input for the token):
+An API key lets another program, such as your website's backend, create or read your jobs without logging in. [`examples/contactform`](examples/contactform/README.md) is a small working example: a contact form whose backend turns each message into a signed webhook job with a `jobs:create` key that never reaches the browser. Make one with your session token (`gf` above) and your password again: asking for it means a stolen 24-hour session can't be turned into a key that lasts a year. The body goes through `<(...)`, so the password is in no command line (`gf` already uses standard input for the token):
 
 ```bash
 read -s "PW?Password: " && echo
@@ -402,6 +402,7 @@ internal/webhook/      webhook delivery: signing, one POST per attempt, outcomes
 cmd/worker/            worker entry point
 cmd/loadgen/           load generator for the local stack (refuses any other API)
 cmd/receiver/          example webhook receiver; runs on Render as goflow-receiver (Task 67)
+examples/contactform/  example contact form: its backend makes webhook jobs with an API key (Task 89); not in the image
 cmd/goflow-admin/      owner-only tools run on your own machine: reset-password (Task 78); not in the image
 scripts/               development scripts, and the SQL compose's PostgreSQL runs once
 Dockerfile             the container image: build stage, then distroless static

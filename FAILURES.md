@@ -1103,6 +1103,22 @@ Each case was reproduced on a real machine (Arch Linux, Go 1.27, PostgreSQL 17) 
   (Sandbox run, a throwaway test key.)
 - **Why:** every other test still passes, because the requests are the same: the server can't tell how the header reached curl. Only two things notice: the rules test, which reads the script, and a stand-in `curl` first on `PATH` that writes down every argument it was started with. That second test is the stronger one; it would also catch a secret on the command line written in a way the rules test doesn't know. The cost of the mistake is small on a one-person laptop and real anywhere else: `/proc/<pid>/cmdline` is readable by every local user, and process listings end up in logs and monitoring.
 
+## 76. The contact form shows GoFlow's answer to the visitor
+
+- **Safeguard:** `examples/contactform` (Task 89) answers every GoFlow failure with fixed words ("Your message couldn't be sent. Try again in a moment.") and never reads the body of a refusal. The status goes to the log; the text goes nowhere.
+- **Removed:** the break-it does the "helpful" thing: it reads GoFlow's answer (up to 512 bytes) and adds it to the message: `... Try again in a moment. GoFlow said: {"error": ...}`.
+- **Caught by:** `TestGoFlowFailuresShowFixedMessages`. The fake GoFlow's error bodies carry a marker string, and the visitor's page must never contain it.
+- **Observed:**
+  ```text
+  --- FAIL: TestGoFlowFailuresShowFixedMessages (0.01s)
+      --- FAIL: TestGoFlowFailuresShowFixedMessages/500 (0.00s)
+          contactform_test.go:444: the visitor was shown GoFlow's own error text
+      --- FAIL: TestGoFlowFailuresShowFixedMessages/403 (0.00s)
+          contactform_test.go:444: the visitor was shown GoFlow's own error text
+  ```
+  (Sandbox run.) The `422` and `429` cases still pass: they have their own messages, so only the catch-all leaks.
+- **Why:** the visitor is not the API's client; the backend is. GoFlow's errors are written for the account owner: a `403` names the key's missing scope, a `400` quotes which field of the job was wrong, and future versions may say more. Shown on a public page, they tell anyone which service runs behind the form, that a key is used and what it may do. The visitor can't act on any of it, so the right message is the same every time, and the detail belongs in the operator's log (status only here: GoFlow's text could quote the submitted data back).
+
 ## Experiment: the naive dual write loses a job
 
 Not a removed safeguard but the design of Task 22, run live on 2 November 2026 to see the failure Task 23 fixes. `POST /api/v1/jobs` saved the job in PostgreSQL, then pushed its ID to Redis, with nothing tying the two together.
