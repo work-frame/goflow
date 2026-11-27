@@ -23,8 +23,9 @@ browser ──form POST──► this backend ──POST /api/v1/jobs, Authoriza
    ```bash
    go run ./examples/contactform
    ```
-4. Open http://127.0.0.1:8090 and send a made-up message (for example `Test Person`, `test@example.com`).
-5. When you're done: stop it with Ctrl+C, `unset CONTACT_GOFLOW_KEY`, and revoke the key in the dashboard.
+4. Wake the receiver first: open https://goflow-receiver.onrender.com/healthz and wait for `ok`. A free Render instance that is asleep had its deliveries refused with `429` in the live run (below), and five attempts were over in 22 seconds.
+5. Open http://127.0.0.1:8090 and send a made-up message (for example `Test Person`, `test@example.com`).
+6. When you're done: stop it with Ctrl+C, `unset CONTACT_GOFLOW_KEY`, and revoke the key in the dashboard.
 
 The account needs a webhook signing secret, and the receiver must hold the same one (`RECEIVER_SECRET` on Render, Task 67). If they differ, the job's attempts show `401` from the receiver.
 
@@ -85,4 +86,23 @@ A real contact form would need a decision on how long messages are kept and who 
 
 ## Tests
 
-`go test ./examples/contactform` runs against a fake GoFlow that records every request: the exact job (headers, type, title, URL, body, `max_attempts`), that extra fields can't change it, that resending a page reuses its key, that forged tokens, the honeypot and invalid fields send nothing, that every GoFlow failure shows fixed words and never GoFlow's text, that the key never reaches a page, a header or the log and submitted text never reaches the log, that redirects aren't followed and huge answers are cut off, and that bad settings are refused. The live run against the hosted API is recorded after it has been done (Task 89, second commit).
+`go test ./examples/contactform` runs against a fake GoFlow that records every request: the exact job (headers, type, title, URL, body, `max_attempts`), that extra fields can't change it, that resending a page reuses its key, that forged tokens, the honeypot and invalid fields send nothing, that every GoFlow failure shows fixed words and never GoFlow's text, that the key never reaches a page, a header or the log and submitted text never reaches the log, that redirects aren't followed and huge answers are cut off, and that bad settings are refused. The live run against the hosted API is below.
+
+## Live run (27 November 2026)
+
+From the laptop, branch `feat/contact-form-example` at 0c7dd61, against the hosted API (main at 1c3c6df) and `goflow-receiver` on Render. Key `contact form`, `jobs:create` only, 30 days, revoked afterwards. Made-up data: `Test Person`, `test@example.com`, "Hello from the GoFlow example". Times in UTC.
+
+| When | What happened |
+|---|---|
+| 14:57:01 | The form sent it: `message accepted job_id=1a39508c1c68f9367054ee433bb8bbae replayed=false`. The dashboard: type `webhook`, **Created by: API key: contact form (gfk_…6m7k)**, delivers to `goflow-receiver.onrender.com` |
+| 14:57:01 to 14:57:23 | Five attempts, every one `HTTP 429`, `retry`, answered in 112, 19, 14, 19 and 9 ms. Waits between them: 3, 4, 5 and 10 s (GoFlow's doubling backoff with jitter). Then `dead`, 5 of 5 |
+| 14:57 | Nothing in the receiver's log. It had last started at 14:14:37 (the deploy of 1c3c6df) and was asleep: the 429s came from Render in front of it, not from the receiver, which never answers 429 |
+| 15:02:00 | Opening `/healthz` in a browser woke it: `receiver listening addr=:10000` |
+| 15:03:56 | **Retry** in the dashboard (the account's session; the key was already revoked): attempt 1 `delivered`, `HTTP 200`, 58 ms. The receiver: `webhook processed webhook_id=1a39508c1c68f9367054ee433bb8bbae body_bytes=139 age=835ms` |
+
+What it shows:
+
+- **The integration works end to end.** A key that only the backend held made a job the account owns, attributed to that key; GoFlow signed the delivery and the receiver verified it. No name, email or message appeared in either log.
+- **"Received" was the right word.** The visitor was told "received" at 14:57:01 while every delivery attempt was failing. The message reached the receiver seven minutes later, and only because someone looked.
+- **A sleeping free receiver answered 429 at once, and five attempts were over in 22 seconds.** GoFlow did the right thing with a 429 (retry, then dead), but its backoff is far shorter than the time it took a person to notice and wake the receiver. A real receiver should be always on; with GoFlow as it is, a dead webhook job is recovered with **Retry**, which sends the same `webhook-id`, so a receiver that had in fact processed it would answer as a duplicate. Why Render answered 429 instead of starting the instance isn't documented in what was checked; the receiver's own log (no line at 14:57, a start at 15:02) is the evidence.
+- **Not tested live:** sending the same page twice. The backend was stopped before it, and the key can't be shown again. The same test against a real GoFlow on the laptop gave one job, the second answer `200` with `replayed=true`, and a changed text `422`.
