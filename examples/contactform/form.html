@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Contact (GoFlow example)</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<main>
+  <h1>Contact us</h1>
+  <p class="note">A GoFlow example running on this computer. Use made-up details only: what you send is stored in GoFlow.</p>
+  {{if .Error}}<p class="error" role="alert">{{.Error}}</p>{{end}}
+  {{if .Token}}
+  <form method="post" action="/send">
+    <input type="hidden" name="token" value="{{.Token}}">
+    <div class="trap" aria-hidden="true">
+      <label for="website">Leave this empty</label>
+      <input id="website" name="website" type="text" tabindex="-1" autocomplete="off">
+    </div>
+    <label for="name">Name</label>
+    <input id="name" name="name" type="text" maxlength="100" required autocomplete="off" value="{{.Name}}">
+    <label for="email">Email</label>
+    <input id="email" name="email" type="email" maxlength="254" required autocomplete="off" value="{{.Email}}">
+    <label for="message">Message</label>
+    <textarea id="message" name="message" rows="6" maxlength="2000" required>{{.Message}}</textarea>
+    <button type="submit">Send</button>
+  </form>
+  {{else}}
+  <p><a href="/">Back to the form</a></p>
+  {{end}}
+</main>
+</body>
+</html>

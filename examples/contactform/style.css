@@ -1,0 +1,86 @@
+:root {
+  color-scheme: light dark;
+  --bg: #f6f7f9;
+  --surface: #ffffff;
+  --text: #1c2026;
+  --muted: #545c66;
+  --border: #c9ced6;
+  --accent: #1f5fbf;
+  --error-bg: #fdecec;
+  --error-text: #8a1c1c;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14171c;
+    --surface: #1d2128;
+    --text: #e8ebef;
+    --muted: #a6afba;
+    --border: #3a414b;
+    --accent: #7fb0ff;
+    --error-bg: #3a1d1d;
+    --error-text: #ffb4b4;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 16px/1.5 system-ui, sans-serif;
+}
+main {
+  max-width: 34rem;
+  margin: 2rem auto;
+  padding: 1.5rem 1rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+h1 { font-size: 1.5rem; margin: 0 0 0.5rem; }
+.note { color: var(--muted); margin: 0 0 1rem; }
+.error {
+  background: var(--error-bg);
+  color: var(--error-text);
+  padding: 0.75rem;
+  border-radius: 8px;
+}
+form { display: grid; gap: 0.35rem; }
+label { font-weight: 600; margin-top: 0.6rem; }
+input, textarea {
+  width: 100%;
+  font: inherit;
+  color: inherit;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.6rem;
+}
+input:focus-visible, textarea:focus-visible, button:focus-visible, a:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+button {
+  margin-top: 1rem;
+  justify-self: start;
+  font: inherit;
+  font-weight: 600;
+  color: #fff;
+  background: #1f5fbf;
+  border: 0;
+  border-radius: 8px;
+  padding: 0.6rem 1.4rem;
+  cursor: pointer;
+}
+button:active { transform: translateY(1px); }
+a { color: var(--accent); }
+/* The honeypot: off screen for people, still in the page for bots. */
+.trap {
+  position: absolute;
+  left: -10000px;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+}
+@media (max-width: 40rem) {
+  main { margin: 0; border-radius: 0; border-left: 0; border-right: 0; min-height: 100dvh; }
+}
