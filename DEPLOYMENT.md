@@ -667,7 +667,29 @@ Migration 0014 adds `api_keys` and a nullable `jobs.api_key_id`. The code before
 
 1. `goflow-api` → **Logs**: `migrations applied versions=[14]`.
 2. The dashboard still logs in and lists jobs: every job query now reads `api_key_id`, so a page that loads proves the column is there.
-3. A key is made and used in Task 88, the live test.
+3. A key is made and used in Task 88, the live test (below).
+
+**The live key check (Task 88):** `scripts/key-check.sh` runs seven steps against the hosted API with a real key, then revokes it. It needs `curl` and `jq`.
+
+1. Dashboard → **API keys** → **Create key**: name `live test`, scope `jobs:create` only, 30 days, your password. Copy the key and leave the dialog open.
+2. In a GoFlow checkout:
+   ```bash
+   ./scripts/key-check.sh
+   ```
+   Give the account email, the password and the key at the three hidden prompts. Then close the dialog with **I've saved it**.
+3. Expect seven `PASS` lines and `all 7 steps passed`. Any `FAIL` line names the step, the status it got and the one it wanted; the key is revoked anyway (`cleanup: key ...XXXX revoked`). If `CLEANUP FAILED` appears, revoke `live test` in the dashboard at once.
+
+| Step | Request | Wanted |
+|---|---|---|
+| 1 | `GET /api/v1/keys` (session) | one active key named `live test` with the key's hint |
+| 2 | `POST /api/v1/jobs` (key) | `201`, `api_key_id` = the key's ID |
+| 3 | `GET /api/v1/jobs/{id}` (session) | `200`, same `api_key_id`: the account's job, made by this key |
+| 4 | `GET /api/v1/jobs` (key) | `403` naming `jobs:read` |
+| 5 | `GET /api/v1/auth/me` (key) | `403` `API keys can't use this route; log in instead` |
+| 6 | `DELETE /api/v1/keys/{id}` (session) | `204`, and the list says `revoked` |
+| 7 | `POST /api/v1/jobs` (the revoked key) | `401` at once |
+
+The key, the password and the session token reach curl through `/dev/fd`, never its arguments; the script refuses to run under `bash -x`, prints the key only as its 4-character hint, and logs its session out at the end. The job from step 2 stays in the account, shown with **Created by live test**.
 
 **Task 87 (the dashboard's keys view):** no migration. After the deploy, the hosted dashboard has **Jobs** and **API keys** links in its top bar.
 
